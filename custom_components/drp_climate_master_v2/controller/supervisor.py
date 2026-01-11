@@ -126,10 +126,13 @@ class ClimateSupervisor:
     async def async_start(self) -> None:
         if self._unsub_coordinator is None:
             self._unsub_coordinator = self.coordinator.async_add_listener(self._on_coordinator_update)
-        await self.coordinator.async_start_fast_loop()
+        # await self.coordinator.async_start_fast_loop()
         self._schedule_decider()
       #   _LOGGER.info("Supervisor started with hvac_mode=%s, profile=%s, target=%.1f°C",
       #                self.state.hvac_mode, self.state.profile, self.state.target_temp_c)
+
+    async def async_stop(self):
+        """..."""
 
     def _schedule_decider(self) -> None:
       """..."""

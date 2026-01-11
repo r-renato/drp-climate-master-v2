@@ -12,11 +12,10 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import (
     CONF_NAME,
     CONF_UNIQUE_ID,
-    Platform,
     UnitOfTemperature,
 )
 
-from .helpers.config_entities import async_platform_add_entities
+from .helpers.logger import log_debug, log_info
 
 from .helpers.utils import slugify
 
@@ -70,7 +69,7 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
         self._supervisor = supervisor
 
         self._attr_name = entry.options.get(CONF_NAME, DEFAULT_CLIMATE_NAME)
-        self._unique_id = self._attr_unique_id = slugify(entry.options.get( CONF_UNIQUE_ID, f"""{self._attr_name}-uid""" ))
+        self._attr_unique_id = slugify(entry.options.get( CONF_UNIQUE_ID, f"""{self._attr_name}-uid""" ))
 
         self._preset_mode = HVACOperatingProfile.COMFORT
         self.map_on_hvac_mode = self._attr_hvac_mode = HVACMode.AUTO
@@ -79,8 +78,15 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
         self._attr_min_temp = 16.0
         self._attr_max_temp = 26.0
         # self._attr_temperature_unit = self.hass.config.units.temperature_unit
-
-        _LOGGER.info("%s: component initialized (%s).", DOMAIN, self._unique_id)
+        # log_debug(_LOGGER, "xyz %s", entry.data)
+        # log_debug(_LOGGER, "xyz %s", entry.options)
+        log_info(
+            _LOGGER,
+            "Initialized (id=%s) entry=%s source=%s",
+            hex(id(self)),
+            entry.entry_id,
+            entry.source,
+        )
 
     @property
     def hvac_mode(self) -> HVACMode:

@@ -64,6 +64,7 @@ PLATFORMS = [Platform.SENSOR, Platform.CLIMATE]  # aggiungi Platform.SENSOR/NUMB
 
 COORDINATOR: Final = "coordinator"
 SUPERVISOR: Final = "supervisor"
+WEATHER_COORDINATOR: Final = "weather_coordinator"
 
 # ======================================================
 # Default
@@ -73,9 +74,11 @@ DEFAULT_CLIMATE_NAME: Final[str] = "(DRP) Home Master"
 DEFAULT_TEMP_UNIT: Final[str] = "°C"
 DEFAULT_UNITS: Final[str] = "si"  # "metric" | "imperial"
 
-OPT_UPDATE_INTERVAL_S: Final[int] = 60
+OPT_UPDATE_INTERVAL_S: Final[int] = 90
+OPT_UPDATE_MIN_INTERVAL_S: Final[int] = 60
 
 ENTITIES_STATE: Final[str] = "entities_state"
+SEASON_STATE: Final[str] = "season_state"
 
 # ======================================================
 # Coordinator
@@ -94,8 +97,8 @@ CONF_DEVICES: Final[str] = "devices"
 CONF_WEATHER: Final[str] = "weather"
 CONF_SCENARIOS: Final[str] = "scenarios"
 CONF_HOME_WINDOWS_STATE: Final[str] = "home_windows_state"
-CONF_APT_WINDOWS: Final[str] = "apt_windows"
-CONF_STATE: Final[str] = "state"
+CONF_WINDOWS: Final[str] = "windows"
+CONF_CLOSED_STATE: Final[str] = "closed_state"
 CONF_CONFORT_ZONES: Final[str] = "confort_zones"
 CONF_TEMP_MIN: Final[str] = "temp_min"
 CONF_TEMP_MAX: Final[str] = "temp_max"

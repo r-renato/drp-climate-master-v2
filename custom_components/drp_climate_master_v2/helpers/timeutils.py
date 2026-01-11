@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, time, timedelta, timezone, tzinfo
+from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from zoneinfo import ZoneInfo
-from typing import Iterable, Optional, Tuple
+from typing import Any, Iterable, Optional, Tuple
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
@@ -53,17 +53,55 @@ def ensure_tz(dt: datetime, tz: tzinfo) -> datetime:
         return dt.replace(tzinfo=tz)
     return dt.astimezone(tz)
 
-
 def to_utc(dt: datetime) -> datetime:
     """Converte (o marca) dt in UTC."""
     return ensure_tz(dt, UTC).astimezone(UTC)
-
 
 def to_tz(dt: datetime, tz: tzinfo | str) -> datetime:
     """Converte dt in una timezone (accetta tzinfo o stringa IANA)."""
     tzinfo = ZoneInfo(tz) if isinstance(tz, str) else tz
     return ensure_tz(dt, tzinfo)
 
+def to_local_date(d: Optional[date | datetime]) -> Optional[date]:
+    """Converte un input date/datetime in date.
+
+    Non applica conversioni di timezone: in HA, passa un datetime già in timezone HA.
+    - date -> date
+    - datetime -> datetime.date()
+    - None -> None
+    """
+    if d is None:
+        return None
+    if isinstance(d, datetime):
+        return d.date()
+    return d
+    
+def as_iso_local(dt_like: Any) -> Optional[str]:
+    """
+    Converte un input (str/datetime) in ISO 8601 **locale** (stringa) per il campo Forecast['datetime'].
+    - Se è str: prova a parse con HA (gestisce anche timezone); se è data-only (YYYY-MM-DD) crea mezzanotte locale.
+    - Se è datetime: lo porta in timezone locale e lo serializza ISO.
+    """
+    if isinstance(dt_like, datetime):
+        return dt_util.as_local(dt_like).isoformat()
+
+    # attenzione: datetime è anche un date, quindi questo va dopo il check datetime
+    if isinstance(dt_like, date):
+        return dt_util.start_of_local_day(dt_like).isoformat()
+
+    if isinstance(dt_like, str):
+        dt = dt_util.parse_datetime(dt_like)
+        if dt is not None:
+            return dt_util.as_local(dt).isoformat()
+
+        # formato data "YYYY-MM-DD"
+        try:
+            y, m, d = map(int, dt_like.split("-"))
+            return dt_util.start_of_local_day(date(y, m, d)).isoformat()
+        except Exception:
+            return None
+
+    return None
 
 # ────────────────────────────── Rounding & ticks ──────────────────────────────
 

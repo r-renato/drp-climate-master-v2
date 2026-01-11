@@ -3,7 +3,7 @@
         "step": {
             "init": {
                 "title": "Climate Master (DRP) options",
-                "description": "Choose which section of the configuration you want to edit.",
+                "description": "Choose which section of the configuration you want to view.",
                 "menu_options": {
                     "dynamic": "Dynamic parameters",
                     "areas": "Areas",
@@ -17,7 +17,7 @@
             },
             "dynamic": {
                 "title": "Dynamic parameters",
-                "description": "Update the runtime behaviour, supported features and comfort temperature ranges."
+                "description": "Review runtime behaviour, supported features and comfort ranges."
             },
             "areas": {
                 "title": "Areas",
@@ -25,27 +25,27 @@
             },
             "radiant": {
                 "title": "Radiant devices",
-                "description": "Edit the radiant system mapping and related entities."
+                "description": "Review the radiant system mapping and related entities."
             },
             "supply_units": {
                 "title": "Supply units",
-                "description": "Manage supply units and ventilation devices associated with each area."
+                "description": "Review supply units and related sensors/actuators."
             },
             "vmc": {
                 "title": "VMC",
-                "description": "Configure the mechanical ventilation controllers."
+                "description": "Review the mechanical ventilation controllers configuration."
             },
             "weather": {
                 "title": "Weather",
-                "description": "Change the forecast and historical weather providers and coordinates."
+                "description": "Review forecast and historical weather providers and coordinates."
             },
             "historical_data": {
                 "title": "Historical data",
-                "description": "Adjust historical weather provider credentials and coordinates."
+                "description": "Review external historical sources configuration (e.g. InfluxDB)."
             },
             "advanced": {
                 "title": "Other devices and scenarios",
-                "description": "Edit fallback device blocks and special scenarios (vacation, nobody's in)."
+                "description": "Review extra device blocks and special scenarios (vacation, nobody's in)."
             }
         }
     }

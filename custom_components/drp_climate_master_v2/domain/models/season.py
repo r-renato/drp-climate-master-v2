@@ -1,132 +1,265 @@
-#
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from typing import Dict, Mapping
+from dataclasses import dataclass, replace
+from datetime import date
+from typing import Dict, List, Literal, Optional, Tuple
 
 from ..enums import Seasons
 
-# ---- SeasonState model ----------------------------------------------
+# -----------------------------------------------------------------------------
+# Types
+# -----------------------------------------------------------------------------
+
+RegimeHint = Literal["cold", "mild", "hot"]
+
+# -----------------------------------------------------------------------------
+# Core models
+# -----------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class SeasonWindow:
+    """A closed (inclusive) calendar window for a season.
+
+    Invariants:
+      - start <= end
+    """
+
+    season: Seasons
+    start: date  # inclusive
+    end: date  # inclusive
+
+    def __post_init__(self) -> None:
+        if self.start > self.end:
+            raise ValueError("SeasonWindow.start must be <= SeasonWindow.end")
+
+    @property
+    def days(self) -> int:
+        """Length of the window in days (inclusive)."""
+        # Inclusive window => +1
+        return (self.end - self.start).days + 1
+
+    def contains(self, d: date) -> bool:
+        return self.start <= d <= self.end
+
+@dataclass(frozen=True, slots=True)
+class WeatherDaySignals:
+    d: date
+
+    t_mean: float
+    t_low: Optional[float]
+    dew: Optional[float]
+    wind: Optional[float]
+    cloud: Optional[float]
+
+    # engineered
+    t_smooth: Optional[float]
+    dew_smooth: Optional[float]
+    trend: Optional[float]
+    
+@dataclass(frozen=True, slots=True)
+class WeatherSeason:
+    """Weather-based seasonal classification and diagnostics.
+
+    Notes:
+      - `anomaly_score` is expected to be >= 0.
+      - `anomaly` is a boolean diagnostic flag; if you want strict consistency
+        between calendar season and weather season, compute it in SeasonState.
+    """
+
+    season: Seasons
+    anomaly: bool
+    anomaly_score: float  # >= 0
+    reason: str
+    regime_hint: RegimeHint  # cold|mild|hot
+
+    weather_day_signals: WeatherDaySignals
+
+    windows: Optional[List[Tuple[date, date, Seasons]]] = None
+
+    def __post_init__(self) -> None:
+        if self.anomaly_score < 0:
+            raise ValueError("WeatherSeason.weather_anomaly_score must be >= 0")
+
+    def replace_windows(self, windows: List[Tuple[date, date, Seasons]]) -> WeatherSeason:
+        return replace(self, windows=windows)
+
 @dataclass(frozen=True, slots=True)
 class SeasonState:
+    """Immutable snapshot of the current seasonal status.
+
+    This revision removes multiple-inheritance between slotted dataclasses
+    (which can raise: `TypeError: multiple bases have instance lay-out conflict`).
+
+    Design:
+      - Composition (`window` + `weather`) to keep the model stable.
+      - An explicit `as_of` date defines what `passed`/`remaining` refer to.
+      - `days`, `passed`, `remaining`, `progress` are derived (no redundancy).
+
+    Semantics (inclusive window):
+      - passed = number of day-boundaries from start to as_of (clamped).
+        * start day  -> passed = 0
+        * end day    -> passed = days-1
+      - remaining = number of day-boundaries from as_of to end (clamped).
+        * start day  -> remaining = days-1
+        * end day    -> remaining = 0
+      - If as_of is within [start, end], then passed + remaining == days - 1.
+
+    Backward compatibility:
+      - Properties expose the previous flat attribute API:
+        season/start/end and weather_* fields.
+      - `copy()` is kept.
     """
-    Snapshot of seasonal status and forecast‑aware override.
-    - Frozen + slots dataclass (immutable, lightweight)
-    - Invariants validation in `__post_init__`
-    - Convenience properties (`progress`) and helpers (`with_override`, `to_dict`)
-    - Backward‑compatible `copy()` method
-    - Friendly `__str__` with optional score/probability table
 
-    `season_probabilities` are expected in percentage (0..100), as in v1.
-    """
+    window: SeasonWindow
+    weather: WeatherSeason
+    as_of: date
 
-    # Baseline (calendar) season season
-    season: Seasons
+    detect_model: str
 
-    # Season span metrics (inclusive window)
-    days: int
-    passed: int
-    remaining: int
+    def __post_init__(self) -> None:
+        # No strict requirement that as_of is inside the window:
+        # we clamp derived metrics to keep the state usable.
+        # But we *do* enforce that the window itself is sane.
+        if self.window.days < 1:
+            raise ValueError("SeasonState.window.days must be >= 1")
 
-    # Selected season after forecast inference (may equal season)
-    overridden: Seasons
-    weather_anomaly: bool
+    # -------------------------------------------------------------------------
+    # Backward-compatible flat accessors (calendar)
+    # -------------------------------------------------------------------------
 
-    # Diagnostics
-    season_scores: Dict[Seasons, float] = field(default_factory=dict)
-    season_probabilities: Dict[Seasons, float] = field(default_factory=dict)  # percentage 0..100
+    @property
+    def season(self) -> Seasons:
+        return self.window.season
 
-    # ---- validation ----------------------------------------------------------
-    def __post_init__(self) -> None:  # type: ignore[override]
-        if self.days < 1:
-            raise ValueError("SeasonState.days must be >= 1")
-        if self.passed < 0 or self.remaining < 0:
-            raise ValueError("SeasonState.passed/remaining must be >= 0")
-        # With inclusive window: passed + remaining == days - 1 (normally)
-        if (self.passed + self.remaining) > (self.days - 1):
-            raise ValueError("SeasonState: passed + remaining cannot exceed days - 1")
+    @property
+    def start(self) -> date:
+        return self.window.start
 
-        # Probability sanity (0..100)
-        for p in self.season_probabilities.values():
-            if p < 0.0 or p > 100.0:
-                raise ValueError("SeasonState: probabilities must be in [0, 100]")
+    @property
+    def end(self) -> date:
+        return self.window.end
 
-    # ---- computed props ------------------------------------------------------
+    # -------------------------------------------------------------------------
+    # Derived span metrics
+    # -------------------------------------------------------------------------
+
+    @property
+    def days(self) -> int:
+        return self.window.days
+
+    @property
+    def passed(self) -> int:
+        """Days passed since `start` as of `as_of` (clamped)."""
+        if self.days <= 1:
+            return 0
+        raw = (self.as_of - self.start).days
+        return max(0, min(self.days - 1, raw))
+
+    @property
+    def remaining(self) -> int:
+        """Days remaining until `end` as of `as_of` (clamped)."""
+        if self.days <= 1:
+            return 0
+        raw = (self.end - self.as_of).days
+        return max(0, min(self.days - 1, raw))
+
     @property
     def progress(self) -> float:
-        """Return seasonal progress in [0, 1].
+        """Seasonal progress in [0, 1]."""
+        if self.days <= 1:
+            return 1.0
+        return round(self.passed / (self.days - 1) * 100, 2)
 
-        Uses: passed / (passed + remaining) with inclusive bounds.
-        """
-        denom = self.passed + self.remaining
-        if denom <= 0:
-            return 0.0
-        return round(self.passed / denom, 4)
+    # -------------------------------------------------------------------------
+    # Backward-compatible flat accessors (weather)
+    # -------------------------------------------------------------------------
 
-    # ---- helpers -------------------------------------------------------------
-    def with_override(
-        self,
-        *,
-        season: Seasons,
-        scores: Mapping[Seasons, float] | None = None,
-        probabilities: Mapping[Seasons, float] | None = None,
-        anomaly: bool | None = None,
-    ) -> "SeasonState":
-        """Return a new SeasonState with a different override and diagnostics."""
-        return replace(
-            self,
-            overridden=season,
-            weather_anomaly=(self.season != season) if anomaly is None else anomaly,
-            season_scores=dict(scores) if scores is not None else self.season_scores,
-            season_probabilities=dict(probabilities) if probabilities is not None else self.season_probabilities,
-        )
+    @property
+    def weather_season(self) -> Seasons:
+        return self.weather.season
+
+    @property
+    def weather_anomaly(self) -> bool:
+        return self.weather.anomaly
+
+    @property
+    def weather_anomaly_score(self) -> float:
+        return self.weather.anomaly_score
+
+    @property
+    def weather_reason(self) -> str:
+        return self.weather.reason
+
+    @property
+    def weather_regime_hint(self) -> RegimeHint:
+        return self.weather.regime_hint
+
+    @property
+    def weather_detect_model(self) -> str:
+        return self.detect_model if self.detect_model is not None else "unknown"
+
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
 
     def copy(self) -> "SeasonState":
-        """Backward-compatible copy (object is already immutable)."""
+        """Backward-compatible copy (object is immutable)."""
         return replace(self)
 
+    def with_updates(
+        self,
+        *,
+        window: SeasonWindow | None = None,
+        weather: WeatherSeason | None = None,
+        as_of: date | None = None,
+    ) -> "SeasonState":
+        """Return a new instance with selected fields replaced."""
+        return replace(
+            self,
+            window=self.window if window is None else window,
+            weather=self.weather if weather is None else weather,
+            as_of=self.as_of if as_of is None else as_of,
+        )
+
     def to_dict(self) -> Dict[str, object]:
-        """Serialize to a plain dict with enum values for JSON/logging."""
+        """Serialize to a plain dict suitable for JSON/logging."""
         return {
-            "label": self.season.value,
+            # calendar
+            "season": self.season.value,
+            "season_start": self.start.isoformat(),
+            "season_end": self.end.isoformat(),
+            "as_of": self.as_of.isoformat(),
             "days": self.days,
             "passed": self.passed,
             "remaining": self.remaining,
-            "overridden": self.overridden.value,
-            "weather_anomaly": self.weather_anomaly,
-            "season_scores": {k.value: v for k, v in self.season_scores.items()},
-            "season_probabilities": {k.value: v for k, v in self.season_probabilities.items()},
             "progress": self.progress,
+            # weather
+            "weather_season": self.weather_season.value,
+            "weather_anomaly": self.weather_anomaly,
+            "weather_anomaly_score": self.weather_anomaly_score,
+            "weather_reason": self.weather_reason,
+            "weather_regime_hint": self.weather_regime_hint,
+            "weather_detect_model": self.weather_detect_model,
         }
 
     def __str__(self) -> str:  # pragma: no cover
-        lines = [
-            f"Season label       :: {self.season.value}",
-            f"Total days         :: {self.days}",
-            f"Days passed        :: {self.passed}",
-            f"Days remaining     :: {self.remaining}",
-            f"Selected override  :: {self.overridden.value}",
-            f"Weather anomaly    :: {self.weather_anomaly}",
-        ]
-
-        if self.season_scores or self.season_probabilities:
-            lines.append("-" * 67)
-            lines.append("Season Scores & Probabilities:")
-            lines.append(f"{'Season':<10} {'Score':>10} {'Probability':>14}")
-
-            # Order by probability desc (fallback to score)
-            seasons = set(self.season_scores) | set(self.season_probabilities)
-            ordered = sorted(
-                seasons,
-                key=lambda s: (
-                    self.season_probabilities.get(s, 0.0),
-                    self.season_scores.get(s, 0.0),
-                ),
-                reverse=True,
-            )
-            for s in ordered:
-                score = self.season_scores.get(s, 0.0)
-                prob = self.season_probabilities.get(s, 0.0)
-                lines.append(f"{s.value:<10} {score:>10.3f} {prob:>13.1f}%")
-
-        return "\n".join(lines)
+        return "\n".join(
+            [
+                f"",
+                f"Season             :: {self.season.value}",
+                f"Window             :: {self.start.isoformat()} -> {self.end.isoformat()} (inclusive)",
+                f"As of              :: {self.as_of.isoformat()}",
+                f"Total days         :: {self.days}",
+                f"Days passed        :: {self.passed}",
+                f"Days remaining     :: {self.remaining}",
+                f"Progress           :: {self.progress:.4f}",
+                "-" * 60,
+                f"Weather season     :: {self.weather_season.value}",
+                f"Weather anomaly    :: {self.weather_anomaly}",
+                f"Anomaly score      :: {self.weather_anomaly_score:.3f}",
+                f"Weather reason     :: {self.weather_reason}",
+                f"Regime hint        :: {self.weather_regime_hint}",
+                f"Weather signals    :: {self.weather.weather_day_signals}",
+                f"Detect model       :: {self.weather_detect_model}",
+            ]
+        )

@@ -1,12 +1,12 @@
 #
 from __future__ import annotations
 
+from typing import TypeVar, Type, Any, Literal, Callable
 from dataclasses import is_dataclass, fields as dc_fields, MISSING
 from inspect import Parameter, signature
 import math
 import re
 from decimal import Decimal
-from typing import TypeVar, Type, Any, Literal
 
 from homeassistant.core import State as HAState
 from homeassistant.const import STATE_UNKNOWN, STATE_UNAVAILABLE
@@ -222,7 +222,46 @@ def as_int(
     x = _clamp(x, min_value, max_value)
     return x
 
+def as_list(value: Any) -> list[Any]:
+    """Normalize YAML section to a list."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    # Allow single dict to be treated as one-item list
+    if isinstance(value, dict):
+        return [value]
+    return []
+
 def slugify(text: str) -> str:
+    """
+    Converte una stringa in uno *slug* semplice e sicuro per identificatori/URL.
+
+    Regole:
+    - Converte tutto in minuscolo.
+    - Mantiene solo caratteri alfanumerici (Unicode) tramite `str.isalnum()`.
+      (Esempio: lettere accentate come "à" vengono mantenute.)
+    - Sostituisce spazio, trattino `-` e underscore `_` con un underscore `_`.
+    - Rimuove eventuali underscore iniziali/finali.
+
+    Nota: non effettua normalizzazione ASCII né il collasso di underscore consecutivi.
+
+    Args:
+        text: La stringa di input.
+
+    Returns:
+        Uno slug derivato da `text`.
+
+    Esempi:
+        >>> slugify("Hello, World!")
+        'hello_world'
+        >>> slugify("  già-pronto  ")
+        'già_pronto'
+        >>> slugify("A__B  C-D")
+        'a__b__c_d'
+        >>> slugify("__titolo__")
+        'titolo'
+    """
     out = []
     for ch in text.lower():
         if ch.isalnum():
@@ -231,9 +270,6 @@ def slugify(text: str) -> str:
             out.append("_")
     slug = "".join(out).strip("_")
     return slug
-
-from typing import Any, Callable
-from decimal import Decimal
 
 def computed_float_or_none(
     value_or_fn: Any | Callable[[], Any],

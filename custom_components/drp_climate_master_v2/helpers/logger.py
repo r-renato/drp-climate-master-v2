@@ -20,6 +20,8 @@ class PrefixedLogger:
         "log_debug",
         "log_info",
         "log_warning",
+        "log_error",      
+        "log_exception", 
         "_qualname_from_frame",
         "caller_qualname_auto",
     }
@@ -120,6 +122,39 @@ class PrefixedLogger:
             logger.warning(prefix + msg, *args, **kwargs)
 
     @staticmethod
+    def log_error(logger: logging.Logger, msg: str, *args, **kwargs) -> None:
+        """
+        Log ERROR con prefisso del chiamante reale e stacklevel corretto.
+        Supporta exc_info=True per stampare lo stacktrace.
+        Uso: PrefixedLogger.log_error(_LOGGER, "Boom: %s", err, exc_info=True)
+        """
+        if not logger.isEnabledFor(logging.ERROR):
+            return
+
+        prefix = f"[{PrefixedLogger.caller_qualname_auto()}] "
+        stacklevel = kwargs.pop("stacklevel", 2)
+        try:
+            logger.error(prefix + msg, *args, stacklevel=stacklevel, **kwargs)
+        except TypeError:
+            logger.error(prefix + msg, *args, **kwargs)
+
+    @staticmethod
+    def log_exception(logger: logging.Logger, msg: str, *args, **kwargs) -> None:
+        """
+        Log EXCEPTION (level ERROR) con stacktrace automatico.
+        Da usare dentro un except.
+        """
+        if not logger.isEnabledFor(logging.ERROR):
+            return
+
+        prefix = f"[{PrefixedLogger.caller_qualname_auto()}] "
+        stacklevel = kwargs.pop("stacklevel", 2)
+        try:
+            logger.exception(prefix + msg, *args, stacklevel=stacklevel, **kwargs)
+        except TypeError:
+            logger.exception(prefix + msg, *args, **kwargs)
+
+    @staticmethod
     def exc_one_line(e: BaseException) -> str:
         """Rappresentazione in una riga di un'eccezione con file:line del punto di lancio."""
         tb = e.__traceback__
@@ -139,6 +174,12 @@ def log_info(logger: logging.Logger, msg: str, *args, **kwargs) -> None:
 
 def log_warning(logger: logging.Logger, msg: str, *args, **kwargs) -> None:
     PrefixedLogger.log_warning(logger, msg, *args, **kwargs)
+
+def log_error(logger: logging.Logger, msg: str, *args, **kwargs) -> None:
+    PrefixedLogger.log_error(logger, msg, *args, **kwargs)
+
+def log_exception(logger: logging.Logger, msg: str, *args, **kwargs) -> None:
+    PrefixedLogger.log_exception(logger, msg, *args, **kwargs)
 
 def exc_one_line(e: BaseException) -> str:
     return PrefixedLogger.exc_one_line(e)

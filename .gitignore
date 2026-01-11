@@ -10,4 +10,6 @@ custom_components/hacs
 x_*
 .haconfig
 backup*
+archive
 aigen
+influx

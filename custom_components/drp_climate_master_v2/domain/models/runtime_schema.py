@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Optional, List
 
+from homeassistant.util.unit_system import UnitSystem
+
 # ---- Aree ---------------------------------------------------------------
 @dataclass(frozen=False, slots=True)
 class SensorPair:
@@ -149,8 +151,8 @@ class ScenariosConfig:
     nobodysin: str
 
 @dataclass(frozen=True)
-class AptWindowsConfig:
-    state: str
+class WindowsConfig:
+    closed_state: str
 
 @dataclass(frozen=True, slots=True)
 class ForecastDataConfig:
@@ -164,6 +166,13 @@ class HistoricalDataConfig:
     latitude: float
     longitude: float
 
+@dataclass(frozen=True, slots=True)
+class InfluxdbHistoricalDataConfig:
+    organization: str
+    bucket: str
+    token: str
+    url: str
+
 @dataclass(frozen=True)
 class WeatherConfig:
     forecast_data: ForecastDataConfig
@@ -176,11 +185,12 @@ class ClimateConfig:
     units: str
     areas: List[AreaConfig]
     devices: DevicesConfig
-    apt_windows: Optional[AptWindowsConfig]
+    windows: Optional[WindowsConfig]
     weather: WeatherConfig
+    historical_data: InfluxdbHistoricalDataConfig
     scenarios: ScenariosConfig
-    temperature_unit: str
     mean_apt: SensorPair
+    unit_system: UnitSystem
 
 # ======================================================
 # Runtime

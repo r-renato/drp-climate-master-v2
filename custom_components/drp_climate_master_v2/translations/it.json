@@ -3,49 +3,49 @@
         "step": {
             "init": {
                 "title": "Opzioni Climate Master (DRP)",
-                "description": "Scegli quale sezione della configurazione vuoi modificare.",
+                "description": "Scegli quale sezione della configurazione vuoi visualizzare.",
                 "menu_options": {
-                    "dynamic": "Dynamic parameters",
-                    "areas": "Areas",
-                    "radiant": "Radiant devices",
-                    "supply_units": "Supply units",
+                    "dynamic": "Parametri dinamici",
+                    "areas": "Aree",
+                    "radiant": "Impianto radiante",
+                    "supply_units": "Unità di mandata",
                     "vmc": "VMC",
-                    "weather": "Weather",
-                    "historical_data": "Historical data",
-                    "advanced": "Other devices and scenarios"
+                    "weather": "Meteo",
+                    "historical_data": "Dati storici",
+                    "advanced": "Altri dispositivi e scenari"
                 }
             },
             "dynamic": {
                 "title": "Parametri dinamici",
-                "description": "Aggiorna il comportamento runtime, le funzioni supportate e le fasce di comfort."
+                "description": "Rivedi comportamento runtime, funzioni supportate e fasce di comfort."
             },
             "areas": {
                 "title": "Aree",
-                "description": "Rivedi gli ambienti e i relativi sensori di temperatura e umidità."
+                "description": "Rivedi ambienti e relativi sensori di temperatura e umidità."
             },
             "radiant": {
-                "title": "Impianti radianti",
-                "description": "Modifica la mappatura dell'impianto radiante e le entità collegate."
+                "title": "Impianto radiante",
+                "description": "Rivedi la mappatura dell’impianto radiante e le entità collegate."
             },
             "supply_units": {
                 "title": "Unità di mandata",
-                "description": "Gestisci le unità di mandata e i dispositivi di ventilazione associati alle aree."
+                "description": "Rivedi le unità di mandata e i sensori/attuatori associati."
             },
             "vmc": {
                 "title": "VMC",
-                "description": "Configura i controllori della ventilazione meccanica controllata."
+                "description": "Rivedi la configurazione dei controllori della ventilazione meccanica controllata."
             },
             "weather": {
                 "title": "Meteo",
-                "description": "Modifica i provider meteo previsionali e storici e le relative coordinate."
+                "description": "Rivedi provider meteo previsionali/storici e relative coordinate."
             },
             "historical_data": {
                 "title": "Dati storici",
-                "description": "Aggiorna credenziali e coordinate del provider meteo storico."
+                "description": "Rivedi la configurazione delle sorgenti storiche esterne (es. InfluxDB)."
             },
             "advanced": {
                 "title": "Altri dispositivi e scenari",
-                "description": "Gestisci i blocchi devices residui e gli scenari speciali (vacanza, nessuno in casa)."
+                "description": "Rivedi blocchi devices extra e scenari speciali (vacanza, nessuno in casa)."
             }
         }
     }

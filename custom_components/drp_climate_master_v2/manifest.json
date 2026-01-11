@@ -12,9 +12,7 @@
   "requirements": [
     "psychroLib==2.5.0",
     "holidays",
-    "simple-pid",
-    "pandas==2.2.3",
-    "influxdb-client==1.24.0"
+    "simple-pid"
   ],
   "r": "pythermalcomfort==2.5.4",
   "rr": "cmake==3.16.8",

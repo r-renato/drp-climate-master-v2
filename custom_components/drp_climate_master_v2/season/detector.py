@@ -165,10 +165,6 @@ class CalendarSeason:
             Seasons.SPRING: spring,
         }
 
-
-
-
-
 class WeatherSeason:
     """
     Rilevamento stagione basato su:

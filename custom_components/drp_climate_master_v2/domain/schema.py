@@ -6,7 +6,6 @@ import homeassistant.helpers.config_validation as cv
 
 from homeassistant.const import (
     CONF_NAME,
-    CONF_FRIENDLY_NAME,
     CONF_SENSORS,
     CONF_UNIQUE_ID,
     CONF_TEMPERATURE_UNIT,
@@ -63,8 +62,6 @@ from ..const import (
     CONF_LATITUDE,
     CONF_LONGITUDE,
     CONF_LOW_WATER_TEMP,
-    CONF_MAX_TEMP,
-    CONF_MIN_TEMP,
     CONF_MODE,
     CONF_MQ,
     CONF_NOBODYSIN,
@@ -78,12 +75,11 @@ from ..const import (
     CONF_RADIANT,
     CONF_REQUESTS,
     CONF_SCENARIOS,
-    CONF_APT_WINDOWS,
+    CONF_WINDOWS,
     CONF_SEASON,
     CONF_SPARE_SETPOINT,
     CONF_SPRING,
-    CONF_STEP,
-    CONF_STATE,
+    CONF_CLOSED_STATE,
     CONF_CONFORT_ZONES,
     CONF_SUMMER,
     CONF_SUPPLY_UNITS,
@@ -112,7 +108,6 @@ from ..const import (
     CONF_WATER_ONLY,
     CONF_WEATHER,
     CONF_WINTER,
-    DEFAULT_CLIMATE_NAME,
     DEFAULT_INFLUXDB_URL,
     DEFAULT_TEMP_UNIT,
     DEFAULT_UNITS,
@@ -277,9 +272,9 @@ DEVICES_SCHEMA = vol.Schema(
     }
 )
 
-APT_WINDOWS_SCHEMA = vol.Schema(
+WINDOWS_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_STATE): cv.entity_id,
+        vol.Required(CONF_CLOSED_STATE): cv.entity_id,
     },
     extra=vol.ALLOW_EXTRA,
 )
@@ -341,7 +336,7 @@ HISTORICAL_DATA_SCHEMA = vol.Schema(
 BASE_CLIMATE_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_NAME): cv.string,
-        vol.Optional(CONF_FRIENDLY_NAME): cv.string,
+        # vol.Optional(CONF_FRIENDLY_NAME): cv.string,
         vol.Optional(CONF_UNIQUE_ID): cv.string,
 
         # vol.Optional(CONF_MAX_TEMP, default=35): vol.Coerce(float),
@@ -355,7 +350,7 @@ BASE_CLIMATE_SCHEMA = vol.Schema(
         ),
         vol.Optional(CONF_DEVICES): vol.All(DEVICES_SCHEMA),
 
-        vol.Optional(CONF_APT_WINDOWS): vol.All(APT_WINDOWS_SCHEMA),
+        vol.Optional(CONF_WINDOWS): vol.All(WINDOWS_SCHEMA),
         vol.Optional(CONF_CONFORT_ZONES): vol.All(CONFORT_ZONES_SCHEMA),
 
         # vol.Required(CONF_HOME_WINDOWS_STATE): cv.entity_id,
@@ -373,7 +368,7 @@ BASE_CLIMATE_SCHEMA = vol.Schema(
 
 CLIMATE_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_NAME, default=DEFAULT_CLIMATE_NAME): cv.string,
+        # vol.Required(CONF_NAME, default=DEFAULT_CLIMATE_NAME): cv.string,
         vol.Required(CONF_CLIMATE): vol.All(
             cv.ensure_list, [vol.All(BASE_CLIMATE_SCHEMA)]
         ),
@@ -382,15 +377,7 @@ CLIMATE_SCHEMA = vol.Schema(
 
 CONFIG_SCHEMA = vol.Schema(
     {
-        DOMAIN: vol.All(
-            cv.ensure_list,
-            # scan_interval_validator,
-            # duplicate_entity_validator,
-            # duplicate_modbus_validator,
-            [
-                vol.Any(CLIMATE_SCHEMA),
-            ],
-        ),
+        DOMAIN: CLIMATE_SCHEMA,   # <-- qui NON è una lista
     },
     extra=vol.ALLOW_EXTRA,
 )

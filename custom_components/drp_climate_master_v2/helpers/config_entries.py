@@ -6,18 +6,16 @@ from dataclasses import is_dataclass, fields
 from datetime import timedelta
 from typing import Any, Mapping, Callable, Iterable, Optional, Union, List
 
-from homeassistant.core import HomeAssistant, Event, CALLBACK_TYPE, callback, EventStateChangedData
+from homeassistant.core import HomeAssistant, Event, CALLBACK_TYPE, EventStateChangedData
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.util.unit_system import get_unit_system
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.const import (
-    CONF_NAME,
-    CONF_FRIENDLY_NAME,
     CONF_SENSORS,
-    CONF_UNIQUE_ID,
-    CONF_TEMPERATURE_UNIT,
 )
 
-from custom_components.drp_climate_master_v2.helpers.logger import log_info
+from ..helpers.logger import log_info
 
 from ..helpers.utils import as_int
 from ..domain.models.runtime_schema import (
@@ -28,7 +26,8 @@ from ..domain.models.runtime_schema import (
     DevicesConfig,
     ForecastDataConfig,
     HistoricalDataConfig,
-    AptWindowsConfig,
+    InfluxdbHistoricalDataConfig,
+    WindowsConfig,
     ModeConfig,
     PlantCapabilities,
     RadiantConfig,
@@ -51,7 +50,7 @@ from ..const import (
     CONF_ALARMS,
     CONF_AREA,
     CONF_AREAS,
-    CONF_CLIMATE,
+    CONF_BUCKET,
     CONF_COMPRESSOR_MANAGEMENT,
     CONF_COOLING_DT_SETPOINT,
     CONF_COOLING_MANAGEMENT,
@@ -70,10 +69,12 @@ from ..const import (
     CONF_HEATING_T_SETPOINT,
     CONF_HISTORICAL_DATA,
     CONF_INDOOR,
+    CONF_INFLUXDB,
     CONF_LATITUDE,
     CONF_LONGITUDE,
     CONF_MODE,
     CONF_MQ,
+    CONF_ORGANIZATION,
     CONF_POWER,
     CONF_PROVIDER,
     CONF_RADIANT,
@@ -81,21 +82,22 @@ from ..const import (
     CONF_SCENARIOS,
     CONF_SEASON,
     CONF_SPARE_SETPOINT,
-    CONF_APT_WINDOWS,
+    CONF_WINDOWS,
     CONF_SUPPLY_UNITS,
     CONF_T_SETPOINT,
     CONF_TCOLLECTOR,
     CONF_THREE_POINT_MIXING_VALVE,
     CONF_TOKEN,
     CONF_UNITS,
-    CONF_STATE,
+    CONF_CLOSED_STATE,
     CONF_HOME_WINDOWS_STATE,
     CONF_VENT_RECIRCULATION,
     CONF_VMC,
     CONF_WEATHER,
-    DEFAULT_TEMP_UNIT,
+    DEFAULT_INFLUXDB_URL,
     DEFAULT_UNITS,
     OPT_UPDATE_INTERVAL_S,
+    OPT_UPDATE_MIN_INTERVAL_S,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -200,30 +202,37 @@ def _infer_capabilities_from_devices(options: Mapping[str, Any]) -> tuple[bool, 
     return supports_heating, supports_cooling, supports_dehumidifying, supports_ventilation
 
 def build_runtime_config(entry: ConfigEntry) -> RuntimeConfig:
-    climate_cfg: Mapping[str, Any] = entry.options or {}
-    # _LOGGER.debug("build_runtime_config (entry.data) %s", entry.data)
-    # _LOGGER.debug("build_runtime_config (entry.options) %s", entry.options)
+    # --- Merge config: prefer options over data (options = overrides) ---
+    data = dict(entry.data) if isinstance(entry.data, Mapping) else {}
+    opts = dict(entry.options) if isinstance(entry.options, Mapping) else {}
 
-    # update_s = _as_int(opts.get(OPT_UPDATE_INTERVAL_S, 30), 30)
-    update_interval = timedelta(seconds=max(30, as_int(OPT_UPDATE_INTERVAL_S, 30, min_value=30, max_value=300) or 30))
-    
-    supports_heating,\
-    supports_cooling,\
-    supports_dehumidifying,\
-    supports_ventilation = _infer_capabilities_from_devices(climate_cfg)
-    # supports_heating = _as_bool(opts.get(OPT_SUPPORTS_HEATING, ih), ih)
-    # supports_cooling = _as_bool(opts.get(OPT_SUPPORTS_COOLING, ic), ic)
-    # supports_dehumidifying = _as_bool(
-    #     opts.get(OPT_SUPPORTS_DEHUMIDIFYING, idh), idh
-    # )
-    # step = opts.get(OPT_SETPOINT_STEP_C) or opts.get(CONF_STEP)
-    # setpoint_step_c = _as_float(step, 0.5)
-    # manual_override_minutes = _as_int(
-    #     opts.get(OPT_MANUAL_OVERRIDE_MIN, 90), 90
-    # )
+    climate_cfg: dict[str, Any] = {**data, **opts}
 
-    # ----- Climate -------------------------------------------------------
-    # climate_cfg = (opts.get(CONF_CLIMATE) or [])[0]
+    # --- update_interval (FIX: read from config, not constant) ---
+    update_s = as_int(
+        OPT_UPDATE_INTERVAL_S,
+        default=OPT_UPDATE_MIN_INTERVAL_S,
+        min_value=OPT_UPDATE_MIN_INTERVAL_S,
+        max_value=300,
+    ) or OPT_UPDATE_MIN_INTERVAL_S
+
+    update_interval = timedelta(seconds=max(OPT_UPDATE_MIN_INTERVAL_S, update_s))
+
+    # --- Capabilities ---
+    supports_heating, supports_cooling, supports_dehumidifying, supports_ventilation = _infer_capabilities_from_devices(climate_cfg)
+
+    # --- Helpers: required blocks with clearer errors ---
+    def _require_mapping(parent: Mapping[str, Any], key: str, ctx: str) -> Mapping[str, Any]:
+        val = parent.get(key)
+        if not isinstance(val, Mapping):
+            raise ConfigEntryNotReady(f"Missing/invalid '{key}' in {ctx}. Check YAML or re-import entry.")
+        return val
+
+    # --- Areas ---
+    areas_cfg = climate_cfg.get(CONF_AREAS, [])
+    if not isinstance(areas_cfg, list):
+        raise ConfigEntryNotReady(f"Invalid '{CONF_AREAS}': expected list.")
+
     areas = [
         AreaConfig(
             name=a[CONF_AREA],
@@ -233,96 +242,120 @@ def build_runtime_config(entry: ConfigEntry) -> RuntimeConfig:
             thermal_collector_valve_switch=a.get(CONF_TCOLLECTOR, None),
             mq=a.get(CONF_MQ),
         )
-        for a in climate_cfg.get(CONF_AREAS, [])
+        for a in areas_cfg
+        if isinstance(a, Mapping)
     ]
 
-    su = climate_cfg[CONF_DEVICES][CONF_SUPPLY_UNITS]
+    # --- Devices (required for your runtime logic) ---
+    dev_cfg = _require_mapping(climate_cfg, CONF_DEVICES, "climate config")
+    su_cfg = _require_mapping(dev_cfg, CONF_SUPPLY_UNITS, f"{CONF_DEVICES}")
+
+    # Supply units
     supply_units = SupplyUnitsConfig(
-        direct_supply_unit=su[CONF_DIRECT_SUPPLY_UNIT],
-        adjustable_supply_unit=su[CONF_ADJUSTABLE_SUPPLY_UNIT],
-        three_point_mixing_valve=su[CONF_THREE_POINT_MIXING_VALVE],
-        sensors=SupplyUnitSensors(**su[CONF_SENSORS]),
+        direct_supply_unit=su_cfg[CONF_DIRECT_SUPPLY_UNIT],
+        adjustable_supply_unit=su_cfg[CONF_ADJUSTABLE_SUPPLY_UNIT],
+        three_point_mixing_valve=su_cfg[CONF_THREE_POINT_MIXING_VALVE],
+        sensors=SupplyUnitSensors(**su_cfg[CONF_SENSORS]),
     )
 
-    dev_cfg = climate_cfg[CONF_DEVICES]
+    # Radiant (optional)
     radiant = None
-    if CONF_RADIANT in dev_cfg:
-        r = dev_cfg[CONF_RADIANT]
+    r_cfg = dev_cfg.get(CONF_RADIANT)
+    if isinstance(r_cfg, Mapping):
         radiant = RadiantConfig(
-            fm_power=r[CONF_FM_POWER],
-            power=r[CONF_POWER],
-            mode=ModeConfig(**r[CONF_MODE]),
-            heating_t_setpoint=SetpointConfig(**r[CONF_HEATING_T_SETPOINT]),
-            heating_dt_setpoint=SetpointConfig(**r[CONF_HEATING_DT_SETPOINT]),
-            cooling_t_setpoint=SetpointConfig(**r[CONF_COOLING_T_SETPOINT]),
-            cooling_dt_setpoint=SetpointConfig(**r[CONF_COOLING_DT_SETPOINT]),
-            sensors=RadiantSensors(**r[CONF_SENSORS]),
+            fm_power=r_cfg[CONF_FM_POWER],
+            power=r_cfg[CONF_POWER],
+            mode=ModeConfig(**r_cfg[CONF_MODE]),
+            heating_t_setpoint=SetpointConfig(**r_cfg[CONF_HEATING_T_SETPOINT]),
+            heating_dt_setpoint=SetpointConfig(**r_cfg[CONF_HEATING_DT_SETPOINT]),
+            cooling_t_setpoint=SetpointConfig(**r_cfg[CONF_COOLING_T_SETPOINT]),
+            cooling_dt_setpoint=SetpointConfig(**r_cfg[CONF_COOLING_DT_SETPOINT]),
+            sensors=RadiantSensors(**r_cfg[CONF_SENSORS]),
         )
 
+    # VMC (optional)
     vmc = None
-    if CONF_VMC in dev_cfg:
-        v = dev_cfg[CONF_VMC]
+    v_cfg = dev_cfg.get(CONF_VMC)
+    if isinstance(v_cfg, Mapping):
         vmc = VMCConfig(
-            power=v[CONF_POWER],
-            t_setpoint=v[CONF_T_SETPOINT],
-            h_setpoint=v[CONF_H_SETPOINT],
-            t_dew_point_setpoint=v[CONF_DEW_POINT_SETPOINT],
-            delta_t_dew_point_setpoint=v[CONF_DELTA_DEW_POINT_SETPOINT],
-            spare_setpoint=v[CONF_SPARE_SETPOINT],
-            vent_recirculation=v[CONF_VENT_RECIRCULATION],
-            force_heating=v[CONF_FORCE_HEATING],
-            force_cooling=v[CONF_FORCE_COOLING],
-            force_free_cooling=v[CONF_FORCE_FREE_COOLING],
-            season=SeasonConfig(**v[CONF_SEASON]),
-            compressor_management=CompressorManagementConfig(
-                **v[CONF_COMPRESSOR_MANAGEMENT]
-            ),
-            cooling_management=CoolingManagementConfig(
-                **v[CONF_COOLING_MANAGEMENT]
-            ),
-            requests=VMCRequestsConfig(**v[CONF_REQUESTS]),
-            sensors=VMCSensorsConfig(**v[CONF_SENSORS]),
-            alarms=VMCAlarmsConfig(**v[CONF_ALARMS]),
+            power=v_cfg[CONF_POWER],
+            t_setpoint=v_cfg[CONF_T_SETPOINT],
+            h_setpoint=v_cfg[CONF_H_SETPOINT],
+            t_dew_point_setpoint=v_cfg[CONF_DEW_POINT_SETPOINT],
+            delta_t_dew_point_setpoint=v_cfg[CONF_DELTA_DEW_POINT_SETPOINT],
+            spare_setpoint=v_cfg[CONF_SPARE_SETPOINT],
+            vent_recirculation=v_cfg[CONF_VENT_RECIRCULATION],
+            force_heating=v_cfg[CONF_FORCE_HEATING],
+            force_cooling=v_cfg[CONF_FORCE_COOLING],
+            force_free_cooling=v_cfg[CONF_FORCE_FREE_COOLING],
+            season=SeasonConfig(**v_cfg[CONF_SEASON]),
+            compressor_management=CompressorManagementConfig(**v_cfg[CONF_COMPRESSOR_MANAGEMENT]),
+            cooling_management=CoolingManagementConfig(**v_cfg[CONF_COOLING_MANAGEMENT]),
+            requests=VMCRequestsConfig(**v_cfg[CONF_REQUESTS]),
+            sensors=VMCSensorsConfig(**v_cfg[CONF_SENSORS]),
+            alarms=VMCAlarmsConfig(**v_cfg[CONF_ALARMS]),
         )
 
-    w = entry.data[CONF_WEATHER]
-    _LOGGER.debug("build_runtime_config %s", entry.data)
+    # --- Weather: prefer merged config, fallback to entry.data ---
+    w_cfg = climate_cfg.get(CONF_WEATHER) or data.get(CONF_WEATHER)
+    if not isinstance(w_cfg, Mapping):
+        raise ConfigEntryNotReady(f"Missing/invalid '{CONF_WEATHER}' in config entry.")
 
-    fd = ForecastDataConfig(provider=str(w[CONF_FORECAST_DATA][CONF_PROVIDER]).strip())
-    h = w[CONF_HISTORICAL_DATA]
+    fd = ForecastDataConfig(provider=str(w_cfg[CONF_FORECAST_DATA][CONF_PROVIDER]).strip())
+    h = w_cfg[CONF_HISTORICAL_DATA]
     hd = HistoricalDataConfig(
         provider=str(h[CONF_PROVIDER]).strip().lower(),
-        token=str(h[CONF_TOKEN]).strip(),
+        token=str(h.get(CONF_TOKEN, "")).strip(),
         latitude=float(h[CONF_LATITUDE]),
         longitude=float(h[CONF_LONGITUDE]),
     )
 
-    apt_windows_cfg = climate_cfg.get(CONF_APT_WINDOWS) if isinstance(climate_cfg, Mapping) else None
-    apt_windows = None
-    if isinstance(apt_windows_cfg, Mapping):
-        state = apt_windows_cfg.get(CONF_STATE)
-        if isinstance(state, str) and state.strip():
-            apt_windows = AptWindowsConfig(state=str(state).strip())
+    # --- InfluxDB historical data: from merged, fallback legacy ---
+    ihd_cfg = climate_cfg.get(CONF_HISTORICAL_DATA) or data.get(CONF_HISTORICAL_DATA)
+    organization=""
+    bucket=""
+    token=""
+    url=DEFAULT_INFLUXDB_URL
+    if isinstance(ihd_cfg, Mapping):
+        influx = ihd_cfg.get(CONF_INFLUXDB)
+        if isinstance(influx, Mapping):
+            organization=influx.get(CONF_ORGANIZATION, "").strip()
+            bucket=influx.get(CONF_BUCKET, "").strip()
+            token=influx.get(CONF_TOKEN, "").strip()
 
-    if apt_windows is None:
-        legacy_state = entry.data.get(CONF_HOME_WINDOWS_STATE)
-        if isinstance(legacy_state, str) and legacy_state.strip():
-            apt_windows = AptWindowsConfig(state=str(legacy_state).strip())
+    # --- windows: from merged, fallback legacy ---
+    windows_cfg = climate_cfg.get(CONF_WINDOWS)
+    windows = None
+    if isinstance(windows_cfg, Mapping):
+        state = windows_cfg.get(CONF_CLOSED_STATE)
+        if isinstance(state, str) and state.strip():
+            windows = WindowsConfig(closed_state=str(state).strip())
+
+    # --- Scenarios (required by your schema) ---
+    scenarios_cfg = climate_cfg.get(CONF_SCENARIOS)
+    if not isinstance(scenarios_cfg, Mapping):
+        raise ConfigEntryNotReady(f"Missing/invalid '{CONF_SCENARIOS}' in config entry.")
+
+    # --- Name/unique_id mapping (RAW YAML vs legacy payload) ---
+    climate_name = (
+        str(data.get("climate_name") or climate_cfg.get("climate_name") or climate_cfg.get("name") or entry.title).strip()
+    )
+    climate_unique_id = (
+        str(data.get("climate_unique_id") or climate_cfg.get("climate_unique_id") or climate_cfg.get("unique_id") or entry.unique_id or "").strip()
+    )
 
     climate = ClimateConfig(
-        name=entry.data["climate_name"],
-        unique_id=entry.data["climate_unique_id"],
-        units=entry.data.get(CONF_UNITS, DEFAULT_UNITS),
+        name=climate_name,
+        unique_id=climate_unique_id,
+        units=climate_cfg.get(CONF_UNITS, DEFAULT_UNITS),
         areas=areas,
-        devices=DevicesConfig(
-            supply_units=supply_units, radiant=radiant, vmc=vmc
-        ),
-        apt_windows=apt_windows,
-        # weather=entry.data[CONF_WEATHER],
+        devices=DevicesConfig(supply_units=supply_units, radiant=radiant, vmc=vmc),
+        windows=windows,
         weather=WeatherConfig(forecast_data=fd, historical_data=hd),
-        scenarios=ScenariosConfig(**climate_cfg[CONF_SCENARIOS]),
-        temperature_unit=climate_cfg.get(CONF_TEMPERATURE_UNIT, DEFAULT_TEMP_UNIT),
-        mean_apt=SensorPair("", "")
+        historical_data=InfluxdbHistoricalDataConfig(bucket=bucket, organization=organization, token=token, url=url),
+        scenarios=ScenariosConfig(**scenarios_cfg),
+        mean_apt=SensorPair("", ""),
+        unit_system=get_unit_system("metric" if climate_cfg.get(CONF_UNITS, DEFAULT_UNITS) == "si" else "imperial"),
     )
 
     caps = PlantCapabilities(
@@ -330,12 +363,13 @@ def build_runtime_config(entry: ConfigEntry) -> RuntimeConfig:
         supports_cooling=supports_cooling,
         supports_dehumidifying=supports_dehumidifying,
         supports_ventilation=supports_ventilation,
-        setpoint_step_c=0.5,  # TODO: read from options if set
+        setpoint_step_c=0.5,
     )
+
     return RuntimeConfig(
         update_interval=update_interval,
         capabilities=caps,
-        manual_override_minutes=90,  # TODO: read from options if set
+        manual_override_minutes=90,
         climate=climate,
     )
 

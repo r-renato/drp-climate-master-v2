@@ -3,164 +3,240 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import fields, replace
-import logging
 import json
-from typing import Any, List, Optional, Callable
+import logging
+from dataclasses import fields, replace
+from typing import Any, Mapping
+from datetime import datetime, timedelta, timezone
+
+import psychrolib
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, Event, EventStateChangedData, callback
+from homeassistant.const import CONF_NAME, EVENT_HOMEASSISTANT_STARTED, PERCENTAGE
+from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, State, callback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.const import PERCENTAGE, EVENT_HOMEASSISTANT_STARTED
 
-from ..domain.models.plant import PlantSnapshot
+from custom_components.drp_climate_master_v2.domain.models.season import SeasonState
 
-from ..strategies.season_threshold import SeasonThresholdStrategy
+from ..domain.influx import InfluxConfig
+from ..strategies.plant_regime_pipeline import InfluxSeriesReader, PlantEntities, PlantRegimePipeline, RegimeConfig, RegimeSearchResult, daily_local_mean
 
+from ..helpers.config_sensors import build_sensor_mapping
 
-from ..domain.models.runtime_schema import AreaConfig, RuntimeConfig, SensorPair
-from ..domain.models.season import SeasonState
+from ..helpers.sensor_aggregator import SensorAggregator
 
-from ..helpers.plant import take_plant_snapshot
-from ..helpers.logger import log_debug, log_info, log_warning
-from ..helpers.timeutils import ha_timezone, now_tz
+from ..const import CONF_INDOOR, CONF_RADIANT, DOMAIN, ENTITIES_STATE, NAME_AREA_HOME, SEASON_STATE
+from ..domain.models.runtime_schema import AreaConfig, RuntimeConfig, SensorPair, WeatherConfig
 from ..helpers.config_entries import (
     build_runtime_config,
     collect_entity_ids_for_state_changes,
     subscribe_entity_state_changes,
 )
-from ..weather.provider import WeatherHistoricalProvider
-from ..weather.forecast_provider import WeatherForecast
-from ..weather.historical_pirateweather import PirateWeatherConfig, get_pirateweather_historical_provider
-from ..season.detector import WeatherSeasonDetector
-
-from ..const import (
-    CONF_INDOOR,
-    CONF_RADIANT,
-    DOMAIN,
-    ENTITIES_STATE,
-    NAME_AREA_HOME,
-)
+from ..helpers.logger import log_debug, log_info, log_warning
+from ..helpers.utils import slugify
 
 _LOGGER = logging.getLogger(__name__)
 
 
+_STORE_SETUP_UNIQUE_IDS = "setup_unique_ids"
+_STORE_SETUP_UNIQUE_IDS_EVT = "setup_unique_ids_evt"
+_STORE_AREA_UIDS = "area_unique_ids"
+_STORE_HOME_UIDS = "home_unique_ids"
+
+
 class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """
-    Coordina:
-      - Lettura sensori (ports/sensors)
-      - Calcolo grandezze derivate (psicrometria, domanda, flag)
-      - Pubblicazione snapshot per Entity/Supervisor
-    NON decide la strategia HVAC (competenza del Supervisor).
+    """Coordinator per la raccolta/stato sensori e calcolo dati derivati.
+
+    Responsabilità:
+        - Mantiene uno snapshot degli State Home Assistant per gli entity_id di interesse.
+        - Esegue un loop SLOW (DataUpdateCoordinator) per calcoli/aggregazioni periodiche.
+        - Esegue un loop FAST (task dedicato) per controlli locali frequenti (future TODO).
+
+    Non responsabilità:
+        - Decisione strategica HVAC (delegata a un Supervisor/Strategy layer).
+
+    Note lifecycle:
+        - Sottoscrive EVENT_HOMEASSISTANT_STARTED e ritarda di qualche secondo
+          la finalizzazione runtime + subscribe state changes.
+        - Espone async_stop() per unload/reload.
     """
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self._hass = hass
         self._entry = entry
+        self._name = entry.data.get(CONF_NAME, "default-name")
 
-        # Inizializza la struttura dati una volta e tieni il riferimento
+        # Shared store per entry (idempotente)
         domain_store = hass.data.setdefault(DOMAIN, {})
         entry_store = domain_store.setdefault(entry.entry_id, {})
-        entry_store.setdefault(ENTITIES_STATE, {})  # dict[str, State]
-        self._entities_state_store: dict = entry_store[ENTITIES_STATE]
+        entry_store.setdefault(ENTITIES_STATE, {})
 
-        # Config di runtime e subscribe ai cambi di stato
-        self._init_complete = False
+        # Stato sensori (entity_id -> State)
+        self._entities_state_store: dict[str, State] = entry_store[ENTITIES_STATE]
+
+        # Runtime config (può essere aggiornato a runtime dopo setup unique ids)
         self._runtime: RuntimeConfig = build_runtime_config(entry)
-        # _LOGGER.debug("Runtime config %s", self._runtime)
 
-        eids = collect_entity_ids_for_state_changes(self._runtime)
-        # log_debug(_LOGGER, "Subscribing state changes for %d", eids)
-        # Conserva l'unsubscribe per lo stop/unload
-        self._unsub_state_changes = subscribe_entity_state_changes(
-            self._hass, callback=self.entity_changed, entity_ids=eids
+        self._sensor_aggregator = SensorAggregator(
+            entities_state_store=self._entities_state_store, 
+            mapping=build_sensor_mapping()
         )
 
-        # Loop FAST
-        self._fast_task: Optional[asyncio.Task] = None
+        # Psychrolib unit system: impostazione globale (attenzione: globale nel processo)
+        # Se più entry con unit diverse coesistono, questa è una criticità.
+        psychrolib.SetUnitSystem(psychrolib.SI if self._runtime.climate.units == "si" else psychrolib.IP)
+
+        # Flags / subscriptions
+        self._init_complete = False
+        self._unsub_state_changes: CALLBACK_TYPE | None = None
+        self._unsub_delayed: CALLBACK_TYPE | None = None
+        self._unsub_hastarted_event: CALLBACK_TYPE | None = None
+
+        # FAST loop
+        self._fast_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
-
-        self._weather_forecast_provider = WeatherForecast(
-            self._hass,
-            self._runtime.climate.weather.forecast_data.provider,
-            forecast_type="daily"
-        )
-        self._weather_historical_provider: WeatherHistoricalProvider
-        if "pirateweather" == self._runtime.climate.weather.historical_data.provider:
-            self._weather_historical_provider: WeatherHistoricalProvider = get_pirateweather_historical_provider(
-                self._hass, 
-                PirateWeatherConfig(
-                    api_key=self._runtime.climate.weather.historical_data.token,
-                    lat=self._runtime.climate.weather.historical_data.latitude,
-                    lon=self._runtime.climate.weather.historical_data.longitude,
-                    units=self._runtime.climate.units,
-                )
-            )
-        self._season_detector = WeatherSeasonDetector(
-            weatherHistorical=self._weather_historical_provider,
-            weatherForecast=self._weather_forecast_provider
-        )
-        self._season_data: SeasonState
 
         super().__init__(
             hass,
             _LOGGER,
-            name=f"{DOMAIN}-coordinator",
-            update_interval=self._runtime.update_interval,  # loop SLOW
+            name=slugify(f"{DOMAIN}-{self._name}-coordinator"),
+            update_interval=self._runtime.update_interval,
         )
 
-        self._unsub_hastarted_event: Optional[Callable[[], None]] = hass.bus.async_listen_once(
-            EVENT_HOMEASSISTANT_STARTED, self._async_complete_runtime_config
+        # HA started hook (one-shot)
+        self._unsub_hastarted_event = hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STARTED,
+            self._on_ha_started,
         )
-        _LOGGER.debug(
-            "ClimateCoordinator initialized (id=%s) per entry %s (source=%s). Update ogni %s secondi",
+
+        log_info(
+            _LOGGER,
+            "Initialized (id=%s) entry=%s source=%s update_interval=%s",
             hex(id(self)),
             entry.entry_id,
             entry.source,
             self._runtime.update_interval,
         )
 
+    # ----------------- Shared store helpers ----------------- #
+
+    @property
+    def entry_id(self) -> str:
+        return self._entry.entry_id
+
+    @property
+    def unit_system(self) -> str:
+        return self._runtime.climate.units
+
+    @property
+    def runtime_weather_config(self) -> WeatherConfig:
+        return self._runtime.climate.weather
+
+    @property
+    def _entities_state(self) -> dict[str, State]:
+        """Mappa entity_id -> State.
+
+        Idempotente anche se hass.data viene ricreato (riusa il reference store iniziale).
+        """
+        domain_store = self._hass.data.setdefault(DOMAIN, {})
+        entry_store = domain_store.setdefault(self._entry.entry_id, {})
+        return entry_store.setdefault(ENTITIES_STATE, self._entities_state_store)
+
+    @property
+    def _entry_store(self) -> dict[str, Any]:
+        domain_store = self._hass.data.setdefault(DOMAIN, {})
+        return domain_store.setdefault(self._entry.entry_id, {})
+
+    def _setup_unique_ids_event(self) -> asyncio.Event:
+        store = self._entry_store
+        evt = store.get(_STORE_SETUP_UNIQUE_IDS_EVT)
+        if isinstance(evt, asyncio.Event):
+            return evt
+        evt = asyncio.Event()
+        store[_STORE_SETUP_UNIQUE_IDS_EVT] = evt
+        return evt
+
+    def mark_unique_ids_ready(self) -> None:
+        """Segnala che la fase di setup dei unique_ids è completata.
+
+        Chiamabile da altri componenti della stessa integrazione.
+        """
+        store = self._entry_store
+        store[_STORE_SETUP_UNIQUE_IDS] = True
+        self._setup_unique_ids_event().set()
+
+    # ----------------- HA started / runtime finalize ----------------- #
+
     @callback
-    def _on_started(self, event: Event):
-        # tra 10s esegue il tuo coroutine
+    def _on_ha_started(self, event: Event) -> None:
+        """Callback sync: schedula la finalizzazione dopo un breve delay."""
+
         @callback
-        def _runner(_now):
-            self._hass.async_create_task(self._async_complete_runtime_config(event))
-        
+        def _runner(_now) -> None:
+            self._hass.async_create_task(self._async_post_start(event))
+
+        # Delay (es. attendi che altre integrazioni espongano entity e store)
         self._unsub_delayed = async_call_later(self._hass, 10, _runner)
 
-    @callback
-    async def _async_complete_runtime_config(self, event: Event) -> None:
+    async def _async_post_start(self, event: Event) -> None:
+        """Post-start: completa runtime, subscribe state changes, bootstrap stati."""
+        try:
+            await self._async_complete_runtime_config(event)
+        except Exception as exc:  # noqa: BLE001
+            log_warning(_LOGGER, "Runtime config completion failed: %s", exc, exc_info=True)
+            # anche se fallisce, non blocchiamo HA: proseguiamo con runtime attuale
 
-        loop = asyncio.get_running_loop()
-        start = loop.time()
-        comp_store = self._hass.data.setdefault(DOMAIN, {})
-        store = comp_store.setdefault(self._entry.entry_id, {})
-        log_debug(_LOGGER, "setup_unique_ids_store self id '%s'. (RuntimeConfig)", id(self))
+        # Subscribe ai cambi di stato
+        eids = collect_entity_ids_for_state_changes(self._runtime)
+        self._unsub_state_changes = subscribe_entity_state_changes(
+            self._hass,
+            callback=self.entity_changed,
+            entity_ids=eids,
+        )
 
-        while True:
-            comp_store = self._hass.data.setdefault(DOMAIN, {})
-            store = comp_store.setdefault(self._entry.entry_id, {})
-            setup_unique_ids = store.setdefault("setup_unique_ids", False)
-            log_debug(_LOGGER, "setup_unique_ids_store '%s'. (RuntimeConfig)", setup_unique_ids)
-            if setup_unique_ids:
-                log_info(_LOGGER, "setup_unique_ids_store done. (RuntimeConfig)")
-                break
+        # Bootstrap stato iniziale per evitare cache vuota fino al primo change
+        for eid in eids:
+            st = self._hass.states.get(eid)
+            if st is not None:
+                self._entities_state[eid] = st
 
-            if (loop.time() - start) >= 60:
-                log_warning(_LOGGER, "Timeout waiting for setup_unique_ids_store (RuntimeConfig)")
-                return
-            
-            await asyncio.sleep(5)
+        await self.async_start_fast_loop()
 
-        comp_store = self._hass.data.setdefault(DOMAIN, {})
-        store = comp_store.setdefault(self._entry.entry_id, {})
-        area_unique_ids_store: dict = store.setdefault("area_unique_ids", {})
-        home_unique_ids_store: dict = store.setdefault("home_unique_ids", {})
+        self._init_complete = True
+        log_debug(_LOGGER, "Post-start completed. Subscribed %d entities.", len(eids))
+
+    async def _async_complete_runtime_config(self, _event: Event) -> None:
+        """Aggiorna il RuntimeConfig sostituendo gli entity_id dai unique_ids store.
+
+        Meccanismo:
+            - Attende che un'altra parte dell'integrazione abbia completato la
+              popolazione dello store `setup_unique_ids` / `area_unique_ids`.
+            - Applica le sostituzioni in modo atomico (swap di dataclass).
+
+        Timeout:
+            - 60 secondi.
+            - Se scade, mantiene runtime originale.
+        """
+        store = self._entry_store
+        evt = self._setup_unique_ids_event()
+
+        # Compatibilità: se qualcuno setta solo il bool, onoralo.
+        if store.get(_STORE_SETUP_UNIQUE_IDS) is True:
+            evt.set()
+
+        try:
+            await asyncio.wait_for(evt.wait(), timeout=60)
+        except TimeoutError:
+            log_warning(_LOGGER, "Timeout waiting for setup_unique_ids (RuntimeConfig)")
+            return
+
+        area_unique_ids_store: dict[str, Any] = store.get(_STORE_AREA_UIDS, {}) or {}
+        home_unique_ids_store: dict[str, Any] = store.get(_STORE_HOME_UIDS, {}) or {}
 
         sensorpair_fields = {f.name for f in fields(SensorPair)}
-        old_areas = self._runtime.climate.areas
+
+        old_areas = list(self._runtime.climate.areas)
         new_areas: list[AreaConfig] = []
         changed = False
 
@@ -169,20 +245,21 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             sp = area_cfg.sensors
             updates: dict[str, str] = {}
 
-            for attr, sensordata in data.items():
+            # data: attr -> entity_id (o oggetto con .entity_id)
+            for attr, sensordata in (data or {}).items():
                 if attr not in sensorpair_fields:
-                    log_warning(_LOGGER, "Ignoro attributo sconosciuto SensorPair.%s per area '%s'", attr, area_cfg.name)
+                    log_warning(_LOGGER, "Ignore unknown SensorPair.%s for area '%s'", attr, area_cfg.name)
                     continue
+
                 eid = getattr(sensordata, "entity_id", None) or str(sensordata)
-                # se non vuoi sovrascrivere con None/stringhe vuote, aggiungi guardia
-                if eid and getattr(sp, attr) != eid:
+                if eid and getattr(sp, attr, None) != eid:
                     updates[attr] = eid
 
             if updates:
                 new_sp = replace(sp, **updates)
                 area_cfg = replace(area_cfg, sensors=new_sp)
                 changed = True
-                log_info(_LOGGER, "Area '%s' aggiornata: %s (RuntimeConfig)", area_cfg.name, new_sp)
+                log_info(_LOGGER, "Area '%s' sensors updated: %s", area_cfg.name, new_sp)
 
             new_areas.append(area_cfg)
 
@@ -191,82 +268,75 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         mean_updates: dict[str, str] = {}
         for attr, sensor in (home_unique_ids_store or {}).items():
             if attr not in sensorpair_fields:
-                log_warning(_LOGGER, "Ignoro attributo sconosciuto SensorPair.%s per mean_apt", attr)
+                log_warning(_LOGGER, "Ignore unknown SensorPair.%s for mean_apt", attr)
                 continue
             eid = getattr(sensor, "entity_id", None) or str(sensor)
-            if eid and getattr(mean_sp, attr) != eid:
+            if eid and getattr(mean_sp, attr, None) != eid:
                 mean_updates[attr] = eid
 
         new_mean = replace(mean_sp, **mean_updates) if mean_updates else mean_sp
         if mean_updates:
             changed = True
-            log_info(_LOGGER, "Aggiornato mean_apt: %s", new_mean)
+            log_info(_LOGGER, "mean_apt updated: %s", new_mean)
 
         if changed:
             new_climate = replace(self._runtime.climate, areas=new_areas, mean_apt=new_mean)
-            new_runtime = replace(self._runtime, climate=new_climate)
-            self._runtime = new_runtime    # swap atomico
+            self._runtime = replace(self._runtime, climate=new_climate)
 
-        # log_info(_LOGGER, "RuntimeConfig: %s", self._runtime.climate.areas)
-        self._init_complete = True
-        log_info(_LOGGER, "self id %s Done. (RuntimeConfig) %s", id(self), self._runtime)
+            # allinea l'update_interval del coordinator al runtime aggiornato
+            self.update_interval = self._runtime.update_interval
 
-    # ----------------- Accesso allo store condiviso ----------------- #
+        log_info(_LOGGER, "RuntimeConfig completion done (changed=%s)", changed)
 
-    @property
-    def _entities_state(self) -> dict:
-        """
-        Mappa entity_id -> State (idempotente anche se hass.data viene ricreato).
-        """
-        domain_store = self._hass.data.setdefault(DOMAIN, {})
-        entry_store = domain_store.setdefault(self._entry.entry_id, {})
-        return entry_store.setdefault(ENTITIES_STATE, self._entities_state_store)
-
-    # ----------------- Setup delle entity "slave" ------------------- #
+    # ----------------- Slave sensors factory ----------------- #
 
     def build_slave_sensor_defs(self) -> list[dict[str, Any]]:
-        """Restituisce la lista dei sensori dew-point da creare (name/sensors/unit)."""
+        """Ritorna le definizioni per le entity "slave" (dewpoint, heat-index, ecc.)."""
         defs: list[dict[str, Any]] = []
 
         temps: list[str] = []
         humis: list[str] = []
-        
-        for area in getattr(self._runtime.climate, "areas", []):
+
+        for area in getattr(self._runtime.climate, "areas", []) or []:
+            # i tuoi AreaConfig potrebbero essere dataclass: manteniamo getattr flessibile
             if getattr(area, CONF_INDOOR, False) and getattr(area, CONF_RADIANT, False):
                 sensors = getattr(area, "sensors", None)
-                if sensors:
-                    temps.append(sensors.temperature)
-                    humis.append(sensors.humidity)
-                    defs.append(
-                        {
-                            "type" : "DewpointSensor",
-                            "area": area.name,
-                            "name": f"Ambient {area.name}",
-                            "sensors": sensors,  # es. SensorPair o dict compatibile
-                            "unit": self._runtime.climate.temperature_unit,
-                        }
-                    )
-                    defs.append(
-                        {
-                            "type" : "HeatIndexSensor",
-                            "area": area.name,
-                            "name": f"Ambient {area.name}",
-                            "sensors": sensors,  # es. SensorPair o dict compatibile
-                            "unit": self._runtime.climate.temperature_unit,
-                        }
-                    )
+                if not sensors:
+                    continue
+
+                temps.append(sensors.temperature)
+                humis.append(sensors.humidity)
+
+                defs.append(
+                    {
+                        "type": "DewpointSensor",
+                        "area": area.name,
+                        "name": f"Ambient {area.name}",
+                        "sensors": sensors,
+                        "unit": self._runtime.climate.unit_system.temperature,
+                    }
+                )
+                defs.append(
+                    {
+                        "type": "HeatIndexSensor",
+                        "area": area.name,
+                        "name": f"Ambient {area.name}",
+                        "sensors": sensors,
+                        "unit": self._runtime.climate.unit_system.temperature,
+                    }
+                )
 
         defs.append(
             {
-                "type" : "CurrentTemperatureSensor",
+                "type": "CurrentTemperatureSensor",
                 "name": f"Ambient {NAME_AREA_HOME}",
                 "temp_sensors": temps,
-                "unit": self._runtime.climate.temperature_unit,
+                "unit": self._runtime.climate.unit_system.temperature,
             }
         )
         defs.append(
             {
-                "type" : "CurrentHumiditySensor",
+                "type": "CurrentHumiditySensor",
                 "name": f"Ambient {NAME_AREA_HOME}",
                 "humi_sensors": humis,
                 "unit": PERCENTAGE,
@@ -274,64 +344,35 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         defs.append(
             {
-                "type" : "CurrentDewpointSensor",
+                "type": "CurrentDewpointSensor",
                 "name": f"Ambient {NAME_AREA_HOME}",
                 "temp_sensors": temps,
                 "humi_sensors": humis,
-                "unit": self._runtime.climate.temperature_unit,
+                "unit": self._runtime.climate.unit_system.temperature,
             }
         )
         defs.append(
             {
-                "type" : "CurrentHeatIndexSensor",
+                "type": "CurrentHeatIndexSensor",
                 "name": f"Ambient {NAME_AREA_HOME}",
                 "temp_sensors": temps,
                 "humi_sensors": humis,
-                "unit": self._runtime.climate.temperature_unit,
+                "unit": self._runtime.climate.unit_system.temperature,
             }
         )
 
-        log_debug(_LOGGER, "build_climate_sensor_defs: %d definizioni", len(defs))
+        log_debug(_LOGGER, "build_slave_sensor_defs: %d definitions", len(defs))
         return defs
 
-    # async def async_setup_slave_entities(self) -> List[Any]:
-    #     """
-    #     Crea e registra le entity "slave" (es. sensori di dew-point per area).
-    #     """
-    #     slave_sensors = []
 
-    #     # Presumo che self._runtime.climate.areas sia una lista di oggetti con
-    #     # attributi: .indoor (bool), .name (str), .sensors (compatibile con DewpointSensor)
-    #     for area in getattr(self._runtime.climate, "areas", []):
-    #         if not getattr(area, "indoor", False):
-    #             continue
 
-    #         sensors = getattr(area, "sensors", None)
-    #         if not sensors:
-    #             _LOGGER.debug("Area '%s' senza sensors; salto", getattr(area, "name", "?"))
-    #             continue
 
-    #         entity_name = f"Ambient {area.name}"
-    #         temperature_unit = self._runtime.climate.temperature_unit
-
-    #         slave_sensors.append(
-    #             DewpointSensor(
-    #                 hass=self._hass,
-    #                 coordinator=self,
-    #                 entry=self._entry,
-    #                 name=entity_name,
-    #                 sensors=sensors,
-    #                 temperature_unit=temperature_unit,
-    #             )
-    #         )
-
-    #     return slave_sensors
     # ---------------------- Event handling -------------------------- #
 
     @callback
     def entity_changed(self, event: Event[EventStateChangedData]) -> None:
         """Gestisce variazioni di stato sensori/attuatori sottoscritti."""
-        if getattr(self, "_stop_event", None) and self._stop_event.is_set():
+        if self._stop_event.is_set():
             return
 
         entity_id = event.data.get("entity_id")
@@ -341,132 +382,62 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         try:
             self._entities_state[entity_id] = new_state
-            # _LOGGER.debug("State changed: %s -> %s", entity_id, new_state.state)
-        except Exception as ex:  # estrema difesa: non far mai esplodere il job
+        except Exception as ex:  # noqa: BLE001
             log_warning(_LOGGER, "Ignore state change for %s (%s)", entity_id, ex)
+            return
 
-        # NOTA: non toccare async_set_updated_data qui
-        # self.async_set_updated_data({})
-        self.async_update_listeners()   # avvisa le entity senza resettare l’interval
+        # NOTA: non usare async_set_updated_data qui per non resettare update_interval.
+        # Avvisa le entity collegate.
+        self.async_update_listeners()
 
     # ---------------------- Lifecycle hooks ------------------------- #
 
-    # async def _async_temp_test_weater(self) -> None:
-    #     lat, lon = 41.9238, 12.4125
-
-    #     cfg = PirateWeatherConfig(
-    #         api_key="4mtCz6m3gmiEAvgjQdbB9pB6ndZFR67E",
-    #         lat=lat,
-    #         lon=lon,
-    #         units="si",          # °C
-    #         # base_url=None      # opzionale, solo per backend HTTP
-    #         base_url="https://timemachine.pirateweather.net/forecast",
-    #     )
-
-    #     # Opzioni di robustezza/performance
-    #     opts = ProviderOptions(
-    #         max_concurrency=6,    # limita richieste/conversioni in parallelo
-    #         retries=2,            # tentativi aggiuntivi (totale = retries+1)
-    #         backoff_base=0.5,
-    #         backoff_factor=2.0,
-    #         jitter=0.25,
-    #         # ttl_seconds=6*3600,   # cache per-day (6h)
-    #         http_timeout_s=20,
-    #     )
-    #     # --- Creazione provider (usa libreria se installata, altrimenti HTTP) ---
-    #     historical_provider = get_pirateweather_historical_provider(self._hass, cfg, opts=opts)
-    #     weather_forecast = WeatherForecast( self._hass, "weather.home_rome", forecast_type="daily")
-
-    #     weather_season_detector = WeatherSeasonDetector(weatherHistorical=historical_provider, weatherForecast=weather_forecast)
-
-    #     weather_season_data = await weather_season_detector.detect()
-    #     _LOGGER.debug("async_config_entry_first_refresh %s", weather_season_data)
-
-
     async def async_config_entry_first_refresh(self) -> None:
         """Primo refresh: dopo il SLOW loop, avvia il FAST loop."""
-        log_debug(_LOGGER, "Starting First refresh")
         await super().async_config_entry_first_refresh()
         log_debug(_LOGGER, "First refresh completed")
-        await self.async_start_fast_loop()
-
-        
-
-
-        # # Consigliato: riusare la sessione HTTP con il context manager
-        # async with provider:
-        #     today = date.today()
-        #     window_days = 10
-
-        #     cur_start = today - timedelta(days=window_days - 1)
-        #     cur_end = today
-
-        #     # last_start = safe_subtract_one_year(cur_start)
-        #     # last_end = safe_subtract_one_year(cur_end)
-
-        #     # --- Leggi gli ultimi 10 giorni ---
-        #     current_samples = await provider.daily_range(cur_start, cur_end)
-
-        #     # --- Leggi la finestra “gemella” dell’anno scorso ---
-        #     # yearago_samples = await provider.daily_range(last_start, last_end)
-
-        # # --- Stampa riepilogo semplice ---
-        # def brief(sample: Forecast) -> str:
-        #     return (
-        #         f"{sample['datetime']}  "
-        #         f"Tmin={sample.get('templow')}  Tmax={sample.get('temperature')}  "
-        #         # f"Tmean={sample.tmean}  DP={sample.dew_point}  RH={sample.humidity}"
-        #     )
-
-        # print("\n== Ultimi 10 giorni ==")
-        # for s in current_samples:
-        #     _LOGGER.debug(brief(s))
-
-        # # print("\n== Finestra gemella anno scorso ==")
-        # # for s in yearago_samples:
-        # #     print(brief(s))
-
+        # await self.async_start_fast_loop()
 
     async def async_start_fast_loop(self) -> None:
-        """Avvia il loop FAST (PID miscelatrice / H% VMC / rate limit)."""
-        if self._fast_task:
+        """Avvia il loop FAST (controlli frequenti)."""
+        if self._fast_task is not None:
             return
         self._stop_event.clear()
-        self._fast_task = asyncio.create_task(self._fast_loop(), name="drp_fast_loop")
+        self._fast_task = self._hass.async_create_task(self._fast_loop(), name="drp_fast_loop")
 
     async def async_stop(self) -> None:
-        """Stop coordinato del loop FAST e unsubscription eventi."""
+        """Stop coordinato: cancella FAST loop e unsubscribe eventi."""
         self._stop_event.set()
 
-        if self._fast_task:
+        if self._fast_task is not None:
             self._fast_task.cancel()
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._fast_task
             self._fast_task = None
 
-        # Unsubscribe ai cambi stato se presente
-        unsub = getattr(self, "_unsub_state_changes", None)
-        if callable(unsub):
+        if self._unsub_state_changes is not None:
             with contextlib.suppress(Exception):
-                unsub()
+                self._unsub_state_changes()
+            self._unsub_state_changes = None
 
-        unsub_started = getattr(self, "_unsub_hastarted_event", None)
-        if callable(unsub_started):
+        if self._unsub_hastarted_event is not None:
             with contextlib.suppress(Exception):
-                unsub_started()
+                self._unsub_hastarted_event()
             self._unsub_hastarted_event = None
 
-        if self._unsub_delayed:
+        if self._unsub_delayed is not None:
             with contextlib.suppress(Exception):
                 self._unsub_delayed()
             self._unsub_delayed = None
 
+        self._init_complete = False
+
     async def _fast_loop(self) -> None:
-        """
-        Ciclo FAST: esegue controlli locali con cadenza breve.
+        """Ciclo FAST: controlli locali con cadenza breve.
+
         Deve essere idempotente e tollerante a snapshot parziali.
         """
-        interval = getattr(self._runtime, "fast_interval", 5)  # fallback 5s
+        interval = getattr(self._runtime, "fast_interval", 90)
         try:
             while not self._stop_event.is_set():
                 # TODO: PID miscelatrice verso T_supply_target
@@ -474,23 +445,103 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # TODO: rate-limit, min_on/min_off, guardie runtime
                 await asyncio.sleep(interval)
         except asyncio.CancelledError:
-            pass
+            return
 
-    # --------------------- DataUpdateCoordinator -------------------- #
+
+    async def _test_regime_config(self) -> None:
+        season_state = self._entry_store.get(SEASON_STATE)
+        if not isinstance(season_state, SeasonState):
+            log_warning(_LOGGER, "No valid SeasonState in store for regime config test")
+            return
+
+        influx_cfg = InfluxConfig(
+            bucket=self._runtime.climate.historical_data.bucket,
+            org=self._runtime.climate.historical_data.organization,
+            token=self._runtime.climate.historical_data.token,
+            url=self._runtime.climate.historical_data.url,
+        )
+
+        entities = PlantEntities(
+            outdoor_temp="ambient_outdoor_temperature",
+            compressor_state="hmi080_compressor_state",
+            device_mode="hmi080_device_mode",
+            vmc_pump_switch="hcs_direct_supply_unit",
+            radiant_pump_switch="hcs_motorized_temperature_adjustable_supply_unit",
+            active_power="emeter_clima_active_power",
+        )
+
+        def _fit_sync() -> tuple[str, RegimeConfig, RegimeSearchResult]:
+            influx_reader = InfluxSeriesReader(cfg=influx_cfg)
+            try:
+                pipe = PlantRegimePipeline(
+                    reader=influx_reader,
+                    entities=entities,
+                    season_state=season_state,
+                    season_windows=season_state.weather.windows or [],
+                    local_tz="Europe/Rome",
+                    start="-730d",
+                    stop="now()",
+                )
+
+                # Fit "vero" (globale + per-season) e scelta config per oggi
+                fit = pipe.fit_seasonal()
+                cfg_today = pipe.pick_runtime_config(fit)
+                season = pipe.pick_runtime_season()
+
+                # Se vuoi anche il dettaglio della grid search (coerente con la pipeline):
+                raw = pipe.load_raw()
+                norm = pipe.normalize(raw)
+                obs_daily, _duty_daily, _frame = pipe.build_observed_daily_regime(norm)
+
+                # IMPORTANTISSIMO: media giornaliera su confini giorno locali (Europe/Rome),
+                # coerente con fit_seasonal()
+                T_out_daily = daily_local_mean(norm["T_out"], tz=pipe.local_tz)
+
+                search = pipe.grid_search_regime(
+                    T_out_daily=T_out_daily,
+                    obs_regime_daily=obs_daily,
+                )
+
+                return (str(season), cfg_today, search)
+
+            finally:
+                influx_reader.close()
+
+        season_str, cfg_today, search_obj = await self._hass.async_add_executor_job(_fit_sync)
+
+        log_debug(_LOGGER, "Runtime season: %s", season_str)
+        log_debug(_LOGGER, "Chosen regime config: %s", cfg_today)
+
+        for i, c in enumerate(search_obj.top10, start=1):
+            log_debug(
+                _LOGGER,
+                "Top %02d)\n"
+                "   loss=%.3f err=%.3f pen=%.3f\n"
+                "   switches=%d/%d\n"
+                "   tau=%.1f\n"
+                "   hon=%.1f hoff=%.1f\n"
+                "   con=%.1f coff=%.1f",
+                i,
+                c.loss, c.err, c.pen,
+                c.switches, c.days,
+                c.cfg.tau_days,
+                c.cfg.heating_on, c.cfg.heating_off,
+                c.cfg.cooling_on, c.cfg.cooling_off,
+            )
+
+
+    # --------------------- Debug helpers -------------------- #
 
     def _debug_dump_entities_state(self, *, max_attr_len: int = 400) -> None:
         """Logga l'istantanea di self._entities_state (entity -> State)."""
         try:
-            items = list(self._entities_state.items())
-            items.sort(key=lambda kv: kv[0])  # ordina per entity_id
-
+            items = sorted(self._entities_state.items(), key=lambda kv: kv[0])
             lines: list[str] = []
             for entity_id, st in items:
                 if st is None:
                     lines.append(f"- {entity_id}: <None>")
                     continue
 
-                # Attributi (JSON safe + trunc)
                 try:
                     attrs_json = json.dumps(st.attributes, ensure_ascii=False, default=str)
                 except Exception:
@@ -501,73 +552,44 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 friendly = st.attributes.get("friendly_name")
                 lines.append(
-                    f"--------------------------------------------\n"
-                    f"id: {entity_id} - state={repr(st.state)}\n"
+                    "--------------------------------------------\n"
+                    f"id: {entity_id} - state={st.state!r}\n"
                     f"{f'({friendly})' if friendly else ''}: \n"
                     f"last change={getattr(st, 'last_changed', None)} - last update={getattr(st, 'last_updated', None)}\n"
                     f"attrs={attrs_json}\n"
                 )
 
-            _LOGGER.debug("Entities state snapshot (%d items):\n%s", len(items), "\n".join(lines))
-        except Exception as ex:
-            _LOGGER.debug("Failed dumping entities state: %s", ex)
+            log_debug(_LOGGER, "Entities state snapshot (%d items):\n%s", len(items), "\n".join(lines))
+        except Exception as ex:  # noqa: BLE001
+            log_warning(_LOGGER, "Failed dumping entities state: %s", ex)
+
+    # --------------------- DataUpdateCoordinator -------------------- #
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """
-        Loop SLOW: raccoglie sensori, calcola grandezze derivate e aggiorna lo snapshot.
+        """Loop SLOW: raccoglie sensori, calcola grandezze derivate e aggiorna snapshot.
+
         Importante: niente side-effect (niente comandi agli attuatori).
+
+        Returns:
+            dict[str, Any]: snapshot per gli consumers (entity/supervisor).
         """
         if not self._init_complete:
             return {}
+
         try:
-            # _LOGGER.debug("_entities_state keys %s", self._entities_state.keys())
-            # TODO: leggere da adapters e costruire snapshot parziale
-            # Esempio:
-            # snapshot = {
-            #     "timestamp": self._hass.helpers.event.async_call_later(...),
-            #     "areas": {...},
-            # }
-            # await self._async_temp_test_weater()
-            self._season_data = await self._season_detector.detect()
-            plant_snapshot: PlantSnapshot = take_plant_snapshot(
-                self._runtime,
-                self._season_data,
-                self._entities_state,
-                now_tz(ha_timezone(self._hass)[1])
-            )
-            log_debug(_LOGGER, "TEST B\n%s", plant_snapshot)
+            await self._sensor_aggregator.async_update()
 
-            if plant_snapshot:
-                sts = SeasonThresholdStrategy(plant_snapshot)
-                await sts.compute()
-                thr = sts.get_threshold()
-                log_debug(_LOGGER, "Computed thresholds: %s", thr)
+            await self._test_regime_config()
 
-            # core_rooms: list[SensorPair] = []
-            # core1 = plat_snapshot.zones.get("Master Bedroom") if plat_snapshot.zones else None
-            # if core1 and core1.sensors is not None:
-            #     core_rooms.append(core1.sensors)
+            # log_debug(_LOGGER, "%s", self._sensor_aggregator.latest_all())
 
-            # # aggiungi altre zone eventuali con la stessa logica...
-
-            # if core_rooms and plat_snapshot.mean_apt and plat_snapshot.outdoor:
-            #     sts = SeasonThresholdStrategy(
-            #         season_state=self._season_data,
-            #         core_rooms=core_rooms,              # list[SensorPair]
-            #         secondary_rooms=[],
-            #         indoor_sensors=plat_snapshot.mean_apt,   # assicurati che non siano Optional
-            #         outdoor_sensors=plat_snapshot.outdoor,
-            #     )
-
-            #     await sts.compute()
-            #     thr = sts.get_threshold()
-
-            #     log_info(_LOGGER, "Computed thresholds: %s", thr)
-
-
-            # self._debug_dump_entities_state()
-
-            return {}
-        except Exception as exc:
+            # TODO: costruire snapshot reale (PlantSnapshot ecc.)
+            # Esempio minimale: esporta solo timestamp e numero entity osservate
+            snapshot = {
+                "ts": self._hass.loop.time(),
+                "observed": len(self._entities_state),
+            }
+            return snapshot
+        except Exception as exc:  # noqa: BLE001
             log_warning(_LOGGER, "Update failed: %s", exc, exc_info=True)
             raise UpdateFailed(f"Update failed: {exc}") from exc

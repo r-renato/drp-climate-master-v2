@@ -33,8 +33,8 @@ from .domain.models.runtime_schema import SensorPair
 
 from .controller.coordinator import ClimateCoordinator
 
-from .helpers.logger import log_debug, log_info, log_warning
-from .helpers.utils import computed_float_or_none, slugify, as_float
+from .helpers.logger import log_debug, log_exception, log_info, log_warning
+from .helpers.utils import slugify, as_float
 
 from .helpers.psychrometric import celsius_to_fahrenheit, dew_point_celsius, heat_index_celsius
 from .const import (
@@ -172,13 +172,13 @@ async def async_setup_entry(
         log_debug(_LOGGER, "setup_unique_ids_store %s", setup_unique_ids_store)
 
     except Exception as ex:  # noqa: BLE001
-        _LOGGER.exception("Errore durante creazione sensori dew-point: %s", ex)
+        log_exception(_LOGGER, "Errore durante creazione sensori dew-point: %s", ex)
 
     if entities:
         async_add_entities(entities)  # update_before_add=False di default
-        _LOGGER.info("Aggiunte %d entità a %s.sensor", len(entities), DOMAIN)
+        log_info(_LOGGER, "Aggiunte %d entità a %s.sensor", len(entities), DOMAIN)
     else:
-        _LOGGER.info("Nessuna entità sensor da aggiungere per %s", entry.entry_id)
+        log_info(_LOGGER, "Nessuna entità sensor da aggiungere per %s", entry.entry_id)
 
 class BaseSensor(
     CoordinatorEntity[DataUpdateCoordinator[dict[str, Any]]],
@@ -327,7 +327,7 @@ class BaseSensor(
                 self._attr_native_value = as_float(last_state.state)
                 self.async_write_ha_state()
             except Exception as ex:  # noqa: BLE001
-                _LOGGER.debug("Restore skipped for %s: %s", self.entity_id, ex)
+                log_debug(_LOGGER, "Restore skipped for %s: %s", self.entity_id, ex)
 
     # --- QUI il metodo astratto che i figli DEVONO implementare ---
     @abstractmethod
@@ -427,7 +427,7 @@ class DewpointSensor(BaseSensor):
         try:
             dp_c = dew_point_celsius(t_c, rh)
         except Exception as ex:  # noqa: BLE001
-            _LOGGER.debug("Impossibile calcolare il dew point: %s", ex)
+            log_debug(_LOGGER, "Impossibile calcolare il dew point: %s", ex)
             self._attr_available = False
             return True
 
@@ -516,7 +516,7 @@ class HeatIndexSensor(BaseSensor):
         try:
             hi_c = float(heat_index_celsius(t_c, rh))
         except Exception as ex:  # noqa: BLE001
-            _LOGGER.debug("Impossibile calcolare Heat Index per T=%s°C RH=%s%%: %s", t_c, rh, ex)
+            log_debug(_LOGGER, "Impossibile calcolare Heat Index per T=%s°C RH=%s%%: %s", t_c, rh, ex)
             self._attr_available = False
             return True
 
@@ -569,7 +569,7 @@ class CurrentTemperatureSensor(BaseSensor):
         configurati, in °C o °F a seconda dell'unità dell'entità.
         """
         if not self._temp_sensors:
-            _LOGGER.warning("Nessun sensore di temperatura configurato per %s", self.entity_id)
+            log_warning(_LOGGER, "Nessun sensore di temperatura configurato per %s", self.entity_id)
             self._attr_available = False
             return True
 
@@ -578,7 +578,7 @@ class CurrentTemperatureSensor(BaseSensor):
         valid_temps = [t for t in temps if t is not None]
 
         if len(temps) != len(valid_temps):
-            _LOGGER.warning(
+            log_warning(_LOGGER,
                 "Alcuni sensori di temperatura non disponibili per %s: %d/%d validi",
                 self.entity_id,
                 len(valid_temps),
@@ -647,7 +647,7 @@ class CurrentHumiditySensor(BaseSensor):
         valid_humis = [t for t in humis if t is not None]
 
         if len(humis) != len(valid_humis):
-            _LOGGER.warning(
+            log_warning(_LOGGER,
                 "Alcuni sensori di umidità non disponibili per %s: %d/%d validi",
                 self.entity_id,
                 len(valid_humis),
@@ -664,7 +664,7 @@ class CurrentHumiditySensor(BaseSensor):
                 vals.append(max(0.0, min(100.0, v)))
 
         if not vals:
-            _LOGGER.debug("Nessun valore valido dai sensori di umidità per %s", self.entity_id)
+            log_debug(_LOGGER, "Nessun valore valido dai sensori di umidità per %s", self.entity_id)
             self._attr_available = False
             self._attr_native_value = None
             return True
@@ -728,7 +728,7 @@ class CurrentDewpointSensor(BaseSensor):
         """
         # 1) Validazione base liste
         if not self._temp_sensors or not self._humi_sensors:
-            _LOGGER.debug( "%s: liste sensori incomplete (temp=%d, humi=%d)",
+            log_debug(_LOGGER, "%s: liste sensori incomplete (temp=%d, humi=%d)",
                 self.entity_id, len(self._temp_sensors), len(self._humi_sensors),
             )
             self._attr_available = False
@@ -743,7 +743,7 @@ class CurrentDewpointSensor(BaseSensor):
         valid_humis = [h for h in humis if h is not None]
 
         if len(temps) != len(valid_temps) or len(humis) != len(valid_humis):
-            _LOGGER.debug("%s: nessun dato valido (T:%d/%d, RH:%d/%d)",
+            log_debug(_LOGGER, "%s: nessun dato valido (T:%d/%d, RH:%d/%d)",
                 self.entity_id, len(valid_temps), len(temps), len(valid_humis), len(humis)
             )
             self._attr_available = False
@@ -766,7 +766,7 @@ class CurrentDewpointSensor(BaseSensor):
         try:
             dp_c = dew_point_celsius(avg_temp_c, avg_humi_pct)
         except Exception as ex:  # noqa: BLE001
-            _LOGGER.debug(
+            log_debug(_LOGGER,
                 "%s: errore calc dewpoint T=%.2f°C RH=%.2f%% → %s",
                 self.entity_id, avg_temp_c, avg_humi_pct, ex
             )
@@ -837,7 +837,7 @@ class CurrentHeatIndexSensor(BaseSensor):
         """
         # 1) Validazione liste
         if not self._temp_sensors or not self._humi_sensors:
-            _LOGGER.debug(
+            log_debug(_LOGGER,
                 "%s: liste sensori incomplete (temp=%d, humi=%d)",
                 self.entity_id, len(self._temp_sensors), len(self._humi_sensors),
             )
@@ -853,7 +853,7 @@ class CurrentHeatIndexSensor(BaseSensor):
         valid_humis = [h for h in humis if h is not None]
 
         if not valid_temps or not valid_humis:
-            _LOGGER.debug(
+            log_debug(_LOGGER,
                 "%s: nessun dato valido (T:%d/%d, RH:%d/%d)",
                 self.entity_id, len(valid_temps), len(temps), len(valid_humis), len(humis)
             )
@@ -875,7 +875,7 @@ class CurrentHeatIndexSensor(BaseSensor):
         try:
             hi_c = float(heat_index_celsius(avg_temp_c, avg_humi_pct))
         except Exception as ex:  # noqa: BLE001
-            _LOGGER.debug(
+            log_debug(_LOGGER,
                 "%s: errore calc HI T=%.2f°C RH=%.2f%% → %s",
                 self.entity_id, avg_temp_c, avg_humi_pct, ex
             )

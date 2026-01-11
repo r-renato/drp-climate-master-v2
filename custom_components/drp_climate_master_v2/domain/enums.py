@@ -21,7 +21,7 @@ class HVACOperatingProfile(Enum):
 # -------------------- Season enums -------------------- #
 @unique
 class Seasons(StrEnum):
-    """Meteorological seasons."""
+    """Seasons."""
     WINTER = "winter"
     SPRING = "spring"
     SUMMER = "summer"
