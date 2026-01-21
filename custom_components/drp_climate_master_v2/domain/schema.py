@@ -24,6 +24,7 @@ from ..const import (
     CONF_BOILER_TEMP_SYSTEM_RETURN,
     CONF_BOILER_TEMP_SYSTEM_SUPPLY,
     CONF_BUCKET,
+    CONF_CEILING,
     CONF_CLIMATE,
     CONF_COMPRESSOR_MANAGEMENT,
     CONF_COMPRESSOR_ONLY,
@@ -63,9 +64,10 @@ from ..const import (
     CONF_LONGITUDE,
     CONF_LOW_WATER_TEMP,
     CONF_MODE,
-    CONF_MQ,
     CONF_NOBODYSIN,
     CONF_ORGANIZATION,
+    CONF_PDC_COMPRESSOR_STATE,
+    CONF_PDC_TEMP_OUTDOOR,
     CONF_PDC_TEMP_WATER_IN,
     CONF_PDC_TEMP_WATER_OUT,
     CONF_POWER,
@@ -73,6 +75,7 @@ from ..const import (
     CONF_POWER_ON_TODAY,
     CONF_PROVIDER,
     CONF_RADIANT,
+    CONF_RADIANT_SURFACE,
     CONF_REQUESTS,
     CONF_SCENARIOS,
     CONF_WINDOWS,
@@ -132,7 +135,8 @@ AREAS_SCHEMA = vol.Schema(
             }
         ),
         vol.Optional(CONF_TCOLLECTOR): cv.entity_id,
-        vol.Optional(CONF_MQ): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        vol.Optional(CONF_CEILING): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        vol.Optional(CONF_RADIANT_SURFACE): vol.All(vol.Coerce(float), vol.Range(min=0)),
     }
 )
 
@@ -186,6 +190,8 @@ RADIANT_SCHEMA = vol.Schema(
             {
                 vol.Required(CONF_PDC_TEMP_WATER_IN): cv.entity_id,
                 vol.Required(CONF_PDC_TEMP_WATER_OUT): cv.entity_id,
+                vol.Optional(CONF_PDC_TEMP_OUTDOOR): cv.entity_id,
+                vol.Optional(CONF_PDC_COMPRESSOR_STATE): cv.entity_id,
             }
         ),
     }

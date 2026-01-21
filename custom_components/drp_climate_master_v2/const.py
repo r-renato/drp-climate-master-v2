@@ -121,7 +121,8 @@ CONF_INDOOR: Final[str] = "indoor"
 CONF_TEMPERATURE: Final[str] = "temperature"
 CONF_HUMIDITY: Final[str] = "humidity"
 CONF_TCOLLECTOR: Final[str] = "thermal_collector_valve_switch"
-CONF_MQ: Final[str] = "mq"
+CONF_CEILING: Final[str] = "ceiling"
+CONF_RADIANT_SURFACE: Final[str] = "radiant_surface"
 
 # ======================================================
 # DEVICES
@@ -157,6 +158,8 @@ CONF_VALUE: Final[str] = "value"
 # Sensori radiant / PDC
 CONF_PDC_TEMP_WATER_IN: Final[str] = "pdc_temp_water_in"
 CONF_PDC_TEMP_WATER_OUT: Final[str] = "pdc_temp_water_out"
+CONF_PDC_TEMP_OUTDOOR: Final[str] = "pdc_temp_outdoor"
+CONF_PDC_COMPRESSOR_STATE: Final[str] = "pdc_compressor_state"
 
 # -- VMC
 CONF_VMC: Final[str] = "vmc"

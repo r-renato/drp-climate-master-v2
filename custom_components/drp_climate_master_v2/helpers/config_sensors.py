@@ -1,45 +1,33 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import List
+
+from .utils import slugify
+
+from ..domain.models.runtime_schema import AreaConfig, ClimateConfig, SupplyUnitsConfig
 
 from .sensor_aggregator import DerivedSpec, FilterConfig, GroupSpec, MappingConfig, SensorSpec, ZoneConfig
 
-def build_sensor_mapping() -> MappingConfig:
-    """Mapping built from the provided areas configuration.
 
-    Areas included
-    - Indoor zones: Kitchen, Living, Foyer, Master Bedroom, Guest Bedroom,
-    Master Bathroom, Main Bathroom, Electric cabinet
-    - Outdoor zone: Terrace
+def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
+    zones: List[ZoneConfig] = []
 
-    Notes / critical choices
-    - "Foyer" shares the SAME temperature/humidity sensors as "Living" in your config.
-    If you include both in house-level aggregates, you'd double-count the same measurement.
-    Here we keep the zone for completeness but set its weight to 0.0 and exclude it from
-    derived globals.
-    - "Electric cabinet" is indoor but typically not representative of comfort; we keep it
-    as a zone but exclude it from indoor global aggregates.
-    - Global indoor temperature uses area-weighted mean (mq).
-    - Global indoor humidity uses median across zones (robust vs bathroom spikes).
-    """
-
-    # Indoor temperature filters (radiant floors / slow dynamics):
-    # keep smoothing moderate, clamp spikes.
     indoor_temp_filters = FilterConfig(
         max_age=timedelta(minutes=10),
+        hold_last_good=timedelta(minutes=5),
         min_valid=5.0,
         max_valid=35.0,
         time_hampel_k=4.0,
-        max_rate_per_min=0.6,  # °C/min (very conservative indoors)
+        max_rate_per_min=0.6,  # °C/min
         rate_limit_mode="clip",
         ema_alpha=0.2,
         rolling_median_window=3,
     )
 
-    # Indoor humidity filters: RH can jump after showers; we clip extremely fast spikes but
-    # still allow real humidity transients.
     indoor_rh_filters = FilterConfig(
         max_age=timedelta(minutes=10),
+        hold_last_good=timedelta(minutes=5),
         min_valid=1.0,
         max_valid=100.0,
         time_hampel_k=4.0,
@@ -49,9 +37,44 @@ def build_sensor_mapping() -> MappingConfig:
         rolling_median_window=3,
     )
 
-    # Outdoor filters: larger dynamics and wider physical range.
+    for area in areas:
+        name = slugify(area.name)
+        if area.indoor:
+            zones.append(
+                ZoneConfig(
+                    zone=name,
+                    weight=area.ceiling or 0.0,
+                    variables=(
+                        GroupSpec(
+                            name="indoor_temperature",
+                            sensors=(SensorSpec(area.sensors.temperature, weight=1.0, filters=indoor_temp_filters),),
+                            method="weighted_mean",
+                            cross_outlier_method="none",
+                            min_sources=1,
+                            clamp_min=5.0,
+                            clamp_max=35.0 if area.radiant else 60.0,
+                        ),
+                        GroupSpec(
+                            name="indoor_humidity",
+                            sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=indoor_rh_filters),),
+                            method="weighted_mean",
+                            cross_outlier_method="none",
+                            min_sources=1,
+                            clamp_min=1.0,
+                            clamp_max=100.0,
+                        ),
+                    ),
+                )
+            )
+
+    return tuple(zones)
+
+def _build_outdoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
+    zones: List[ZoneConfig] = []
+
     outdoor_temp_filters = FilterConfig(
         max_age=timedelta(minutes=20),
+        hold_last_good=timedelta(minutes=10),
         min_valid=-30.0,
         max_valid=55.0,
         time_hampel_k=6.0,
@@ -63,6 +86,7 @@ def build_sensor_mapping() -> MappingConfig:
 
     outdoor_rh_filters = FilterConfig(
         max_age=timedelta(minutes=20),
+        hold_last_good=timedelta(minutes=10),
         min_valid=1.0,
         max_valid=100.0,
         time_hampel_k=6.0,
@@ -72,341 +96,254 @@ def build_sensor_mapping() -> MappingConfig:
         rolling_median_window=1,
     )
 
-    # ---- Zones (from your list) ----
+    for area in areas:
+        name = slugify(area.name)
+        if not area.indoor:
+            zones.append(
+                ZoneConfig(
+                    zone=name,
+                    weight=1.0,
+                    variables=(
+                        GroupSpec(
+                            name="outdoor_temperature",
+                            sensors=(
+                                SensorSpec(area.sensors.temperature, weight=1.0, filters=outdoor_temp_filters),
+                                SensorSpec("sensor.hmi080_outdoor_temperature", weight=1.0, filters=outdoor_temp_filters),
+                            ),
+                            method="weighted_mean",
+                            cross_outlier_method="none",
+                            min_sources=1,
+                            clamp_min=-30.0,
+                            clamp_max=55.0,
+                        ),
+                        GroupSpec(
+                            name="outdoor_humidity",
+                            sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=outdoor_rh_filters),),
+                            method="weighted_mean",
+                            cross_outlier_method="none",
+                            min_sources=1,
+                            clamp_min=1.0,
+                            clamp_max=100.0,
+                        ),
+                    ),
+                )
+            )
 
+    return tuple(zones)
 
-    kitchen = ZoneConfig(
-        zone="kitchen",
-        weight=10.8,
-        variables=(
-            GroupSpec(
-                name="indoor_temperature",
-                sensors=(SensorSpec("sensor.ambient_kitchen_temperature", weight=1.0, filters=indoor_temp_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=5.0,
-                clamp_max=35.0,
-            ),
-            GroupSpec(
-                name="indoor_humidity",
-                sensors=(SensorSpec("sensor.ambient_kitchen_humidity", weight=1.0, filters=indoor_rh_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=1.0,
-                clamp_max=100.0,
-            ),
-            GroupSpec(
-                name="indoor_dew_point",
-                sensors=(SensorSpec("sensor.ambient_kitchen_dew_point", weight=1.0, filters=indoor_temp_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=-20.0,
-                clamp_max=30.0,
-            ),
-            GroupSpec(
-                name="indoor_heat_index",
-                sensors=(SensorSpec("sensor.ambient_kitchen_heat_index", weight=1.0, filters=indoor_temp_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=-20.0,
-                clamp_max=60.0,
-            ),
-
-        ),
+def _build_plant_radiant(supply_units: SupplyUnitsConfig) -> tuple[ZoneConfig, ...]:
+    
+    radiant_water_filters = FilterConfig(
+        max_age=timedelta(minutes=10),
+        hold_last_good=timedelta(minutes=5),
+        min_valid=5.0,
+        max_valid=60.0,
+        time_hampel_k=6.0,
+        max_rate_per_min=5.0,  # °C/min
+        rate_limit_mode="clip",
+        ema_alpha=0.2,
+        rolling_median_window=1,
     )
 
-    living = ZoneConfig(
-        zone="living",
-        weight=12.6,
-        variables=(
-            GroupSpec(
-                name="indoor_temperature",
-                sensors=(SensorSpec("sensor.ambient_living_temperature", weight=1.0, filters=indoor_temp_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=5.0,
-                clamp_max=35.0,
-            ),
-            GroupSpec(
-                name="indoor_humidity",
-                sensors=(SensorSpec("sensor.ambient_living_humidity", weight=1.0, filters=indoor_rh_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=1.0,
-                clamp_max=100.0,
-            ),
-        ),
-    )
-
-    foyer = ZoneConfig(
-        zone="foyer",
-        weight=0.0,  # IMPORTANT: shares the same sensors as living -> avoid double-counting
-        variables=(
-            GroupSpec(
-                name="indoor_temperature",
-                sensors=(SensorSpec("sensor.ambient_living_temperature", weight=1.0, filters=indoor_temp_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=5.0,
-                clamp_max=35.0,
-            ),
-            GroupSpec(
-                name="indoor_humidity",
-                sensors=(SensorSpec("sensor.ambient_living_humidity", weight=1.0, filters=indoor_rh_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=1.0,
-                clamp_max=100.0,
-            ),
-        ),
-    )
-
-    master_bedroom = ZoneConfig(
-        zone="master_bedroom",
-        weight=9.0,
-        variables=(
-            GroupSpec(
-                name="indoor_temperature",
-                sensors=(SensorSpec("sensor.ambient_master_bedroom_temperature", weight=1.0, filters=indoor_temp_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=5.0,
-                clamp_max=35.0,
-            ),
-            GroupSpec(
-                name="indoor_humidity",
-                sensors=(SensorSpec("sensor.ambient_master_bedroom_humidity", weight=1.0, filters=indoor_rh_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=1.0,
-                clamp_max=100.0,
-            ),
-        ),
-    )
-
-    guest_bedroom = ZoneConfig(
-        zone="guest_bedroom",
-        weight=8.2,
-        variables=(
-            GroupSpec(
-                name="indoor_temperature",
-                sensors=(SensorSpec("sensor.ambient_guest_bedroom_temperature", weight=1.0, filters=indoor_temp_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=5.0,
-                clamp_max=35.0,
-            ),
-            GroupSpec(
-                name="indoor_humidity",
-                sensors=(SensorSpec("sensor.ambient_guest_bedroom_humidity", weight=1.0, filters=indoor_rh_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=1.0,
-                clamp_max=100.0,
-            ),
-        ),
-    )
-
-    master_bathroom = ZoneConfig(
-        zone="master_bathroom",
-        weight=4.6,
-        variables=(
-            GroupSpec(
-                name="indoor_temperature",
-                sensors=(SensorSpec("sensor.ambient_master_bathroom_temperature", weight=1.0, filters=indoor_temp_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=5.0,
-                clamp_max=35.0,
-            ),
-            GroupSpec(
-                name="indoor_humidity",
-                sensors=(SensorSpec("sensor.ambient_master_bathroom_humidity", weight=1.0, filters=indoor_rh_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=1.0,
-                clamp_max=100.0,
-            ),
-        ),
-    )
-
-    main_bathroom = ZoneConfig(
-        zone="main_bathroom",
-        weight=4.2,
-        variables=(
-            GroupSpec(
-                name="indoor_temperature",
-                sensors=(SensorSpec("sensor.ambient_main_bathroom_temperature", weight=1.0, filters=indoor_temp_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=5.0,
-                clamp_max=35.0,
-            ),
-            GroupSpec(
-                name="indoor_humidity",
-                sensors=(SensorSpec("sensor.ambient_main_bathroom_humidity", weight=1.0, filters=indoor_rh_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=1.0,
-                clamp_max=100.0,
-            ),
-        ),
-    )
-
-    electric_cabinet = ZoneConfig(
-        zone="electric_cabinet",
-        weight=0.0,  # exclude from comfort aggregates
-        variables=(
-            GroupSpec(
-                name="indoor_temperature",
-                sensors=(SensorSpec("sensor.ambient_electric_cabinet_temperature", weight=1.0, filters=indoor_temp_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=0.0,
-                clamp_max=50.0,
-            ),
-            GroupSpec(
-                name="indoor_humidity",
-                sensors=(SensorSpec("sensor.ambient_electric_cabinet_humidity", weight=1.0, filters=indoor_rh_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=1.0,
-                clamp_max=100.0,
-            ),
-        ),
-    )
-
-    terrace = ZoneConfig(
-        zone="terrace",
-        weight=1.0,
-        variables=(
-            GroupSpec(
-                name="outdoor_temperature",
-                sensors=(
-                    SensorSpec("sensor.ambient_outdoor_temperature", weight=1.0, filters=outdoor_temp_filters),
-                    SensorSpec("sensor.hmi080_outdoor_temperature", weight=1.0, filters=outdoor_temp_filters)
+    return (ZoneConfig(
+                zone="plant_radiant",
+                weight=0.0,
+                variables=(
+                    GroupSpec(
+                        name="adj_supply_temperature",
+                        sensors=(
+                            SensorSpec(
+                                supply_units.sensors.adjustable_temp_system_supply,
+                                weight=1.0,
+                                filters=radiant_water_filters,
+                            ),
+                        ),
+                        method="weighted_mean",
+                        cross_outlier_method="none",
+                        min_sources=1,
+                        clamp_min=5.0,
+                        clamp_max=60.0,
+                    ),
+                    GroupSpec(
+                        name="adj_return_temperature",
+                        sensors=(
+                            SensorSpec(
+                                supply_units.sensors.adjustable_temp_system_return,
+                                weight=1.0,
+                                filters=radiant_water_filters,
+                            ),
+                        ),
+                        method="weighted_mean",
+                        cross_outlier_method="none",
+                        min_sources=1,
+                        clamp_min=5.0,
+                        clamp_max=60.0,
+                    ),
                 ),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=-30.0,
-                clamp_max=55.0,
             ),
-            GroupSpec(
-                name="outdoor_humidity",
-                sensors=(SensorSpec("sensor.ambient_outdoor_humidity", weight=1.0, filters=outdoor_rh_filters),),
-                method="weighted_mean",
-                cross_outlier_method="none",
-                min_sources=1,
-                clamp_min=1.0,
-                clamp_max=100.0,
-            ),
-        ),
     )
 
-    zones = (
-        kitchen,
-        living,
-        foyer,
-        master_bedroom,
-        guest_bedroom,
-        master_bathroom,
-        main_bathroom,
-        # electric_cabinet, # excluded from derived globals
-        terrace,
-    )
+def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
+    psychro_derived: list[DerivedSpec] = []
 
-    # Derived globals (indoor only; exclude foyer + electric cabinet by omission)
-    indoor_temp_inputs = (
-        ("kitchen.indoor_temperature", 10.8),
-        ("living.indoor_temperature", 12.6),
-        ("master_bedroom.indoor_temperature", 9.0),
-        ("guest_bedroom.indoor_temperature", 8.2),
-        ("master_bathroom.indoor_temperature", 4.6),
-        ("main_bathroom.indoor_temperature", 4.2),
-    )
+    for area in areas:
+        name = slugify(area.name)
+        if area.indoor and area.radiant and area.ceiling:
+            psychro_derived.append(
+                DerivedSpec(
+                    name=f"{name}.indoor_dew_point",
+                    kind="compute",
+                    compute="dew_point_c",
+                    inputs=(
+                        (f"{name}.indoor_temperature", 1.0),
+                        (f"{name}.indoor_humidity", 1.0),
+                    ),
+                    min_sources=2,
+                    clamp_min=-20.0,
+                    clamp_max=30.0,
+                    max_age=timedelta(minutes=10),
+                    hold_last_good=timedelta(minutes=5),
+                )
+            )
+            psychro_derived.append(
+                DerivedSpec(
+                    name=f"{name}.indoor_heat_index",
+                    kind="compute",
+                    compute="heat_index_c",
+                    inputs=(
+                        (f"{name}.indoor_temperature", 1.0),
+                        (f"{name}.indoor_humidity", 1.0),
+                    ),
+                    min_sources=2,
+                    clamp_min=-20.0,
+                    clamp_max=60.0,
+                    max_age=timedelta(minutes=10),
+                    hold_last_good=timedelta(minutes=5),
+                )
+            )
+            psychro_derived.append(
+                DerivedSpec(
+                    name=f"{name}.condensation_margin",
+                    kind="compute",
+                    compute="condensation_margin_c",
+                    inputs=(
+                        ("global.radiant_mean_temperature", 1.0),
+                        (f"{name}.indoor_dew_point", 1.0),
+                    ),
+                    min_sources=2,
+                    clamp_min=-20.0,
+                    clamp_max=30.0,
+                    max_age=timedelta(minutes=10),
+                    hold_last_good=timedelta(minutes=5),
+                ),
+            )
 
-    indoor_rh_inputs = (
-        ("kitchen.indoor_humidity", 1.0),
-        ("living.indoor_humidity", 1.0),
-        ("master_bedroom.indoor_humidity", 1.0),
-        ("guest_bedroom.indoor_humidity", 1.0),
-        ("master_bathroom.indoor_humidity", 1.0),
-        ("main_bathroom.indoor_humidity", 1.0),
-    )
+    return tuple(psychro_derived)
 
-    derived = (
+def _build_mrt_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
+    """Mean Radiant Temperature"""
+    mrt_derived: list[DerivedSpec] = []
+
+    for area in areas:
+        name = slugify(area.name)
+        if area.indoor and area.radiant and area.ceiling:
+            mrt_derived.append(
+                DerivedSpec(
+                    name=f"{name}.mrt",
+                    kind="compute",
+                    compute="mrt_c",
+                    inputs=(
+                        (f"{name}.indoor_temperature", 1.0),
+                        ("global.radiant_mean_temperature", 1.0),
+                    ),
+                    min_sources=2,
+                    clamp_min=-10.0,
+                    clamp_max=40.0,
+                    max_age=timedelta(minutes=10),
+                    hold_last_good=timedelta(minutes=5),
+                )
+            )
+            mrt_derived.append(
+                DerivedSpec(
+                    name=f"{name}.t_op",
+                    kind="compute",
+                    compute="t_op_c",
+                    inputs=(
+                        (f"{name}.indoor_temperature", 1.0),
+                        (f"{name}.mrt", 1.0),
+                    ),
+                    min_sources=2,
+                    clamp_min=-10.0,
+                    clamp_max=40.0,
+                    max_age=timedelta(minutes=10),
+                    hold_last_good=timedelta(minutes=5),
+                )
+            )
+
+    return tuple(mrt_derived)
+
+def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
+    indoor_temp_inputs = []
+    indoor_rh_inputs = []
+    indoor_dp_inputs = []
+    indoor_hi_inputs = []
+    indoor_cm_inputs = []
+
+    for area in areas:
+        name = slugify(area.name)
+        if area.indoor and area.radiant and area.ceiling:
+            indoor_temp_inputs.append((f"{name}.indoor_temperature", area.ceiling))
+            indoor_rh_inputs.append((f"{name}.indoor_humidity", 1.0))
+            indoor_dp_inputs.append((f"{name}.indoor_dew_point", 1.0))
+            indoor_hi_inputs.append((f"{name}.indoor_heat_index", 1.0))
+            indoor_cm_inputs.append((f"{name}.condensation_margin", 1.0))
+
+    return (
         DerivedSpec(
             name="global.indoor_temperature",
             kind="aggregate",
-            inputs=indoor_temp_inputs,
+            inputs=tuple(indoor_temp_inputs),
             method="weighted_mean",
             min_sources=2,
             clamp_min=5.0,
             clamp_max=35.0,
             max_age=timedelta(minutes=10),
+            hold_last_good=timedelta(minutes=5),
         ),
         DerivedSpec(
             name="global.indoor_humidity",
             kind="aggregate",
-            inputs=indoor_rh_inputs,
+            inputs=tuple(indoor_rh_inputs),
             method="median",
             min_sources=2,
             clamp_min=1.0,
             clamp_max=100.0,
             max_age=timedelta(minutes=10),
+            hold_last_good=timedelta(minutes=5),
         ),
+        # Conservative: max dew point among representative zones (exclude foyer duplication)
         DerivedSpec(
             name="global.indoor_dew_point",
             kind="aggregate",
-            inputs=(
-                ("kitchen.indoor_dew_point", 1.0),
-                ("living.indoor_dew_point", 1.0),
-                ("master_bedroom.indoor_dew_point", 1.0),
-                ("guest_bedroom.indoor_dew_point", 1.0),
-                ("master_bathroom.indoor_dew_point", 1.0),
-                ("main_bathroom.indoor_dew_point", 1.0),
-            ),
+            inputs=tuple(indoor_dp_inputs),
             method="max",
             min_sources=2,
             clamp_min=-20.0,
             clamp_max=30.0,
             max_age=timedelta(minutes=10),
+            hold_last_good=timedelta(minutes=5),
         ),
+        # Keep prior behavior: max heat index among zones (mostly meaningful in summer)
         DerivedSpec(
             name="global.indoor_heat_index",
             kind="aggregate",
-            inputs=(
-                ("kitchen.indoor_heat_index", 1.0),
-                ("living.indoor_heat_index", 1.0),
-                ("master_bedroom.indoor_heat_index", 1.0),
-                ("guest_bedroom.indoor_heat_index", 1.0),
-                ("master_bathroom.indoor_heat_index", 1.0),
-                ("main_bathroom.indoor_heat_index", 1.0),
-            ),
+            inputs=tuple(indoor_hi_inputs),
             method="max",
             min_sources=2,
             clamp_min=-20.0,
             clamp_max=60.0,
             max_age=timedelta(minutes=10),
+            hold_last_good=timedelta(minutes=5),
         ),
         DerivedSpec(
             name="global.outdoor_temperature",
@@ -417,6 +354,7 @@ def build_sensor_mapping() -> MappingConfig:
             clamp_min=-30.0,
             clamp_max=55.0,
             max_age=timedelta(minutes=20),
+            hold_last_good=timedelta(minutes=10),
         ),
         DerivedSpec(
             name="global.outdoor_humidity",
@@ -427,7 +365,54 @@ def build_sensor_mapping() -> MappingConfig:
             clamp_min=1.0,
             clamp_max=100.0,
             max_age=timedelta(minutes=20),
+            hold_last_good=timedelta(minutes=10),
+        ),
+        DerivedSpec(
+            name="global.outdoor_dew_point",
+            kind="compute",
+            compute="dew_point_c",
+            inputs=(
+                ("global.outdoor_temperature", 1.0),
+                ("global.outdoor_humidity", 1.0),
+            ),
+            min_sources=2,
+            max_age=timedelta(minutes=15),
+            hold_last_good=timedelta(minutes=10),  # opzionale ma utile
+        ),
+        DerivedSpec(
+            name="global.radiant_mean_temperature",
+            kind="aggregate",
+            inputs=(
+                ("plant_radiant.adj_supply_temperature", 1.0),
+                ("plant_radiant.adj_return_temperature", 1.0),
+            ),
+            method="weighted_mean",
+            min_sources=1,
+            clamp_min=5.0,
+            clamp_max=60.0,
+            max_age=timedelta(minutes=10),
+            hold_last_good=timedelta(minutes=5),
+        ),
+        DerivedSpec(
+            name="global.condensation_margin_min",
+            kind="aggregate",
+            inputs=tuple(indoor_cm_inputs),
+            method="min",
+            min_sources=2,
+            clamp_min=-20.0,
+            clamp_max=30.0,
+            max_age=timedelta(minutes=10),
+            hold_last_good=timedelta(minutes=5),
         ),
     )
 
-    return MappingConfig(zones=zones, derived=derived)
+def build_sensor_mapping(climate: ClimateConfig) -> MappingConfig:
+    """Mapping built from the provided areas configuration."""
+    return MappingConfig(
+        zones=_build_indoor_zones(climate.areas) \
+                + _build_outdoor_zones(climate.areas) \
+                + _build_plant_radiant(climate.devices.supply_units),
+        derived=_build_global_derived(climate.areas) \
+                + _build_psychro_derived(climate.areas) 
+                + _build_mrt_derived(climate.areas)
+    )

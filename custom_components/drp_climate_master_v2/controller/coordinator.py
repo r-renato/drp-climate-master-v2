@@ -80,7 +80,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self._sensor_aggregator = SensorAggregator(
             entities_state_store=self._entities_state_store, 
-            mapping=build_sensor_mapping()
+            mapping=build_sensor_mapping(self._runtime.climate)
         )
 
         # Psychrolib unit system: impostazione globale (attenzione: globale nel processo)
@@ -579,9 +579,9 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             await self._sensor_aggregator.async_update()
 
-            await self._test_regime_config()
+            # await self._test_regime_config()
 
-            # log_debug(_LOGGER, "%s", self._sensor_aggregator.latest_all())
+            log_debug(_LOGGER, "%s", self._sensor_aggregator.latest_all())
 
             # TODO: costruire snapshot reale (PlantSnapshot ecc.)
             # Esempio minimale: esporta solo timestamp e numero entity osservate

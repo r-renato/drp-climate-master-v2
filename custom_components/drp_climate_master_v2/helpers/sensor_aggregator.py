@@ -1,22 +1,28 @@
-"""Sensor aggregation + mapping layer for HVAC control (Home Assistant friendly).
+"""
+Sensor aggregation + mapping layer for HVAC control (Home Assistant friendly).
+
+Key updates (2026-01 hold-last-good + HA timestamp quirks)
+- HA may NOT update last_updated/last_reported when state doesn't change.
+  So we DO NOT use HA timestamps as freshness for HVAC decisions by default.
+- Freshness is based on "last successful numeric read" (observed timestamp = now).
+- Transient Modbus/HA issues (unavailable/non_numeric/stale_source/etc.) trigger HOLD-LAST-GOOD
+  for a configurable grace window, instead of collapsing groups to None immediately.
 
 What this module provides
 - Robust sensor ingestion from Home Assistant entities.
-- Per-sensor filtering pipeline (range, staleness, unit conversion, time-outliers, rate limiting, EMA, rolling median).
+- Per-sensor filtering pipeline (range, staleness (optional source-based), unit conversion,
+  time-outliers, rate limiting, EMA, rolling median).
 - Mapping layer: entities -> logical variables -> zones -> optional global/derived variables.
-- Optional computed derived variables (e.g., dew point, heat index) from other group outputs.
-- Aggregated values always come with quality metadata and reason codes.
+- Optional computed derived variables (e.g., dew point, heat index, MRT, T_op).
 
-What this module intentionally does NOT do
-- No HVAC decisions (heat/cool/dehumidify). This is just the input layer.
-
-When dew point / heat index sensors exist in HA
-- You *can* ingest them as normal groups (e.g., living.indoor_dew_point).
-- Prefer computing dew point / heat index from aggregated T/RH for consistency.
-- Best practice: compute them here AND optionally compare with the HA sensor to detect calibration problems.
+Important semantics
+- "observed_ts" = time when aggregator reads a valid numeric state (now, UTC). Used for freshness.
+- "source_ts"    = HA-provided timestamps (last_reported/last_updated). Used only optionally
+                  (max_source_age) as a hard guard; NOT relied upon by default.
 
 Notes
 - Home Assistant state objects are expected to expose: state (str), last_updated (datetime), attributes (dict).
+  Some builds also expose last_reported; we use it if present, defensively.
 - Datetimes from HA are usually tz-aware; we defensively handle naive timestamps.
 """
 
@@ -29,7 +35,7 @@ from typing import Any, Deque, Dict, Iterable, List, Literal, Optional, Tuple
 import math
 from collections import deque
 
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import State
 
 from ..const import DOMAIN, ENTITIES_STATE
 
@@ -43,7 +49,13 @@ AggregationMethod = Literal["weighted_mean", "median", "trimmed_mean", "max", "m
 CrossOutlierMethod = Literal["none", "hampel", "zscore"]
 RateLimitMode = Literal["clip", "reject"]
 DerivedKind = Literal["aggregate", "compute"]
-ComputeFn = Literal["dew_point_c", "heat_index_c"]
+ComputeFn = Literal["dew_point_c", "heat_index_c", "mrt_c", "t_op_c", "condensation_margin_c"]
+
+# -----------------------------
+# Numerics
+# -----------------------------
+# Float epsilon used to decide whether an input is "effectively unchanged".
+EPS_UNCHANGED = 1e-6
 
 
 # -----------------------------
@@ -53,14 +65,30 @@ ComputeFn = Literal["dew_point_c", "heat_index_c"]
 
 @dataclass(frozen=True)
 class FilterConfig:
-    """Per-sensor filtering pipeline parameters."""
+    """Per-sensor filtering pipeline parameters.
+
+    Freshness and resilience
+    - max_age: how long a LAST-GOOD reading remains "fresh" (for groups/derived) before being stale.
+              IMPORTANT: This is NOT based on HA timestamps; it's based on observed_ts (now) when
+              the aggregator successfully reads a numeric state.
+    - hold_last_good: additional grace window during which last-good value can be used even if the
+              sensor becomes unavailable/non_numeric/etc. (Modbus glitches, HA transient issues).
+    - max_source_age: OPTIONAL hard guard based on HA timestamps (last_reported/last_updated).
+              Leave None by default because HA may not update timestamps when state doesn't change.
+    """
 
     # If True, attempt unit conversion based on HA unit_of_measurement.
     # Supported: °C/°F for temperature-like variables; % for humidity.
     auto_unit_convert: bool = True
 
-    # Discard values older than this (based on HA last_updated)
+    # Freshness window (observed_ts-based; see note above)
     max_age: Optional[timedelta] = timedelta(minutes=15)
+
+    # Grace window for hold-last-good when sensor errors occur
+    hold_last_good: timedelta = timedelta(minutes=5)
+
+    # OPTIONAL: Hard staleness based on HA timestamps (source_ts). Default None.
+    max_source_age: Optional[timedelta] = None
 
     # Basic physical plausibility range (applied after unit conversion)
     min_valid: Optional[float] = None
@@ -114,6 +142,9 @@ class GroupSpec:
     # Optional group-level max_age; if None, uses strictest max_age among used sensors
     max_age: Optional[timedelta] = None
 
+    # Optional group-level grace; if None, uses strictest (min) hold_last_good among used sensors
+    hold_last_good: Optional[timedelta] = None
+
 
 @dataclass(frozen=True)
 class ZoneConfig:
@@ -134,6 +165,10 @@ class DerivedSpec:
 
     Inputs
     - inputs is a list of (group_name, weight). For kind='compute', weights are ignored.
+
+    Staleness
+    - Derived staleness is evaluated on the max(ts) of used inputs, plus dspec.max_age.
+      Since group freshness uses observed_ts, derived freshness inherits that behavior.
     """
 
     name: str  # e.g., "global.indoor_temperature"
@@ -150,6 +185,11 @@ class DerivedSpec:
     clamp_max: Optional[float] = None
 
     max_age: Optional[timedelta] = None
+    # Optional derived-level "hold last good".
+    # If derived cannot be computed (missing/stale/insufficient inputs or compute error),
+    # reuse previous derived value for up to (max_age + hold_last_good).
+    # Leave None to disable (preserves legacy behavior).
+    hold_last_good: Optional[timedelta] = None
 
 
 @dataclass(frozen=True)
@@ -166,7 +206,7 @@ class MappingConfig:
 @dataclass
 class Sample:
     value: float
-    ts: datetime
+    ts: datetime  # observed timestamp (freshness), NOT HA source timestamp
 
 
 @dataclass
@@ -179,6 +219,11 @@ class SensorRuntime:
     last_raw: Optional[Sample] = None
     last_filtered: Optional[Sample] = None
 
+    # Freshness / diagnostics
+    last_seen_ok: Optional[datetime] = None          # when we last read a valid numeric state (observed)
+    last_source_ts_seen: Optional[datetime] = None   # latest HA timestamp observed (diagnostic)
+    last_source_ts_ok: Optional[datetime] = None     # HA timestamp associated to last accepted value (diagnostic)
+
     last_error: Optional[str] = None
     rejected_count: int = 0
     clipped_count: int = 0
@@ -188,7 +233,7 @@ class SensorRuntime:
 class AggregatedValue:
     name: str
     value: Optional[float]
-    ts: Optional[datetime]
+    ts: Optional[datetime]  # observed timestamp of the aggregated value (freshness)
 
     sources_total: int
     sources_used: int
@@ -264,7 +309,7 @@ def _trimmed_mean(values: List[float], frac: float) -> float:
     s = sorted(values)
     n = len(s)
     k = int(math.floor(n * frac))
-    core = s[k : n - k] if (n - 2 * k) > 0 else s
+    core = s[k: n - k] if (n - 2 * k) > 0 else s
     return sum(core) / len(core)
 
 
@@ -290,6 +335,18 @@ def _ensure_tz(dt: datetime) -> datetime:
     return dt
 
 
+def _source_ts(state_obj: State, now: datetime) -> datetime:
+    """Best-effort HA timestamp for diagnostics/hard guards.
+
+    Prefer last_reported if present, else last_updated, else now.
+    """
+    return _ensure_tz(
+        getattr(state_obj, "last_reported", None)
+        or getattr(state_obj, "last_updated", None)
+        or now
+    )
+
+
 def _convert_unit_if_needed(value: float, unit: Optional[str]) -> float:
     """Convert supported units to canonical.
 
@@ -311,17 +368,41 @@ def _convert_unit_if_needed(value: float, unit: Optional[str]) -> float:
 
 # --- Psychrometric-ish computations (lightweight, deterministic) ---
 
+# --- Condensation margin (dew point guard) -----------------------------------
+
+# Surface is usually slightly warmer than mean water temp in cooling mode.
+# Keep conservative (small) so margin stays "safer" (smaller margin => earlier guard).
+DEFAULT_SURFACE_OFFSET_C = 1.0  # °C
+
+def condensation_margin_c(
+    radiant_mean_temp_c: float,
+    dew_point_c: float,
+    surface_offset_c: float = DEFAULT_SURFACE_OFFSET_C,
+) -> float:
+    """
+    Condensation safety margin [°C].
+
+    Positive => surface estimated above dew point (safe).
+    Near 0   => borderline.
+    Negative => likely condensation.
+
+    Inputs:
+      - radiant_mean_temp_c: mean radiant water temp (e.g. global.radiant_mean_temperature)
+      - dew_point_c: air dew point (zone or global)
+      - surface_offset_c: empirical offset (surface ≈ water_mean + offset)
+    """
+    # If upstream guarantees floats, this is enough; keep defensive anyway.
+    if radiant_mean_temp_c is None or dew_point_c is None:
+        raise ValueError("condensation_margin_c requires two valid numeric inputs")
+
+    return (float(radiant_mean_temp_c) + float(surface_offset_c)) - float(dew_point_c)
+
 
 def dew_point_c(t_c: float, rh_pct: float) -> float:
-    """Dew point in °C from dry-bulb T (°C) and RH (%).
-
-    Uses Magnus formula (good accuracy for typical indoor ranges).
-    """
-    # Guard
+    """Dew point in °C from dry-bulb T (°C) and RH (%). Uses Magnus formula."""
     rh = max(0.1, min(100.0, float(rh_pct)))
     t = float(t_c)
 
-    # Magnus constants over water
     a = 17.62
     b = 243.12
     gamma = (a * t) / (b + t) + math.log(rh / 100.0)
@@ -332,9 +413,8 @@ def dew_point_c(t_c: float, rh_pct: float) -> float:
 def heat_index_c(t_c: float, rh_pct: float) -> float:
     """Heat index in °C from T (°C) and RH (%).
 
-    Uses the Rothfusz regression (NOAA) in °F domain, then converts to °C.
-    Valid primarily for warm/humid conditions (T >= ~26.7°C). Outside validity,
-    returns T (i.e., 'feels like' approximately equal to air temperature).
+    Uses Rothfusz regression (NOAA) in °F domain, then converts to °C.
+    Outside validity (T < ~26.7°C or RH < 40%), returns T.
     """
     t = float(t_c)
     rh = max(0.0, min(100.0, float(rh_pct)))
@@ -356,8 +436,23 @@ def heat_index_c(t_c: float, rh_pct: float) -> float:
         - 0.00000199 * tf * tf * rh * rh
     )
 
-    # Convert back to °C
     return float((hi_f - 32.0) * (5.0 / 9.0))
+
+
+MRT_K_RAD_DEFAULT = 0.2
+
+
+def mrt_c(t_air_c: float, t_rad_mean_c: float, k_rad: float = MRT_K_RAD_DEFAULT) -> float:
+    """Mean Radiant Temperature (MRT) estimate in °C."""
+    k = max(0.0, min(1.0, float(k_rad)))
+    t_air = float(t_air_c)
+    t_rad = float(t_rad_mean_c)
+    return float(t_air + k * (t_rad - t_air))
+
+
+def t_op_c(t_air_c: float, mrt_c_val: float) -> float:
+    """Operative temperature in °C (low air speed)."""
+    return float(0.5 * (float(t_air_c) + float(mrt_c_val)))
 
 
 # -----------------------------
@@ -372,18 +467,20 @@ class SensorAggregator:
     - Zone variable:   "{zone}.{variable}"   (e.g., "living.indoor_temperature")
     - Derived variable: as provided by DerivedSpec (e.g., "global.indoor_temperature")
 
-    Quality policy
-    - Each sensor can be rejected for: unavailable, stale, non_numeric, out_of_range, time_outlier, rate_reject.
-    - Rate limit can also clip values to preserve continuity.
-    - Group can reject cross-sensor outliers.
-    - Derived can be aggregate or compute.
+    Quality policy (with hold-last-good)
+    - Each sensor can be rejected for: entity_not_found, unavailable, non_numeric, non_finite,
+      stale_source (optional), out_of_range, time_outlier, rate_reject.
+    - If a sensor is rejected, groups may still use last_filtered value for up to:
+        max_age + hold_last_good
+      and will annotate reasons with "hold_last_good:<error>".
+    - Cross-sensor outliers may also be rejected.
     """
 
     def __init__(
-            self, 
-            entities_state_store: dict[str, State],
-            mapping: MappingConfig
-        ):
+        self,
+        entities_state_store: dict[str, State],
+        mapping: MappingConfig,
+    ):
         self._entities_state_store = entities_state_store
         self._mapping = mapping
 
@@ -405,9 +502,13 @@ class SensorAggregator:
                     clamp_min=g.clamp_min,
                     clamp_max=g.clamp_max,
                     max_age=g.max_age,
+                    hold_last_good=getattr(g, "hold_last_good", None),
                 )
 
         self._derived: Dict[str, DerivedSpec] = {d.name: d for d in mapping.derived}
+        # Order derived specs by dependency (derived-on-derived). Prevents "missing" due to
+        # accidental user-defined ordering in the mapping.
+        self._derived_order: List[str] = self._build_derived_order()
 
         # Runtime state per sensor entity
         self._sensor_rt: Dict[str, SensorRuntime] = {}
@@ -415,9 +516,14 @@ class SensorAggregator:
             for s in g.sensors:
                 if s.entity_id not in self._sensor_rt:
                     self._sensor_rt[s.entity_id] = SensorRuntime(spec=s)
+                else:
+                    # NOTE: same entity_id reused across groups.
+                    # Current behavior: keep first-registered spec for runtime pipeline.
+                    # (Weights are per-group, so OK; filters should ideally be identical.)
+                    pass
 
         self._latest: Dict[str, AggregatedValue] = {}
-    
+
     # -------------------------
     # Public API
     # -------------------------
@@ -453,8 +559,74 @@ class SensorAggregator:
             self._latest[group_name] = self._compute_group(now=now, gspec=gspec)
 
         # 3) Compute derived (globals / computed)
-        for dname, dspec in self._derived.items():
+        for dname in self._derived_order:
+            dspec = self._derived[dname]
             self._latest[dname] = self._compute_derived(now=now, dspec=dspec)
+
+    def _build_derived_order(self) -> List[str]:
+        """Topologically sort derived variables by derived-on-derived dependencies."""
+        names = list(self._derived.keys())  # preserves mapping order as tie-breaker
+        deps: Dict[str, List[str]] = {}
+        for dname, dspec in self._derived.items():
+            d_deps: List[str] = []
+            for in_name, _w in dspec.inputs:
+                if in_name in self._derived and in_name != dname:
+                    d_deps.append(in_name)
+            deps[dname] = d_deps
+
+        perm: set[str] = set()
+        temp: set[str] = set()
+        out: List[str] = []
+
+        def visit(n: str, stack: List[str]) -> None:
+            if n in perm:
+                return
+            if n in temp:
+                cycle = " -> ".join(stack + [n])
+                raise ValueError(f"Cycle detected in derived specs: {cycle}")
+            temp.add(n)
+            for m in deps.get(n, []):
+                visit(m, stack + [n])
+            temp.remove(n)
+            perm.add(n)
+            out.append(n)
+
+        for n in names:
+            visit(n, [])
+        return out
+
+    def _maybe_hold_last_good_derived(
+        self,
+        now: datetime,
+        dspec: DerivedSpec,
+        sources_total: int,
+        fail_reasons: Tuple[str, ...],
+    ) -> Optional[AggregatedValue]:
+        """If enabled, reuse previous derived value when current computation fails."""
+        if dspec.hold_last_good is None:
+            return None
+
+        prev = self._latest.get(dspec.name)
+        if prev is None or prev.value is None or prev.ts is None:
+            return None
+
+        max_age = dspec.max_age if dspec.max_age is not None else timedelta(minutes=15)
+        grace = dspec.hold_last_good
+        # Consider "fresh enough" within (max_age + grace), similar to group semantics.
+        if (now - prev.ts) > (max_age + grace):
+            return None
+
+        return AggregatedValue(
+            name=dspec.name,
+            value=float(prev.value),
+            ts=prev.ts,
+            sources_total=sources_total,
+            sources_used=0,
+            sources_rejected=sources_total,
+            is_stale=False,
+            is_insufficient=False,
+            reasons=("derived_hold_last_good",) + tuple(fail_reasons),
+        )
 
     # -------------------------
     # Sensor update pipeline
@@ -465,7 +637,6 @@ class SensorAggregator:
         f = spec.filters
 
         try:
-            # state_obj = hass.states.get(spec.entity_id)
             state_obj = self._entities_state_store.get(spec.entity_id)
             if state_obj is None:
                 rt.last_error = "entity_not_found"
@@ -486,26 +657,56 @@ class SensorAggregator:
                 rt.last_error = "non_finite"
                 return
 
-            ts = _ensure_tz(getattr(state_obj, "last_updated", None) or now)
+            # Diagnostic source timestamp (may not advance when value doesn't change)
+            ts_src = _source_ts(state_obj, now)
+            rt.last_source_ts_seen = ts_src
 
-            if f.max_age is not None and (now - ts) > f.max_age:
-                rt.last_error = "stale"
+            # OPTIONAL hard guard on HA timestamps (off by default)
+            if f.max_source_age is not None and (now - ts_src) > f.max_source_age:
+                rt.last_error = "stale_source"
                 return
 
             # Unit conversion (optional)
+            candidate = float(raw_val)
             if f.auto_unit_convert:
                 unit = None
                 attrs = getattr(state_obj, "attributes", None)
                 if isinstance(attrs, dict):
                     unit = attrs.get("unit_of_measurement")
-                raw_val = _convert_unit_if_needed(raw_val, unit)
+                candidate = _convert_unit_if_needed(candidate, unit)
 
             # Range checks
-            if f.min_valid is not None and raw_val < f.min_valid:
+            if f.min_valid is not None and candidate < f.min_valid:
                 rt.last_error = "below_min_valid"
                 return
-            if f.max_valid is not None and raw_val > f.max_valid:
+            if f.max_valid is not None and candidate > f.max_valid:
                 rt.last_error = "above_max_valid"
+                return
+
+            # If value did not change AND HA timestamps did not change, treat as a "heartbeat":
+            # refresh observed timestamps to keep freshness, without expanding histories.
+            #
+            # IMPORTANT: compare against last_raw when possible (filtered value may differ due to EMA/median).
+            if rt.last_filtered is not None:
+                prev_ref = (
+                    float(rt.last_raw.value) if rt.last_raw is not None
+                    else float(rt.last_filtered.value)
+                )
+            else:
+                prev_ref = None
+
+            if (
+                prev_ref is not None
+                and rt.last_filtered is not None
+                and abs(candidate - prev_ref) <= EPS_UNCHANGED
+                and rt.last_source_ts_ok is not None
+                and ts_src == rt.last_source_ts_ok
+            ):
+                rt.last_error = None
+                rt.last_seen_ok = now
+                # refresh timestamps to keep group freshness
+                rt.last_raw = Sample(value=prev_ref, ts=now)
+                rt.last_filtered = Sample(value=rt.last_filtered.value, ts=now)
                 return
 
             # Time-series outlier (Hampel on raw history)
@@ -515,15 +716,14 @@ class SensorAggregator:
                 mad = _mad(hist_vals, med)
                 if mad != 0:
                     sigma = 1.4826 * mad
-                    if abs(raw_val - med) > f.time_hampel_k * sigma:
+                    if abs(candidate - med) > f.time_hampel_k * sigma:
                         rt.last_error = "time_outlier"
                         rt.rejected_count += 1
                         return
 
-            # Rate limiting against last accepted raw
-            candidate = raw_val
+            # Rate limiting against last accepted raw (use observed dt; conservative)
             if f.max_rate_per_min is not None and rt.last_raw is not None:
-                dt_s = max(1.0, (ts - rt.last_raw.ts).total_seconds())
+                dt_s = max(1.0, (now - rt.last_raw.ts).total_seconds())
                 dt_min = dt_s / 60.0
                 max_delta = float(f.max_rate_per_min) * dt_min
                 delta = candidate - rt.last_raw.value
@@ -536,9 +736,12 @@ class SensorAggregator:
                     candidate = rt.last_raw.value + math.copysign(max_delta, delta)
                     rt.clipped_count += 1
 
-            # Accept sample
+            # Accept sample (freshness based on observed timestamp)
             rt.last_error = None
-            raw_sample = Sample(value=float(candidate), ts=ts)
+            rt.last_seen_ok = now
+            rt.last_source_ts_ok = ts_src
+
+            raw_sample = Sample(value=float(candidate), ts=now)
             rt.last_raw = raw_sample
             rt.raw_history.append(raw_sample)
             while len(rt.raw_history) > f.raw_history_size:
@@ -547,7 +750,7 @@ class SensorAggregator:
             # EMA smoothing on accepted candidate
             prev_f = rt.last_filtered.value if rt.last_filtered else None
             filtered_val = _ema(prev_f, raw_sample.value, f.ema_alpha)
-            filtered_sample = Sample(value=float(filtered_val), ts=ts)
+            filtered_sample = Sample(value=float(filtered_val), ts=now)
             rt.last_filtered = filtered_sample
             rt.filtered_history.append(filtered_sample)
             while len(rt.filtered_history) > f.filtered_history_size:
@@ -559,7 +762,7 @@ class SensorAggregator:
                 if w >= 2:
                     last_vals = [s.value for s in list(rt.filtered_history)[-w:]]
                     med_val = _median(last_vals)
-                    rt.last_filtered = Sample(value=float(med_val), ts=ts)
+                    rt.last_filtered = Sample(value=float(med_val), ts=now)
 
         except Exception as e:
             rt.last_error = f"exception:{type(e).__name__}"
@@ -579,7 +782,16 @@ class SensorAggregator:
                 rejected.append(f"{ss.entity_id}:not_registered")
                 continue
 
+            # If error: try hold-last-good
             if rt.last_error is not None:
+                if rt.last_filtered is not None:
+                    max_age = ss.filters.max_age if ss.filters.max_age is not None else timedelta(minutes=15)
+                    grace = ss.filters.hold_last_good
+                    if (now - rt.last_filtered.ts) <= (max_age + grace):
+                        used.append((ss, float(rt.last_filtered.value), rt.last_filtered.ts))
+                        reasons.append(f"{ss.entity_id}:hold_last_good:{rt.last_error}")
+                        continue
+
                 rejected.append(f"{ss.entity_id}:{rt.last_error}")
                 continue
 
@@ -605,7 +817,7 @@ class SensorAggregator:
                 reasons=("no_valid_sources",) + tuple(rejected),
             )
 
-        group_ts = max(ts for _, _, ts in used)
+        # NOTE: group_ts will be recomputed after cross-outlier rejection (used2).
 
         # Cross-sensor outliers
         vals = [v for _, v, _ in used]
@@ -639,10 +851,11 @@ class SensorAggregator:
             reasons.append("insufficient_sources")
 
         if sources_used2 == 0:
+            # No sources survived cross-outlier filtering -> no meaningful freshness timestamp.
             return AggregatedValue(
                 name=gspec.name,
                 value=None,
-                ts=group_ts,
+                ts=None,
                 sources_total=sources_total,
                 sources_used=0,
                 sources_rejected=sources_total,
@@ -650,6 +863,9 @@ class SensorAggregator:
                 is_insufficient=True,
                 reasons=tuple(reasons + ["no_sources_after_cross_filter"] + rejected),
             )
+
+        # Recompute timestamp after outlier rejection (CRITICAL for correctness)
+        group_ts = max(ts for _, _, ts in used2)
 
         # Aggregate
         values2 = [v for _, v, _ in used2]
@@ -667,14 +883,20 @@ class SensorAggregator:
 
         agg = _clamp(float(agg), gspec.clamp_min, gspec.clamp_max)
 
-        # Staleness for group
+        # Staleness for group (observed_ts based) + grace
         if gspec.max_age is not None:
             max_age = gspec.max_age
         else:
             ages = [ss.filters.max_age for ss, _, _ in used2 if ss.filters.max_age is not None]
             max_age = min(ages) if ages else timedelta(minutes=15)
 
-        is_stale = (now - group_ts) > max_age
+        if gspec.hold_last_good is not None:
+            grace = gspec.hold_last_good
+        else:
+            graces = [ss.filters.hold_last_good for ss, _, _ in used2]
+            grace = min(graces) if graces else timedelta(0)
+
+        is_stale = (now - group_ts) > (max_age + grace)
         if is_stale:
             reasons.append("group_stale")
 
@@ -690,15 +912,21 @@ class SensorAggregator:
             reasons=tuple(reasons + rejected),
         )
 
+    # -------------------------
+    # Derived computations
+    # -------------------------
+
     def _compute_derived(self, now: datetime, dspec: DerivedSpec) -> AggregatedValue:
         if dspec.kind == "compute":
             return self._compute_derived_compute(now=now, dspec=dspec)
         return self._compute_derived_aggregate(now=now, dspec=dspec)
 
     def _compute_derived_aggregate(self, now: datetime, dspec: DerivedSpec) -> AggregatedValue:
-        used_vals: List[Tuple[float, float, datetime]] = []  # (value, weight, ts)
+        # (input_name, value, weight, ts)
+        used_vals: List[Tuple[str, float, float, datetime]] = []
         rejected: List[str] = []
         reasons: List[str] = []
+        degraded = False
 
         for gname, w in dspec.inputs:
             av = self._latest.get(gname)
@@ -711,14 +939,16 @@ class SensorAggregator:
             if av.is_insufficient:
                 rejected.append(f"{gname}:insufficient")
                 continue
-            used_vals.append((float(av.value), float(w), av.ts))
+            if av.reasons and any("hold_last_good" in r for r in av.reasons):
+                degraded = True
+            used_vals.append((gname, float(av.value), float(w), av.ts))
 
         sources_total = len(dspec.inputs)
         sources_used = len(used_vals)
         sources_rejected = sources_total - sources_used
 
         if sources_used == 0:
-            return AggregatedValue(
+            fail = AggregatedValue(
                 name=dspec.name,
                 value=None,
                 ts=None,
@@ -729,22 +959,46 @@ class SensorAggregator:
                 is_insufficient=True,
                 reasons=("no_valid_inputs",) + tuple(rejected),
             )
+            held = self._maybe_hold_last_good_derived(
+                now=now,
+                dspec=dspec,
+                sources_total=sources_total,
+                fail_reasons=fail.reasons,
+            )
+            return held or fail
 
-        ts = max(t for _, _, t in used_vals)
+        ts = max(t for _, _, _, t in used_vals)
 
         is_insufficient = sources_used < max(1, dspec.min_sources)
         if is_insufficient:
             reasons.append("insufficient_sources")
+        if degraded:
+            reasons.append("inputs_degraded")
 
-        values = [v for v, _, _ in used_vals]
+        values = [v for _n, v, _w, _t in used_vals]
+        
+        # Support "max"/"min"/"median"/"trimmed_mean" explicitly.
+        # For these methods, weights are intentionally ignored.
+        if dspec.method in ("max", "min", "median", "trimmed_mean"):
+            agg = _agg(values, method=dspec.method, trimmed_fraction=dspec.trimmed_fraction)
 
-        if dspec.method == "median":
-            agg = _median(values)
-        elif dspec.method == "trimmed_mean":
-            agg = _trimmed_mean(values, frac=dspec.trimmed_fraction)
+            # Identify limiting input for min/max
+            if dspec.method in ("min", "max"):
+                if dspec.method == "min":
+                    best = min(used_vals, key=lambda x: x[1])  # by value
+                    tag = "argmin"
+                else:
+                    best = max(used_vals, key=lambda x: x[1])
+                    tag = "argmax"
+
+                best_name = best[0]
+                best_zone = best_name.split(".", 1)[0] if "." in best_name else best_name
+                reasons.append(f"{tag}_input={best_name}")
+                reasons.append(f"{tag}_zone={best_zone}")
         else:
-            num = sum(v * w for v, w, _ in used_vals if w > 0)
-            den = sum(w for _, w, _ in used_vals if w > 0)
+            # weighted_mean (default) or any other fallback -> weighted mean
+            num = sum(v * w for _n, v, w, _t in used_vals if w > 0)
+            den = sum(w for _n, _v, w, _t in used_vals if w > 0)
             agg = (num / den) if den > 0 else _median(values)
 
         agg = _clamp(float(agg), dspec.clamp_min, dspec.clamp_max)
@@ -772,13 +1026,17 @@ class SensorAggregator:
         Supported computes:
         - dew_point_c(T, RH)
         - heat_index_c(T, RH)
+        - mrt_c(T_air, T_rad_mean, [k_rad])
+        - t_op_c(T_air, MRT)
+        - condensation_margin_c(T_rad_mean, dew_point, [surface_offset])
 
         Inputs are read in order. For these computes we expect at least 2 inputs.
         """
         rejected: List[str] = []
         reasons: List[str] = []
+        degraded = False
 
-        if dspec.compute not in ("dew_point_c", "heat_index_c"):
+        if dspec.compute not in ("dew_point_c", "heat_index_c", "mrt_c", "t_op_c", "condensation_margin_c"):
             return AggregatedValue(
                 name=dspec.name,
                 value=None,
@@ -791,7 +1049,6 @@ class SensorAggregator:
                 reasons=("unknown_compute", str(dspec.compute)),
             )
 
-        # Gather input values
         inputs_vals: List[Tuple[str, float, datetime]] = []
         for gname, _w in dspec.inputs:
             av = self._latest.get(gname)
@@ -804,6 +1061,8 @@ class SensorAggregator:
             if av.is_insufficient:
                 rejected.append(f"{gname}:insufficient")
                 continue
+            if av.reasons and any("hold_last_good" in r for r in av.reasons):
+                degraded = True
             inputs_vals.append((gname, float(av.value), av.ts))
 
         sources_total = len(dspec.inputs)
@@ -813,9 +1072,11 @@ class SensorAggregator:
         is_insufficient = sources_used < max(2, dspec.min_sources)
         if is_insufficient:
             reasons.append("insufficient_sources")
+        if degraded:
+            reasons.append("inputs_degraded")
 
         if sources_used < 2:
-            return AggregatedValue(
+            fail = AggregatedValue(
                 name=dspec.name,
                 value=None,
                 ts=None,
@@ -826,19 +1087,42 @@ class SensorAggregator:
                 is_insufficient=True,
                 reasons=tuple(reasons + ["need_two_inputs"] + rejected),
             )
+            held = self._maybe_hold_last_good_derived(
+                now=now,
+                dspec=dspec,
+                sources_total=sources_total,
+                fail_reasons=fail.reasons,
+            )
+            return held or fail
 
-        # For now we interpret first input as T and second as RH (simple, explicit).
-        t = inputs_vals[0][1]
-        rh = inputs_vals[1][1]
         ts = max(ti for _, _, ti in inputs_vals)
 
         try:
             if dspec.compute == "dew_point_c":
+                t = inputs_vals[0][1]
+                rh = inputs_vals[1][1]
                 val = dew_point_c(t, rh)
-            else:
+            elif dspec.compute == "heat_index_c":
+                t = inputs_vals[0][1]
+                rh = inputs_vals[1][1]
                 val = heat_index_c(t, rh)
+            elif dspec.compute == "mrt_c":
+                t_air = inputs_vals[0][1]
+                t_rad_mean = inputs_vals[1][1]
+                k_rad = inputs_vals[2][1] if len(inputs_vals) >= 3 else MRT_K_RAD_DEFAULT
+                val = mrt_c(t_air, t_rad_mean, k_rad)
+            elif dspec.compute == "condensation_margin_c":
+                # expects: (radiant_mean_temp_c, dew_point_c, [optional surface_offset_c])
+                t_rad_mean = inputs_vals[0][1]
+                dp = inputs_vals[1][1]
+                offset = inputs_vals[2][1] if len(inputs_vals) >= 3 else DEFAULT_SURFACE_OFFSET_C
+                val = condensation_margin_c(t_rad_mean, dp, surface_offset_c=offset)
+            else:
+                t_air = inputs_vals[0][1]
+                mrt_val = inputs_vals[1][1]
+                val = t_op_c(t_air, mrt_val)
         except Exception as e:
-            return AggregatedValue(
+            fail = AggregatedValue(
                 name=dspec.name,
                 value=None,
                 ts=ts,
@@ -849,6 +1133,13 @@ class SensorAggregator:
                 is_insufficient=True,
                 reasons=tuple(reasons + [f"compute_exception:{type(e).__name__}"] + rejected),
             )
+            held = self._maybe_hold_last_good_derived(
+                now=now,
+                dspec=dspec,
+                sources_total=sources_total,
+                fail_reasons=fail.reasons,
+            )
+            return held or fail
 
         val = _clamp(float(val), dspec.clamp_min, dspec.clamp_max)
 
@@ -880,15 +1171,17 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
 
     Notes
     - If you already have HA sensors for dew point/heat index, you can also ingest them as groups.
-    - This example computes them from zone T/RH to keep everything consistent.
+    - Prefer computing dew point / heat index from aggregated T/RH for consistency.
     """
 
     temp_filters = FilterConfig(
         max_age=timedelta(minutes=10),
+        hold_last_good=timedelta(minutes=5),
+        max_source_age=None,  # keep None unless you *know* HA source timestamps advance reliably
         min_valid=5.0,
         max_valid=35.0,
         time_hampel_k=4.0,
-        max_rate_per_min=0.6,  # °C/min
+        max_rate_per_min=0.6,  # °C/min (tune carefully if you see clipping)
         rate_limit_mode="clip",
         ema_alpha=0.2,
         rolling_median_window=3,
@@ -896,6 +1189,8 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
 
     rh_filters = FilterConfig(
         max_age=timedelta(minutes=10),
+        hold_last_good=timedelta(minutes=5),
+        max_source_age=None,
         min_valid=1.0,
         max_valid=100.0,
         time_hampel_k=4.0,
@@ -925,15 +1220,6 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
                 clamp_min=1.0,
                 clamp_max=100.0,
             ),
-            # OPTIONAL: ingest HA dew point sensor (if you have it)
-            # GroupSpec(
-            #     name="indoor_dew_point",
-            #     method="weighted_mean",
-            #     sensors=(SensorSpec("sensor.livingroom_dewpoint", weight=1.0, filters=temp_filters),),
-            #     min_sources=1,
-            #     clamp_min=-10.0,
-            #     clamp_max=30.0,
-            # ),
         ),
     )
 
@@ -961,7 +1247,6 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
     )
 
     derived = (
-        # Global aggregates (from per-zone groups)
         DerivedSpec(
             name="global.indoor_temperature",
             kind="aggregate",
@@ -982,50 +1267,13 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
             clamp_max=100.0,
             max_age=timedelta(minutes=10),
         ),
-
-        # If you already have dew point / heat index sensors per zone, you can aggregate them.
-        # For HVAC safety (condensation / dehumidify trigger), a conservative choice is MAX across zones.
-        DerivedSpec(
-            name="global.indoor_dew_point",
-            kind="aggregate",
-            inputs=(("living.indoor_dew_point", 1.0), ("bedroom.indoor_dew_point", 0.7)),
-            method="max",
-            min_sources=1,
-            clamp_min=-20.0,
-            clamp_max=30.0,
-            max_age=timedelta(minutes=10),
-        ),
-        DerivedSpec(
-            name="global.indoor_heat_index",
-            kind="aggregate",
-            inputs=(("living.indoor_heat_index", 1.0), ("bedroom.indoor_heat_index", 0.7)),
-            method="max",
-            min_sources=1,
-            clamp_min=-20.0,
-            clamp_max=60.0,
-            max_age=timedelta(minutes=10),
-        ),
-
-        # OPTIONAL: you can still compute dew point/heat index from global T/RH as a cross-check.
-        # (Keep disabled if you don't need it.)
-        # DerivedSpec(
-        #     name="global.indoor_dew_point_calc",
-        #     kind="compute",
-        #     compute="dew_point_c",
-        #     inputs=(("global.indoor_temperature", 1.0), ("global.indoor_humidity", 1.0)),
-        #     min_sources=2,
-        #     clamp_min=-20.0,
-        #     clamp_max=30.0,
-        #     max_age=timedelta(minutes=10),
-        # ),
     )
 
     return MappingConfig(zones=(living, bedroom), derived=derived)
 
 
-
 # =============================
-# 3) ClimateRegimeEstimator
+# 3) ClimateRegimeEstimator (unchanged from your snippet)
 # =============================
 
 Regime = Literal["heating", "cooling", "shoulder"]
@@ -1037,30 +1285,20 @@ class RegimeConfig:
 
     This estimator is intentionally conservative: it changes regime only when
     a *running mean* of outdoor temperature crosses thresholds with hysteresis.
-
-    Parameters you will likely tune onsite:
-    - tau_days: smoothing time constant for running mean
-    - heating_on/off, cooling_on/off: thresholds for regime selection
-    - min_switch_interval: minimum time between regime changes (anti-flapping)
     """
 
-    # Running-mean smoothing time constant
     tau_days: float = 5.0
 
-    # Thresholds (°C) applied to running mean of outdoor temperature
     heating_on: float = 15.0
     heating_off: float = 16.5
 
     cooling_on: float = 20.0
     cooling_off: float = 18.5
 
-    # Anti-flapping: minimum time between regime switches
     min_switch_interval: timedelta = timedelta(hours=8)
 
-    # If outdoor temperature is missing/stale, keep last regime but decay confidence
     stale_grace: timedelta = timedelta(minutes=60)
 
-    # Optional clamp for outdoor temperature to avoid poisoning the running mean
     outdoor_clamp_min: float = -40.0
     outdoor_clamp_max: float = 60.0
 
@@ -1075,27 +1313,13 @@ class ClimateRegimeState:
 
     last_switch_ts: Optional[datetime] = None
 
-    # 0..1 quality indicator
     confidence: float = 0.0
 
     reasons: Tuple[str, ...] = ()
 
 
 class ClimateRegimeEstimator:
-    """Estimates the current climate regime (heating/cooling/shoulder).
-
-    Inputs
-    - Preferred: a *global* outdoor temperature from SensorAggregator, e.g. "global.outdoor_temperature".
-
-    Algorithm
-    - Maintains an exponential running mean of outdoor temperature with time constant tau_days.
-    - Applies hysteresis thresholds on the running mean to decide regime.
-    - Enforces a minimum switch interval.
-
-    Why running mean?
-    - Outdoor instantaneous temperature is noisy and affected by solar radiation/placement.
-    - HVAC seasonal behavior should track climate, not hourly weather.
-    """
+    """Estimates the current climate regime (heating/cooling/shoulder)."""
 
     def __init__(self, config: RegimeConfig = RegimeConfig(), initial_regime: Regime = "shoulder"):
         self._cfg = config
@@ -1114,16 +1338,13 @@ class ClimateRegimeEstimator:
         return self._state
 
     def update_from_aggregator(self, agg: "SensorAggregator", outdoor_name: str = "global.outdoor_temperature") -> ClimateRegimeState:
-        """Convenience wrapper using the SensorAggregator output."""
         av = agg.get(outdoor_name)
         now = datetime.now(timezone.utc)
 
         if av.value is None or av.ts is None:
             return self._keep_last(now, reason=f"missing:{outdoor_name}")
 
-        # Treat stale/insufficient as weak input, but we may still keep previous regime.
         if av.is_stale:
-            # if within grace, we still accept but reduce confidence
             if (now - av.ts) <= self._cfg.stale_grace:
                 return self.update(outdoor_temp=float(av.value), ts=av.ts, quality=0.4, reasons=("stale_within_grace",))
             return self._keep_last(now, reason=f"stale:{outdoor_name}")
@@ -1140,13 +1361,10 @@ class ClimateRegimeEstimator:
         quality: float = 1.0,
         reasons: Tuple[str, ...] = (),
     ) -> ClimateRegimeState:
-        """Update estimator with a new outdoor temperature sample."""
         now = _ensure_tz(ts or datetime.now(timezone.utc))
 
-        # Clamp to avoid poisoning the filter
         t_out = _clamp(float(outdoor_temp), self._cfg.outdoor_clamp_min, self._cfg.outdoor_clamp_max)
 
-        # Update running mean with a continuous-time EMA
         rm_prev = self._state.running_mean_outdoor
         ts_prev = self._state.ts
 
@@ -1156,10 +1374,8 @@ class ClimateRegimeEstimator:
 
         rm = t_out if rm_prev is None else (alpha * t_out + (1.0 - alpha) * rm_prev)
 
-        # Decide regime with hysteresis + minimum switch interval
         new_regime, decision_reasons = self._decide_regime(rm=rm, now=now)
 
-        # Confidence: based on input quality and how far rm is from boundary
         conf = self._confidence(rm=rm, quality=quality, regime=new_regime)
 
         self._state = ClimateRegimeState(
@@ -1174,12 +1390,7 @@ class ClimateRegimeEstimator:
 
         return self._state
 
-    # -------------------------
-    # Internals
-    # -------------------------
-
     def _keep_last(self, now: datetime, reason: str) -> ClimateRegimeState:
-        """Keep last regime; decay confidence."""
         prev = self._state
         decayed = max(0.0, prev.confidence * 0.8)
         self._state = ClimateRegimeState(
@@ -1198,15 +1409,11 @@ class ClimateRegimeEstimator:
             return True
         return (now - self._state.last_switch_ts) >= self._cfg.min_switch_interval
 
-    def _mark_switched(self, now: datetime) -> None:
-        self._state.last_switch_ts = now
-
     def _decide_regime(self, rm: float, now: datetime) -> Tuple[Regime, Tuple[str, ...]]:
         cfg = self._cfg
         cur = self._state.regime
         reasons: List[str] = []
 
-        # Helper flags
         want_heat = rm <= cfg.heating_on
         want_cool = rm >= cfg.cooling_on
 
@@ -1217,16 +1424,14 @@ class ClimateRegimeEstimator:
         new = cur
 
         if cur == "heating":
-            # exit heating only after rm rises above heating_off
             if rm >= cfg.heating_off and can_switch:
                 new = "shoulder"
                 reasons.append("exit_heating")
         elif cur == "cooling":
-            # exit cooling only after rm drops below cooling_off
             if rm <= cfg.cooling_off and can_switch:
                 new = "shoulder"
                 reasons.append("exit_cooling")
-        else:  # shoulder
+        else:
             if want_heat and can_switch:
                 new = "heating"
                 reasons.append("enter_heating")
@@ -1235,36 +1440,25 @@ class ClimateRegimeEstimator:
                 reasons.append("enter_cooling")
 
         if new != cur:
-            # record switch time
             self._state.last_switch_ts = now
             reasons.append("switched")
 
-        # Add boundary context
         reasons.append(f"rm={rm:.2f}")
 
         return new, tuple(reasons)
 
     def _confidence(self, rm: float, quality: float, regime: Regime) -> float:
-        """Heuristic confidence score.
-
-        - Starts from input quality.
-        - Increases when rm is far from the nearest relevant boundary.
-        """
         cfg = self._cfg
         q = max(0.0, min(1.0, float(quality)))
 
         if regime == "heating":
-            d = max(0.0, cfg.heating_off - rm)  # margin before exit
+            d = max(0.0, cfg.heating_off - rm)
         elif regime == "cooling":
             d = max(0.0, rm - cfg.cooling_off)
         else:
-            # shoulder confidence highest mid-band
             d1 = abs(rm - cfg.heating_on)
             d2 = abs(rm - cfg.cooling_on)
             d = min(d1, d2)
 
-        # Map °C margin to 0..1 (0°C => 0, 3°C => ~1)
         margin = max(0.0, min(1.0, d / 3.0))
         return float(0.2 * q + 0.8 * q * margin)
-
-

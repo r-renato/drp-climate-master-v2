@@ -334,25 +334,13 @@ class BaseSensor(
     def _slave_update(self) -> bool:
         """..."""
 
-    def _commit_native_value(self) -> None:
-        """
-        Pubblica _attr_native_value e copia lo State corrente nello store condiviso.
-        Da chiamare subito dopo aver impostato _attr_native_value.
-        """
-        # 1) Pubblica lo stato dell'entità (sync call, no await)
-        self.async_write_ha_state()
-
-        # 2) Copia lo State nello store condiviso
+    def _save_myself_state(self) -> None:
+        """Salva lo State corrente dell'entità nello store condiviso."""
         if not self.entity_id:
             return
         st: State | None = self.hass.states.get(self.entity_id)
         if st is None:
             return
-
-        # domain_store = self.hass.data.setdefault(DOMAIN, {})
-        # entry_store = domain_store.setdefault(self._entry.entry_id, {})
-        # entities_state: dict[str, Any] = entry_store.setdefault(ENTITIES_STATE, {})
-        # entities_state[self.entity_id] = st
         self._entities_state[self.entity_id] = st
 
     @callback
@@ -360,7 +348,7 @@ class BaseSensor(
         """Invocato ad ogni update del coordinator."""
         try:
             if self._slave_update():  # calcola/aggiorna _attr_native_value ecc.
-                self._commit_native_value()  # pubblica lo stato aggiornato
+                self._save_myself_state()  # pubblica lo stato aggiornato
         finally:
             # importantissimo: notifica HA che lo stato è cambiato
             super()._handle_coordinator_update()
@@ -900,4 +888,3 @@ class CurrentHeatIndexSensor(BaseSensor):
         self._attr_available = True
 
         return attr_native_old_value != self._attr_native_value
-

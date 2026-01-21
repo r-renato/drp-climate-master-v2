@@ -15,7 +15,7 @@ from homeassistant.const import (
     CONF_SENSORS,
 )
 
-from ..helpers.logger import log_info
+from ..helpers.logger import log_debug, log_info
 
 from ..helpers.utils import as_int
 from ..domain.models.runtime_schema import (
@@ -51,6 +51,7 @@ from ..const import (
     CONF_AREA,
     CONF_AREAS,
     CONF_BUCKET,
+    CONF_CEILING,
     CONF_COMPRESSOR_MANAGEMENT,
     CONF_COOLING_DT_SETPOINT,
     CONF_COOLING_MANAGEMENT,
@@ -73,11 +74,11 @@ from ..const import (
     CONF_LATITUDE,
     CONF_LONGITUDE,
     CONF_MODE,
-    CONF_MQ,
     CONF_ORGANIZATION,
     CONF_POWER,
     CONF_PROVIDER,
     CONF_RADIANT,
+    CONF_RADIANT_SURFACE,
     CONF_REQUESTS,
     CONF_SCENARIOS,
     CONF_SEASON,
@@ -90,7 +91,6 @@ from ..const import (
     CONF_TOKEN,
     CONF_UNITS,
     CONF_CLOSED_STATE,
-    CONF_HOME_WINDOWS_STATE,
     CONF_VENT_RECIRCULATION,
     CONF_VMC,
     CONF_WEATHER,
@@ -104,7 +104,7 @@ _LOGGER = logging.getLogger(__name__)
 
 def subscribe_entity_state_changes(
     hass: HomeAssistant,
-    callback: Callable[[Event[EventStateChangedData]], Any],   # 👈 firma richiesta
+    callback: Callable[[Event[EventStateChangedData]], Any],
     entity_ids: Union[str, Iterable[str]],
     *,
     on_remove: Optional[Callable[[CALLBACK_TYPE], None]] = None,
@@ -206,7 +206,16 @@ def build_runtime_config(entry: ConfigEntry) -> RuntimeConfig:
     data = dict(entry.data) if isinstance(entry.data, Mapping) else {}
     opts = dict(entry.options) if isinstance(entry.options, Mapping) else {}
 
-    climate_cfg: dict[str, Any] = {**data, **opts}
+    log_debug(_LOGGER, "ENTRY.DATA radiant.sensors=%s",
+            (entry.data.get("devices", {}).get("radiant", {}).get("sensors", {})
+            if isinstance(entry.data, Mapping) else None))
+
+    log_debug(_LOGGER, "ENTRY.OPTIONS radiant.sensors=%s",
+            (entry.options.get("devices", {}).get("radiant", {}).get("sensors", {})
+            if isinstance(entry.options, Mapping) else None))
+
+    climate_cfg: dict[str, Any] = {**opts, **data}
+    log_debug(_LOGGER, "Merged climate config: %s", climate_cfg)
 
     # --- update_interval (FIX: read from config, not constant) ---
     update_s = as_int(
@@ -240,7 +249,8 @@ def build_runtime_config(entry: ConfigEntry) -> RuntimeConfig:
             radiant=a.get(CONF_RADIANT, True),
             sensors=SensorPair(**a[CONF_SENSORS]),
             thermal_collector_valve_switch=a.get(CONF_TCOLLECTOR, None),
-            mq=a.get(CONF_MQ),
+            ceiling=a.get(CONF_CEILING, None),
+            radiant_surface=a.get(CONF_RADIANT_SURFACE, None),
         )
         for a in areas_cfg
         if isinstance(a, Mapping)
@@ -262,6 +272,7 @@ def build_runtime_config(entry: ConfigEntry) -> RuntimeConfig:
     radiant = None
     r_cfg = dev_cfg.get(CONF_RADIANT)
     if isinstance(r_cfg, Mapping):
+        log_info(_LOGGER, "Radiant config: %s", r_cfg[CONF_SENSORS])
         radiant = RadiantConfig(
             fm_power=r_cfg[CONF_FM_POWER],
             power=r_cfg[CONF_POWER],

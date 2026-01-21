@@ -22,7 +22,8 @@ class AreaConfig:
     radiant: bool
     sensors: SensorPair
     thermal_collector_valve_switch: Optional[str] = None
-    mq: Optional[float] = None
+    ceiling: Optional[float] = None
+    radiant_surface: Optional[float] = None
 
     @staticmethod
     def find_area(areas: list[AreaConfig], name: str) -> Optional[AreaConfig]:
@@ -60,6 +61,8 @@ class SetpointConfig:
 class RadiantSensors:
     pdc_temp_water_in: str
     pdc_temp_water_out: str
+    pdc_temp_outdoor: Optional[str] = None
+    pdc_compressor_state: Optional[str] = None
 
 @dataclass(frozen=True)
 class RadiantConfig:
