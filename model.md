@@ -398,34 +398,34 @@ Limitazioni di comfort vs sicurezza
 │                       GRANDEZZE DI STATO (per ZONA z)                        │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │  Misure/derivate base                                                        │
-│  - T_air,z     [°C]  = temperatura aria (sensore zona)                        │
-│  - RH_z        [%]   = umidità relativa (sensore zona)                        │
-│  - DP_z        [°C]  = dew point zona (da T_air,z + RH_z)                     │
-│  - T_out, RH_out, DP_out (esterno)                                            │
+│  - T_air,z     [°C]  = temperatura aria (sensore zona)                       │
+│  - RH_z        [%]   = umidità relativa (sensore zona)                       │
+│  - DP_z        [°C]  = dew point zona (da T_air,z + RH_z)                    │
+│  - T_out, RH_out, DP_out (esterno)                                           │
 │                                                                              │
 │  Comfort “fisico” (quello che conta davvero per percezione)                  │
-│  - MRT_z       [°C]  = Mean Radiant Temperature (stima)                       │
-│      • ideale: da sensore MRT o “globe”                                       │
-│      • pratico: modello/stima da: T_air,z + contributo radiante (soffitto)    │
-│  - T_op,z      [°C]  = temperatura operante                                   │
-│      • per v_aria bassa tipica residenziale: T_op ≈ (T_air + MRT)/2           │
+│  - MRT_z       [°C]  = Mean Radiant Temperature (stima)                      │
+│      • ideale: da sensore MRT o “globe”                                      │
+│      • pratico: modello/stima da: T_air,z + contributo radiante (soffitto    │
+│  - T_op,z      [°C]  = temperatura operante                                  │
+│      • per v_aria bassa tipica residenziale: T_op ≈ (T_air + MRT)/2          │
 │                                                                              │
-│  Stato impiantistico idronico (per controllo e diagnostica)                   │
-│  - T_sup_rad   [°C]  = mandata circuito radiante (sensore su pompa MIX)       │
-│  - T_ret_rad   [°C]  = ritorno circuito radiante                              │
-│  - T_sup_vmc   [°C]  = mandata batteria idronica VMC (sensore su pompa DIR)   │
-│  - T_ret_vmc   [°C]  = ritorno batteria VMC                                   │
-│  - T_pdc_out/in[°C]  = mandata/ritorno lato PDC (puffer)                      │
+│  Stato impiantistico idronico (per controllo e diagnostica)                  │
+│  - T_sup_rad   [°C]  = mandata circuito radiante (sensore su pompa MIX)      │
+│  - T_ret_rad   [°C]  = ritorno circuito radiante                             │
+│  - T_sup_vmc   [°C]  = mandata batteria idronica VMC (sensore su pompa DIR)  │
+│  - T_ret_vmc   [°C]  = ritorno batteria VMC                                  │
+│  - T_pdc_out/in[°C]  = mandata/ritorno lato PDC (puffer)                     │
 │                                                                              │
-│  Carichi (non “verità assolute”, ma stime utili a decidere lo stato)          │
-│  - Q_sens,z    [W]   = carico sensibile stimato                               │
-│      • proporzionale a (T_op,set − T_op) e inerzia (radiante lento)           │
-│  - Q_lat,z     [W]   = carico latente stimato                                 │
-│      • proporzionale a (w_set − w) o (DP_set − DP) (deumidifica)              │
+│  Carichi (non “verità assolute”, ma stime utili a decidere lo stato)         │
+│  - Q_sens,z    [W]   = carico sensibile stimato                              │
+│      • proporzionale a (T_op,set − T_op) e inerzia (radiante lento)          │
+│  - Q_lat,z     [W]   = carico latente stimato                                │
+│      • proporzionale a (w_set − w) o (DP_set − DP) (deumidifica)             │
 │                                                                              │
-│  Indici di rischio (fondamentali in raffrescamento radiante)                  │
-│  - DP_max      [°C]  = max_z(DP_z)  (la zona “peggiore” governa il rischio)   │
-│  - CondRisk    [-]   = rischio condensa se T_superficie ≤ DP_max + margine    │
+│  Indici di rischio (fondamentali in raffrescamento radiante)                 │
+│  - DP_max      [°C]  = max_z(DP_z)  (la zona “peggiore” governa il rischio)  │
+│  - CondRisk    [-]   = rischio condensa se T_superficie ≤ DP_max + margine   │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
