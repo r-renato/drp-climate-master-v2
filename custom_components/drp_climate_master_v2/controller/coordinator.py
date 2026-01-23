@@ -17,10 +17,15 @@ from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, Home
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from custom_components.drp_climate_master_v2.domain.models.season import SeasonState
+from custom_components.drp_climate_master_v2.domain.enums import HVACOperatingProfile
+
+from ..helpers.confort.policy_layer import ComfortPolicyLayer, PolicyContext, PolicyDecision, build_policy_layer
+
+from ..domain.models.season import OperativeSeason, SeasonState
+from ..helpers.confort.confort_band import ComfortBandCalculator
 
 from ..domain.influx import InfluxConfig
-from ..strategies.plant_regime_pipeline import InfluxSeriesReader, PlantEntities, PlantRegimePipeline, RegimeConfig, RegimeSearchResult, daily_local_mean
+# from ..strategies.plant_regime_pipeline import InfluxSeriesReader, PlantEntities, PlantRegimePipeline, RegimeConfig, RegimeSearchResult, daily_local_mean
 
 from ..helpers.config_sensors import build_sensor_mapping
 
@@ -67,21 +72,27 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._entry = entry
         self._name = entry.data.get(CONF_NAME, "default-name")
 
-        # Shared store per entry (idempotente)
-        domain_store = hass.data.setdefault(DOMAIN, {})
-        entry_store = domain_store.setdefault(entry.entry_id, {})
-        entry_store.setdefault(ENTITIES_STATE, {})
+        # # Shared store per entry (idempotente)
+        # domain_store = hass.data.setdefault(DOMAIN, {})
+        # entry_store = domain_store.setdefault(entry.entry_id, {})
+        # entry_store.setdefault(ENTITIES_STATE, {})
 
-        # Stato sensori (entity_id -> State)
-        self._entities_state_store: dict[str, State] = entry_store[ENTITIES_STATE]
+        # # Stato sensori (entity_id -> State)
+        # self._entities_state_store: dict[str, State] = entry_store[ENTITIES_STATE]
 
         # Runtime config (può essere aggiornato a runtime dopo setup unique ids)
         self._runtime: RuntimeConfig = build_runtime_config(entry)
 
         self._sensor_aggregator = SensorAggregator(
-            entities_state_store=self._entities_state_store, 
+            entities_state_store=self._entities_state, 
             mapping=build_sensor_mapping(self._runtime.climate)
         )
+
+        self._climate_preset_mode: HVACOperatingProfile | None = None
+        self._season_state = None
+
+        self._policy_layer: ComfortPolicyLayer = build_policy_layer()
+        self._confort_band = ComfortBandCalculator()
 
         # Psychrolib unit system: impostazione globale (attenzione: globale nel processo)
         # Se più entry con unit diverse coesistono, questa è una criticità.
@@ -134,19 +145,34 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._runtime.climate.weather
 
     @property
-    def _entities_state(self) -> dict[str, State]:
-        """Mappa entity_id -> State.
-
-        Idempotente anche se hass.data viene ricreato (riusa il reference store iniziale).
-        """
-        domain_store = self._hass.data.setdefault(DOMAIN, {})
-        entry_store = domain_store.setdefault(self._entry.entry_id, {})
-        return entry_store.setdefault(ENTITIES_STATE, self._entities_state_store)
-
-    @property
     def _entry_store(self) -> dict[str, Any]:
         domain_store = self._hass.data.setdefault(DOMAIN, {})
         return domain_store.setdefault(self._entry.entry_id, {})
+
+    @property
+    def _entities_state(self) -> dict[str, State]:
+        return self._entry_store.setdefault(ENTITIES_STATE, {})
+
+    # @property
+    # def _store_entities_state(self) -> dict[str, State]:
+    #     """Mappa entity_id -> State.
+
+    #     Idempotente anche se hass.data viene ricreato (riusa il reference store iniziale).
+    #     """
+    #     # domain_store = self._hass.data.setdefault(DOMAIN, {})
+    #     # entry_store = domain_store.setdefault(self._entry.entry_id, {})
+    #     # return entry_store.setdefault(ENTITIES_STATE, self._entities_state_store)
+    #     return self._entry_store.setdefault(ENTITIES_STATE, self._entities_state_store)
+
+    # @property
+    # def _season_state(self) -> SeasonState | None:
+    #     season_state = self._entry_store.get(SEASON_STATE)
+        
+    #     if not isinstance(season_state, SeasonState):
+    #         log_warning(_LOGGER, "No valid SeasonState in store for regime config test")
+    #         return None
+
+    #     return season_state
 
     def _setup_unique_ids_event(self) -> asyncio.Event:
         store = self._entry_store
@@ -447,87 +473,142 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except asyncio.CancelledError:
             return
 
+    def _compute_confort_band(self):
 
-    async def _test_regime_config(self) -> None:
-        season_state = self._entry_store.get(SEASON_STATE)
-        if not isinstance(season_state, SeasonState):
-            log_warning(_LOGGER, "No valid SeasonState in store for regime config test")
-            return
+        runtime_vmc = self._runtime.climate.devices.vmc
 
-        influx_cfg = InfluxConfig(
-            bucket=self._runtime.climate.historical_data.bucket,
-            org=self._runtime.climate.historical_data.organization,
-            token=self._runtime.climate.historical_data.token,
-            url=self._runtime.climate.historical_data.url,
-        )
+        season_state = self._season_state
+        vmc_speed = self._entities_state.get(runtime_vmc.spare_setpoint) if runtime_vmc else None
 
-        entities = PlantEntities(
-            outdoor_temp="ambient_outdoor_temperature",
-            compressor_state="hmi080_compressor_state",
-            device_mode="hmi080_device_mode",
-            vmc_pump_switch="hcs_direct_supply_unit",
-            radiant_pump_switch="hcs_motorized_temperature_adjustable_supply_unit",
-            active_power="emeter_clima_active_power",
-        )
+        # log_debug(_LOGGER, "runtime_vmc.spare_setpoint %s", runtime_vmc.spare_setpoint if runtime_vmc else "***")
+        # log_debug(_LOGGER, "self._entities_state.keys %s", self._entities_state.keys())
 
-        def _fit_sync() -> tuple[str, RegimeConfig, RegimeSearchResult]:
-            influx_reader = InfluxSeriesReader(cfg=influx_cfg)
-            try:
-                pipe = PlantRegimePipeline(
-                    reader=influx_reader,
-                    entities=entities,
-                    season_state=season_state,
-                    season_windows=season_state.weather.windows or [],
-                    local_tz="Europe/Rome",
-                    start="-730d",
-                    stop="now()",
+        if season_state and runtime_vmc and vmc_speed and self._climate_preset_mode:
+
+            for area in self._runtime.climate.areas:
+                name = slugify(area.name)
+
+                rh_pct = self._sensor_aggregator.get(f"{name}.indoor_humidity")
+                if rh_pct.value is None:
+                    continue
+
+                area_policy_ctx = PolicyContext(
+                    now=datetime.now(timezone.utc),
+                    room=name,
+                    season=OperativeSeason.from_value(season_state.season),
+                    vmc_speed=int(vmc_speed.state),
+                    rh_pct=rh_pct.value,
+                    t_op_current=self._sensor_aggregator.get( f"{name}.t_op" ).value,
+                    outdoor_temp=self._sensor_aggregator.get( "global.outdoor_temperature" ).value,
+                    mode=self._climate_preset_mode
                 )
 
-                # Fit "vero" (globale + per-season) e scelta config per oggi
-                fit = pipe.fit_seasonal()
-                cfg_today = pipe.pick_runtime_config(fit)
-                season = pipe.pick_runtime_season()
+                # area_confort_band = self._confort_band.compute_comfort_band(
+                #     room=name,
+                #     speed=int(vmc_speed.state),
+                #     rh_pct=rh_pct.value,
+                #     season=OperativeSeason.from_value(season_state.season),
+                #     t_op_current=self._sensor_aggregator.get( f"{name}.t_op" ).value
+                # )
 
-                # Se vuoi anche il dettaglio della grid search (coerente con la pipeline):
-                raw = pipe.load_raw()
-                norm = pipe.normalize(raw)
-                obs_daily, _duty_daily, _frame = pipe.build_observed_daily_regime(norm)
-
-                # IMPORTANTISSIMO: media giornaliera su confini giorno locali (Europe/Rome),
-                # coerente con fit_seasonal()
-                T_out_daily = daily_local_mean(norm["T_out"], tz=pipe.local_tz)
-
-                search = pipe.grid_search_regime(
-                    T_out_daily=T_out_daily,
-                    obs_regime_daily=obs_daily,
+                decision: PolicyDecision = self._policy_layer.decide(area_policy_ctx)
+                _LOGGER.debug("[comfort_policy] ctrl_aggressiveness=%.2f", decision.ctrl_aggressiveness)
+                area_confort_band = self._confort_band.compute_comfort_band(
+                    room=name,
+                    speed=int(vmc_speed.state),
+                    rh_pct=rh_pct.value,
+                    season=OperativeSeason.from_value(season_state.season),
+                    t_op_current=self._sensor_aggregator.get(f"{name}.t_op").value,
+                    policy=decision,  # <-- QUI
                 )
 
-                return (str(season), cfg_today, search)
+                log_debug(_LOGGER, "%s", area_policy_ctx)
+                log_debug(_LOGGER, "%s", area_confort_band)
+        else:
+            log_warning(_LOGGER, "season_state=%s", season_state)
+            log_warning(_LOGGER, "vmc_speed=%s", vmc_speed)
 
-            finally:
-                influx_reader.close()
 
-        season_str, cfg_today, search_obj = await self._hass.async_add_executor_job(_fit_sync)
+    # async def _test_regime_config(self) -> None:
+    #     season_state = self._entry_store.get(SEASON_STATE)
+    #     if not isinstance(season_state, SeasonState):
+    #         log_warning(_LOGGER, "No valid SeasonState in store for regime config test")
+    #         return
 
-        log_debug(_LOGGER, "Runtime season: %s", season_str)
-        log_debug(_LOGGER, "Chosen regime config: %s", cfg_today)
+    #     influx_cfg = InfluxConfig(
+    #         bucket=self._runtime.climate.historical_data.bucket,
+    #         org=self._runtime.climate.historical_data.organization,
+    #         token=self._runtime.climate.historical_data.token,
+    #         url=self._runtime.climate.historical_data.url,
+    #     )
 
-        for i, c in enumerate(search_obj.top10, start=1):
-            log_debug(
-                _LOGGER,
-                "Top %02d)\n"
-                "   loss=%.3f err=%.3f pen=%.3f\n"
-                "   switches=%d/%d\n"
-                "   tau=%.1f\n"
-                "   hon=%.1f hoff=%.1f\n"
-                "   con=%.1f coff=%.1f",
-                i,
-                c.loss, c.err, c.pen,
-                c.switches, c.days,
-                c.cfg.tau_days,
-                c.cfg.heating_on, c.cfg.heating_off,
-                c.cfg.cooling_on, c.cfg.cooling_off,
-            )
+    #     entities = PlantEntities(
+    #         outdoor_temp="ambient_outdoor_temperature",
+    #         compressor_state="hmi080_compressor_state",
+    #         device_mode="hmi080_device_mode",
+    #         vmc_pump_switch="hcs_direct_supply_unit",
+    #         radiant_pump_switch="hcs_motorized_temperature_adjustable_supply_unit",
+    #         active_power="emeter_clima_active_power",
+    #     )
+
+    #     def _fit_sync() -> tuple[str, RegimeConfig, RegimeSearchResult]:
+    #         influx_reader = InfluxSeriesReader(cfg=influx_cfg)
+    #         try:
+    #             pipe = PlantRegimePipeline(
+    #                 reader=influx_reader,
+    #                 entities=entities,
+    #                 season_state=season_state,
+    #                 season_windows=season_state.weather.windows or [],
+    #                 local_tz="Europe/Rome",
+    #                 start="-730d",
+    #                 stop="now()",
+    #             )
+
+    #             # Fit "vero" (globale + per-season) e scelta config per oggi
+    #             fit = pipe.fit_seasonal()
+    #             cfg_today = pipe.pick_runtime_config(fit)
+    #             season = pipe.pick_runtime_season()
+
+    #             # Se vuoi anche il dettaglio della grid search (coerente con la pipeline):
+    #             raw = pipe.load_raw()
+    #             norm = pipe.normalize(raw)
+    #             obs_daily, _duty_daily, _frame = pipe.build_observed_daily_regime(norm)
+
+    #             # IMPORTANTISSIMO: media giornaliera su confini giorno locali (Europe/Rome),
+    #             # coerente con fit_seasonal()
+    #             T_out_daily = daily_local_mean(norm["T_out"], tz=pipe.local_tz)
+
+    #             search = pipe.grid_search_regime(
+    #                 T_out_daily=T_out_daily,
+    #                 obs_regime_daily=obs_daily,
+    #             )
+
+    #             return (str(season), cfg_today, search)
+
+    #         finally:
+    #             influx_reader.close()
+
+    #     season_str, cfg_today, search_obj = await self._hass.async_add_executor_job(_fit_sync)
+
+    #     log_debug(_LOGGER, "Runtime season: %s", season_str)
+    #     log_debug(_LOGGER, "Chosen regime config: %s", cfg_today)
+
+    #     for i, c in enumerate(search_obj.top10, start=1):
+    #         log_debug(
+    #             _LOGGER,
+    #             "Top %02d)\n"
+    #             "   loss=%.3f err=%.3f pen=%.3f\n"
+    #             "   switches=%d/%d\n"
+    #             "   tau=%.1f\n"
+    #             "   hon=%.1f hoff=%.1f\n"
+    #             "   con=%.1f coff=%.1f",
+    #             i,
+    #             c.loss, c.err, c.pen,
+    #             c.switches, c.days,
+    #             c.cfg.tau_days,
+    #             c.cfg.heating_on, c.cfg.heating_off,
+    #             c.cfg.cooling_on, c.cfg.cooling_off,
+    #         )
 
 
     # --------------------- Debug helpers -------------------- #
@@ -579,6 +660,28 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             await self._sensor_aggregator.async_update()
 
+            self._compute_confort_band()
+
+            # rh_pct = self._sensor_aggregator.get( "kitchen.indoor_humidity" ).value
+            # t_op_current = self._sensor_aggregator.get( "kitchen.t_op" ).value
+
+            # if rh_pct is not None and t_op_current is not None:
+            #     kitchen_cb = self._confort_band.compute_comfort_band(
+            #         room="kitchen",
+            #         speed=1,
+            #         rh_pct=rh_pct,
+            #         season="winter",
+            #         t_op_current=t_op_current
+            #     )
+            #     log_debug(_LOGGER, "%s", kitchen_cb)
+            #     kitchen_cb = self._confort_band.compute_comfort_band(
+            #         room="kitchen",
+            #         speed=5,
+            #         rh_pct=rh_pct,
+            #         season="winter",
+            #         t_op_current=t_op_current
+            #     )
+            #     log_debug(_LOGGER, "%s", kitchen_cb)
             # await self._test_regime_config()
 
             log_debug(_LOGGER, "%s", self._sensor_aggregator.latest_all())
@@ -593,3 +696,10 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as exc:  # noqa: BLE001
             log_warning(_LOGGER, "Update failed: %s", exc, exc_info=True)
             raise UpdateFailed(f"Update failed: {exc}") from exc
+
+
+    def set_preset_mode(self, preset_mode: HVACOperatingProfile) -> None:
+        self._climate_preset_mode = preset_mode
+
+    def set_season_state(self, season_state: SeasonState) -> None:
+        self._season_state = season_state

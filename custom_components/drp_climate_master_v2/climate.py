@@ -15,11 +15,12 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 
+from .controller.coordinator import ClimateCoordinator
+
 from .helpers.logger import log_debug, log_info
 
 from .helpers.utils import slugify
 
-from .controller.coordinator import ClimateCoordinator
 from .controller.supervisor import ClimateSupervisor
 from .const import (
     COORDINATOR,
@@ -50,7 +51,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     # else:
     #     _LOGGER.info("No indoor areas found; no slave sensors registered")
     
-    async_add_entities([ClimateMasterEntity(coordinator, supervisor, entry)], update_before_add=True)
+    async_add_entities([ClimateMasterEntity(hass, coordinator, supervisor, entry)], update_before_add=False)
     _LOGGER.info("%s: setup entry '%s' completato.", DOMAIN, entry.entry_id)
 
 class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
@@ -63,15 +64,25 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
     _attr_preset_mode: str = HVACOperatingProfile.COMFORT.value
     _attr_temperature_unit: str = UnitOfTemperature.CELSIUS
 
-    def __init__(self, coordinator: ClimateCoordinator, supervisor: ClimateSupervisor, entry: ConfigEntry) -> None:
+    def __init__(
+            self, 
+            hass: HomeAssistant, 
+            coordinator: ClimateCoordinator, 
+            supervisor: ClimateSupervisor, 
+            entry: ConfigEntry
+    ) -> None:
         super().__init__(coordinator)
+
+        self._hass = hass
         self._entry = entry
+        self._coordinator = coordinator
         self._supervisor = supervisor
 
         self._attr_name = entry.options.get(CONF_NAME, DEFAULT_CLIMATE_NAME)
         self._attr_unique_id = slugify(entry.options.get( CONF_UNIQUE_ID, f"""{self._attr_name}-uid""" ))
 
         self._preset_mode = HVACOperatingProfile.COMFORT
+        coordinator.set_preset_mode( HVACOperatingProfile.COMFORT )
         self.map_on_hvac_mode = self._attr_hvac_mode = HVACMode.AUTO
 
         self._target_temp = 22.0
@@ -91,6 +102,14 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
     @property
     def hvac_mode(self) -> HVACMode:
         return self._supervisor.current_hvac_mode
+
+    def set_preset_mode(self, preset_mode: str) -> None:
+        self._preset_mode = preset_mode
+        self._attr_preset_mode = preset_mode
+
+        profile = HVACOperatingProfile.from_value(preset_mode)
+        if profile is not None:
+            self._coordinator.set_preset_mode( profile )
 
     @property
     def hvac_action(self) -> HVACAction:
@@ -156,6 +175,10 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
             # "config_version": str(getattr(self._entry, "version", "v2")),
         }
 
+    @property
+    def _entry_store(self) -> dict[str, Any]:
+        domain_store = self._hass.data.setdefault(DOMAIN, {})
+        return domain_store.setdefault(self._entry.entry_id, {})
 
 
 

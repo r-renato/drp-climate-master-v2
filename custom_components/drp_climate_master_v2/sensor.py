@@ -29,9 +29,9 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 
-from .domain.models.runtime_schema import SensorPair
-
 from .controller.coordinator import ClimateCoordinator
+
+from .domain.models.runtime_schema import SensorPair
 
 from .helpers.logger import log_debug, log_exception, log_info, log_warning
 from .helpers.utils import slugify, as_float

@@ -2,9 +2,87 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date
-from typing import Dict, List, Literal, Optional, Tuple
+from enum import StrEnum, unique
+from typing import Dict, List, Literal, Optional, Tuple, Union
 
-from ..enums import Seasons
+# -----------------------------------------------------------------------------
+# Enums
+# -----------------------------------------------------------------------------
+@unique
+class Seasons(StrEnum):
+    """Seasons."""
+    WINTER = "winter"
+    SPRING = "spring"
+    SUMMER = "summer"
+    AUTUMN = "autumn"
+
+    @staticmethod
+    def ordered() -> Tuple[Seasons, Seasons, Seasons, Seasons]:
+        """..."""
+        return (
+            Seasons.WINTER,
+            Seasons.SPRING,
+            Seasons.SUMMER,
+            Seasons.AUTUMN,
+        )
+    
+    def __str__(self) -> str:
+        """Rappresentazione leggibile in italiano."""
+        mapping = {
+            Seasons.WINTER: "Winter",
+            Seasons.SPRING: "Spring",
+            Seasons.SUMMER: "Summer",
+            Seasons.AUTUMN: "Autumn",
+        }
+        return mapping.get(self, self.value)
+
+class OperativeSeason(StrEnum):
+    WINTER = "winter"
+    SUMMER = "summer"
+    SHOULDER = "shoulder"  # opzionale
+
+    @classmethod
+    def from_value(
+        cls,
+        value: Union[str, "OperativeSeason"],
+        *,
+        default: Optional["OperativeSeason"] = None,
+    ) -> "OperativeSeason":
+        # Se è già un membro dell'enum, ritorna subito
+        if isinstance(value, cls):
+            return value
+
+        if value is None:
+            if default is not None:
+                return default
+            raise ValueError("OperativeSeason.from_value: value is None")
+
+        v = str(value).strip().lower()
+        v_norm = v.replace("-", "_").replace(" ", "_")
+
+        aliases = {
+            "winter": cls.WINTER,
+            # "inverno": cls.WINTER,
+            # "w": cls.WINTER,
+            "summer": cls.SUMMER,
+            # "estate": cls.SUMMER,
+            # "s": cls.SUMMER,
+            "shoulder": cls.SHOULDER,
+            "spring": cls.SHOULDER,
+            "autumn": cls.SHOULDER,
+            # "mezzastagione": cls.SHOULDER,
+            # "mezzo_stagione": cls.SHOULDER,
+            # "transitional": cls.SHOULDER,
+        }
+
+        season = aliases.get(v) or aliases.get(v_norm)
+        if season is not None:
+            return season
+
+        if default is not None:
+            return default
+
+        raise ValueError(f"OperativeSeason.from_value: unknown season '{value}'")
 
 # -----------------------------------------------------------------------------
 # Types
@@ -245,7 +323,7 @@ class SeasonState:
     def __str__(self) -> str:  # pragma: no cover
         return "\n".join(
             [
-                f"",
+                "",
                 f"Season             :: {self.season.value}",
                 f"Window             :: {self.start.isoformat()} -> {self.end.isoformat()} (inclusive)",
                 f"As of              :: {self.as_of.isoformat()}",

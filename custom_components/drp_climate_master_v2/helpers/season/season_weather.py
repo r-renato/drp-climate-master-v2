@@ -11,7 +11,7 @@ from ...domain.models.season import RegimeHint, WeatherSeason, WeatherDaySignals
 from ...domain.models.weather import Forecast, Historical
 
 from ..logger import log_warning
-from ...domain.enums import Seasons
+from ...domain.models.season import Seasons
 
 _LOGGER = logging.getLogger(__name__)
 

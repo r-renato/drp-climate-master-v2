@@ -30,14 +30,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Deque, Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Deque, Dict, List, Literal, Optional, Tuple
 
 import math
 from collections import deque
 
 from homeassistant.core import State
-
-from ..const import DOMAIN, ENTITIES_STATE
+from homeassistant.util import dt as dt_util
 
 # -----------------------------
 # Types
@@ -49,7 +48,15 @@ AggregationMethod = Literal["weighted_mean", "median", "trimmed_mean", "max", "m
 CrossOutlierMethod = Literal["none", "hampel", "zscore"]
 RateLimitMode = Literal["clip", "reject"]
 DerivedKind = Literal["aggregate", "compute"]
-ComputeFn = Literal["dew_point_c", "heat_index_c", "mrt_c", "t_op_c", "condensation_margin_c"]
+ComputeFn = Literal[
+    "dew_point_c",
+    "heat_index_c",
+    "mrt_c",
+    "mrt_gated_c",
+    "t_op_c",
+    "condensation_margin_c",
+    "and01",
+]
 
 # -----------------------------
 # Numerics
@@ -334,18 +341,35 @@ def _ensure_tz(dt: datetime) -> datetime:
         return dt.replace(tzinfo=timezone.utc)
     return dt
 
+def _ensure_utc(ts: datetime) -> datetime:
+    # Se naive: assumo timezone di HA (Europe/Rome nel tuo caso)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+    # Normalizzo sempre a UTC
+    return dt_util.as_utc(ts)
 
-def _source_ts(state_obj: State, now: datetime) -> datetime:
+def _source_ts(state_obj: State, now_utc: datetime) -> datetime:
     """Best-effort HA timestamp for diagnostics/hard guards.
 
     Prefer last_reported if present, else last_updated, else now.
     """
-    return _ensure_tz(
+    ts = (
         getattr(state_obj, "last_reported", None)
         or getattr(state_obj, "last_updated", None)
-        or now
+        or now_utc
     )
+    return _ensure_utc(ts)
 
+# def _source_ts(state_obj: State, now: datetime) -> datetime:
+#     """Best-effort HA timestamp for diagnostics/hard guards.
+
+#     Prefer last_reported if present, else last_updated, else now.
+#     """
+#     return _ensure_tz(
+#         getattr(state_obj, "last_reported", None)
+#         or getattr(state_obj, "last_updated", None)
+#         or now
+#     )
 
 def _convert_unit_if_needed(value: float, unit: Optional[str]) -> float:
     """Convert supported units to canonical.
@@ -454,6 +478,30 @@ def t_op_c(t_air_c: float, mrt_c_val: float) -> float:
     """Operative temperature in °C (low air speed)."""
     return float(0.5 * (float(t_air_c) + float(mrt_c_val)))
 
+def mrt_gated_c(
+    t_air_c: float,
+    t_rad_mean_c: float,
+    valve_open_01: float,
+    pump_on_01: float,
+    k_rad: float = MRT_K_RAD_DEFAULT,
+) -> float:
+    """MRT estimate gated by valve/pump state."""
+    def _clamp01(x: float) -> float:
+        return max(0.0, min(1.0, float(x)))
+
+    u = _clamp01(valve_open_01) * _clamp01(pump_on_01)
+    k_eff = max(0.0, min(1.0, float(k_rad))) * u
+    t_air = float(t_air_c)
+    t_rad = float(t_rad_mean_c)
+    return float(t_air + k_eff * (t_rad - t_air))
+
+def and01(*xs: float, threshold: float = 0.5) -> float:
+    """Logical AND for 0/1-ish signals.
+    Returns 1.0 if all inputs are >= threshold, else 0.0.
+    """
+    if not xs:
+        raise ValueError("and01 requires at least one input")
+    return 1.0 if all(float(x) >= threshold for x in xs) else 0.0
 
 # -----------------------------
 # SensorAggregator
@@ -646,6 +694,13 @@ class SensorAggregator:
             if raw_state in (None, "unknown", "unavailable", "none", "None", ""):
                 rt.last_error = "unavailable"
                 return
+
+            if isinstance(raw_state, str):
+                s = raw_state.strip().lower()
+                if s in ("on", "true", "open", "opened"):
+                    raw_state = 1.0
+                elif s in ("off", "false", "closed", "close"):
+                    raw_state = 0.0
 
             try:
                 raw_val = float(raw_state)
@@ -1036,7 +1091,15 @@ class SensorAggregator:
         reasons: List[str] = []
         degraded = False
 
-        if dspec.compute not in ("dew_point_c", "heat_index_c", "mrt_c", "t_op_c", "condensation_margin_c"):
+        if dspec.compute not in (
+            "dew_point_c",
+            "heat_index_c",
+            "mrt_c",
+            "mrt_gated_c",
+            "t_op_c",
+            "condensation_margin_c",
+            "and01",
+        ):
             return AggregatedValue(
                 name=dspec.name,
                 value=None,
@@ -1117,6 +1180,41 @@ class SensorAggregator:
                 dp = inputs_vals[1][1]
                 offset = inputs_vals[2][1] if len(inputs_vals) >= 3 else DEFAULT_SURFACE_OFFSET_C
                 val = condensation_margin_c(t_rad_mean, dp, surface_offset_c=offset)
+            elif dspec.compute == "mrt_gated_c":
+                t_air = inputs_vals[0][1]
+                t_rad_mean = inputs_vals[1][1]
+
+                # Supporta sia:
+                # - 3 input: (t_air, t_rad_mean, plant_active_01)
+                # - 4 input: (t_air, t_rad_mean, plant_active_01, k_rad)
+                # - 4/5 input legacy: (t_air, t_rad_mean, valve_01, pump_01, [k_rad])
+                if len(inputs_vals) == 3:
+                    active_01 = inputs_vals[2][1]
+                    val = mrt_gated_c(
+                        t_air,
+                        t_rad_mean,
+                        valve_open_01=active_01,  # active = valve*pump già “composto”
+                        pump_on_01=1.0,
+                        k_rad=MRT_K_RAD_DEFAULT,
+                    )
+                elif len(inputs_vals) == 4:
+                    active_01 = inputs_vals[2][1]
+                    k_rad = inputs_vals[3][1]
+                    val = mrt_gated_c(
+                        t_air,
+                        t_rad_mean,
+                        valve_open_01=active_01,
+                        pump_on_01=1.0,
+                        k_rad=k_rad,
+                    )
+                else:
+                    valve_01 = inputs_vals[2][1]
+                    pump_01 = inputs_vals[3][1]
+                    k_rad = inputs_vals[4][1] if len(inputs_vals) >= 5 else MRT_K_RAD_DEFAULT
+                    val = mrt_gated_c(t_air, t_rad_mean, valve_01, pump_01, k_rad=k_rad)
+            elif dspec.compute == "and01":
+                vals01 = [v for _n, v, _ts in inputs_vals]
+                val = and01(*vals01)
             else:
                 t_air = inputs_vals[0][1]
                 mrt_val = inputs_vals[1][1]

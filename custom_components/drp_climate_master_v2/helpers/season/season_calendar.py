@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from typing import Dict, Final, Mapping, Optional, Tuple, Literal, cast
 from datetime import date, datetime
-from dataclasses import dataclass
 import calendar
 import logging
 
 from ...helpers.timeutils import to_local_date
 from ...domain.models.season import SeasonWindow
-from ...domain.enums import Seasons
+from ...domain.models.season import Seasons
 from ..logger import log_warning
 
 _LOGGER = logging.getLogger(__name__)

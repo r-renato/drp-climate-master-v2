@@ -37,14 +37,23 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
         rolling_median_window=3,
     )
 
+    switch_filters = FilterConfig(
+        auto_unit_convert=False,
+        max_age=timedelta(minutes=5),
+        hold_last_good=timedelta(minutes=2),
+        min_valid=0.0,
+        max_valid=1.0,
+        time_hampel_k=None,          # evita Hampel su switch
+        max_rate_per_min=None,       # niente rate limit su switch
+        ema_alpha=1.0,               # niente EMA su switch
+        rolling_median_window=1,
+    )
+
     for area in areas:
         name = slugify(area.name)
         if area.indoor:
-            zones.append(
-                ZoneConfig(
-                    zone=name,
-                    weight=area.ceiling or 0.0,
-                    variables=(
+            if area.radiant and area.thermal_collector_valve_switch:
+                variables = (
                         GroupSpec(
                             name="indoor_temperature",
                             sensors=(SensorSpec(area.sensors.temperature, weight=1.0, filters=indoor_temp_filters),),
@@ -63,7 +72,50 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                             clamp_min=1.0,
                             clamp_max=100.0,
                         ),
-                    ),
+                        GroupSpec(
+                            name="radiant_valve_open",
+                            sensors=(
+                                SensorSpec(
+                                    # se in futuro avrai area.sensors.valve, verrà usato automaticamente
+                                    area.thermal_collector_valve_switch,
+                                    weight=1.0,
+                                    filters=switch_filters,
+                                ),
+                            ),
+                            method="weighted_mean",
+                            cross_outlier_method="none",
+                            min_sources=1,
+                            clamp_min=0.0,
+                            clamp_max=1.0,
+                        ),
+                )
+            else:
+                variables = (
+                        GroupSpec(
+                            name="indoor_temperature",
+                            sensors=(SensorSpec(area.sensors.temperature, weight=1.0, filters=indoor_temp_filters),),
+                            method="weighted_mean",
+                            cross_outlier_method="none",
+                            min_sources=1,
+                            clamp_min=5.0,
+                            clamp_max=35.0 if area.radiant else 60.0,
+                        ),
+                        GroupSpec(
+                            name="indoor_humidity",
+                            sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=indoor_rh_filters),),
+                            method="weighted_mean",
+                            cross_outlier_method="none",
+                            min_sources=1,
+                            clamp_min=1.0,
+                            clamp_max=100.0,
+                        ),
+                )
+
+            zones.append(
+                ZoneConfig(
+                    zone=name,
+                    weight=area.ceiling or 0.0,
+                    variables=variables,
                 )
             )
 
@@ -179,6 +231,22 @@ def _build_plant_radiant(supply_units: SupplyUnitsConfig) -> tuple[ZoneConfig, .
                         clamp_min=5.0,
                         clamp_max=60.0,
                     ),
+                    GroupSpec(
+                        name="adj_supply_on",
+                        sensors=(SensorSpec(supply_units.adjustable_supply_unit, weight=1.0, filters=FilterConfig(
+                            max_age=timedelta(minutes=5),
+                            hold_last_good=timedelta(minutes=2),
+                            min_valid=0.0,
+                            max_valid=1.0,
+                            ema_alpha=1.0,  # per switch: niente smoothing
+                            rolling_median_window=1,
+                        )),),
+                        method="weighted_mean",
+                        cross_outlier_method="none",
+                        min_sources=1,
+                        clamp_min=0.0,
+                        clamp_max=1.0,
+                    ),
                 ),
             ),
     )
@@ -240,6 +308,32 @@ def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
 
     return tuple(psychro_derived)
 
+def _build_actuation_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
+    """Derived boolean-ish signals (0/1) about real actuation per zone."""
+    out: list[DerivedSpec] = []
+
+    for area in areas:
+        name = slugify(area.name)
+        if area.indoor and area.radiant and area.ceiling:
+            out.append(
+                DerivedSpec(
+                    name=f"{name}.plant_active",
+                    kind="compute",
+                    compute="and01",
+                    inputs=(
+                        ("plant_radiant.adj_supply_on", 1.0),     # pump
+                        (f"{name}.radiant_valve_open", 1.0),      # valve zona
+                    ),
+                    min_sources=2,
+                    clamp_min=0.0,
+                    clamp_max=1.0,
+                    max_age=timedelta(minutes=5),
+                    hold_last_good=timedelta(minutes=2),
+                )
+            )
+
+    return tuple(out)
+
 def _build_mrt_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
     """Mean Radiant Temperature"""
     mrt_derived: list[DerivedSpec] = []
@@ -251,18 +345,20 @@ def _build_mrt_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
                 DerivedSpec(
                     name=f"{name}.mrt",
                     kind="compute",
-                    compute="mrt_c",
+                    compute="mrt_gated_c",
                     inputs=(
                         (f"{name}.indoor_temperature", 1.0),
                         ("global.radiant_mean_temperature", 1.0),
+                        (f"{name}.plant_active", 1.0),  # <-- nuovo input
                     ),
-                    min_sources=2,
+                    min_sources=3,
                     clamp_min=-10.0,
                     clamp_max=40.0,
                     max_age=timedelta(minutes=10),
                     hold_last_good=timedelta(minutes=5),
                 )
             )
+
             mrt_derived.append(
                 DerivedSpec(
                     name=f"{name}.t_op",
@@ -413,6 +509,7 @@ def build_sensor_mapping(climate: ClimateConfig) -> MappingConfig:
                 + _build_outdoor_zones(climate.areas) \
                 + _build_plant_radiant(climate.devices.supply_units),
         derived=_build_global_derived(climate.areas) \
-                + _build_psychro_derived(climate.areas) 
+                + _build_psychro_derived(climate.areas) \
+                + _build_actuation_derived(climate.areas) \
                 + _build_mrt_derived(climate.areas)
     )

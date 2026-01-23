@@ -15,11 +15,10 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
 from ..domain.models.season import SeasonState
 from ..domain.models.weather import Forecast, Historical
-from ..domain.enums import Seasons
 
 from ..helpers.season.season_calendar import CalendarSeason
 from ..helpers.season.season_weather import MeteoContiguousSeasonModel, forecast_legacy_to_native
-from ..helpers.logger import log_debug, log_info, log_warning
+from ..helpers.logger import log_debug, log_exception, log_info, log_warning
 from ..helpers.timeutils import as_iso_local
 from ..helpers.cache import JsonObject, Codec, PersistentCache
 from ..helpers.weather.pirateweather_client import (
@@ -195,7 +194,7 @@ class WeatherCoordinator:
         await self._async_start()
         # Do NOT run heavy season detect repeatedly during startup storms; schedule once.
         self._schedule_season_detect("startup")
-        log_info(_LOGGER, "Completed.")
+        log_info(_LOGGER, "Done.")
 
     async def _async_start(self) -> None:
         await self._cache.async_load()
@@ -317,19 +316,24 @@ class WeatherCoordinator:
 
     def _should_run_season_detect(self) -> bool:
         now = dt_util.utcnow()
+        
         if self._last_season_detect_utc is None:
             return True
+        
         return (now - self._last_season_detect_utc) >= self._wc_cfg.season_detect_min_interval
 
     def _schedule_season_detect(self, reason: str) -> None:
         # Dedup: if already running, do nothing.
         if self._season_task and not self._season_task.done():
+            log_warning(_LOGGER, "Dedup: if already running, do nothing.")
             return
+        
         # Throttle: run at most once per configured interval.
         if not self._should_run_season_detect():
             return
+        
         self._season_task = self._hass.async_create_task(
-            self._async_season_detect_guarded(reason),
+            target=self._async_season_detect_guarded(reason),
             name=f"drp_season_detect:{reason}",
         )
 
@@ -338,13 +342,15 @@ class WeatherCoordinator:
             # Double-check after acquiring lock
             if not self._should_run_season_detect():
                 return
+            
             self._last_season_detect_utc = dt_util.utcnow()
+            
             try:
                 await self._async_season_detect()
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                log_warning(_LOGGER, "Season detect failed (%s): %r", reason, e)
+                log_exception(_LOGGER, "Season detect (%s) failed : %r", reason, e)
 
     # -----------------------------
     # Forecast + daily refresh
@@ -474,8 +480,10 @@ class WeatherCoordinator:
             detect_model=source,
         )
         self._set_season_state(season_state)
-        log_debug(_LOGGER, "%s", model.windows())
-        log_debug(_LOGGER, "%s", season_state)
+        self._coordinator.set_season_state(season_state)
+
+        log_debug(_LOGGER, "Model windows=%s", model.windows())
+        log_debug(_LOGGER, "Season state=%s", season_state)
 
     # -----------------------------
     # Historical refresh (your existing dedup logic, with UTC bookkeeping fixed)
