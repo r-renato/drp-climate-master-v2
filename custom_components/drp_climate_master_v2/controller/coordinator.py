@@ -6,7 +6,7 @@ import contextlib
 import json
 import logging
 from dataclasses import fields, replace
-from typing import Any, Mapping
+from typing import Any, Dict, Mapping
 from datetime import datetime, timedelta, timezone
 
 import psychrolib
@@ -17,12 +17,16 @@ from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, Home
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from custom_components.drp_climate_master_v2.domain.enums import HVACOperatingProfile
+from ..domain.models.plant import PlantSnapshot
+
+from ..domain.enums import HVACOperatingProfile
+from ..helpers.plant import take_plant_snapshot
+from ..helpers.timeutils import now_utc
 
 from ..helpers.confort.policy_layer import ComfortPolicyLayer, PolicyContext, PolicyDecision, build_policy_layer
 
 from ..domain.models.season import OperativeSeason, SeasonState
-from ..helpers.confort.confort_band import ComfortBandCalculator
+from ..helpers.confort.confort_band import ComfortBandCalculator, ComfortBandResult
 
 from ..domain.influx import InfluxConfig
 # from ..strategies.plant_regime_pipeline import InfluxSeriesReader, PlantEntities, PlantRegimePipeline, RegimeConfig, RegimeSearchResult, daily_local_mean
@@ -92,7 +96,9 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._season_state = None
 
         self._policy_layer: ComfortPolicyLayer = build_policy_layer()
-        self._confort_band = ComfortBandCalculator()
+        self._confort_bands = ComfortBandCalculator()
+
+        self._plant_snapshot: PlantSnapshot | None = None 
 
         # Psychrolib unit system: impostazione globale (attenzione: globale nel processo)
         # Se più entry con unit diverse coesistono, questa è una criticità.
@@ -474,6 +480,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
     def _compute_confort_band(self):
+        result: Dict[str, ComfortBandResult] = {}
 
         runtime_vmc = self._runtime.climate.devices.vmc
 
@@ -513,7 +520,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 decision: PolicyDecision = self._policy_layer.decide(area_policy_ctx)
                 _LOGGER.debug("[comfort_policy] ctrl_aggressiveness=%.2f", decision.ctrl_aggressiveness)
-                area_confort_band = self._confort_band.compute_comfort_band(
+                area_confort_band = self._confort_bands.compute_comfort_band(
                     room=name,
                     speed=int(vmc_speed.state),
                     rh_pct=rh_pct.value,
@@ -522,12 +529,15 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     policy=decision,  # <-- QUI
                 )
 
+                result[name] = area_confort_band
+
                 log_debug(_LOGGER, "%s", area_policy_ctx)
                 log_debug(_LOGGER, "%s", area_confort_band)
         else:
             log_warning(_LOGGER, "season_state=%s", season_state)
             log_warning(_LOGGER, "vmc_speed=%s", vmc_speed)
 
+        return result
 
     # async def _test_regime_config(self) -> None:
     #     season_state = self._entry_store.get(SEASON_STATE)
@@ -660,7 +670,17 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             await self._sensor_aggregator.async_update()
 
-            self._compute_confort_band()
+            if self._season_state:
+                self._plant_snapshot = take_plant_snapshot(
+                    timestamp=now_utc(),
+                    runtime_config=self._runtime,
+                    season=self._season_state,
+                    entities_state=self._entities_state,
+                    sensor_aggr=self._sensor_aggregator,
+                    confort_bands=self._compute_confort_band(),
+                )
+            else:
+                log_warning(_LOGGER, "Invalid season state %s", self._season_state)
 
             # rh_pct = self._sensor_aggregator.get( "kitchen.indoor_humidity" ).value
             # t_op_current = self._sensor_aggregator.get( "kitchen.t_op" ).value
@@ -685,7 +705,8 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # await self._test_regime_config()
 
             log_debug(_LOGGER, "%s", self._sensor_aggregator.latest_all())
-
+            log_debug(_LOGGER, "_plant_snapshot=%s", self._plant_snapshot)
+            
             # TODO: costruire snapshot reale (PlantSnapshot ecc.)
             # Esempio minimale: esporta solo timestamp e numero entity osservate
             snapshot = {

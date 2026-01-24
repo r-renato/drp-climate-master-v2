@@ -478,6 +478,7 @@ class WeatherCoordinator:
             window=current_season,
             weather=info.replace_windows(model.windows()),
             detect_model=source,
+            
         )
         self._set_season_state(season_state)
         self._coordinator.set_season_state(season_state)

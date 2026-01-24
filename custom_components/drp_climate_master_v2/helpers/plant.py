@@ -4,7 +4,10 @@ import logging
 from typing import List, Optional
 from datetime import datetime
 
-from .logger import exc_one_line, log_debug, log_warning
+from .confort.confort_band import ComfortBandResult
+from .sensor_aggregator import AggregatedValue, SensorAggregator
+
+from .logger import exc_one_line, log_debug, log_exception, log_warning
 
 from .ha import get_entity_value
 
@@ -25,98 +28,152 @@ from ..domain.models.runtime_schema import (
     VMCConfig,
 )
 from ..domain.models.season import SeasonState
-from .utils import as_bool, as_float, as_int, make_class
+from .utils import as_bool, as_float, as_int, make_class, slugify
 
 _LOGGER = logging.getLogger(__name__)
 
 def take_plant_snapshot(
     runtime_config: RuntimeConfig,
     season: SeasonState,
+    sensor_aggr: SensorAggregator,
+    confort_bands: dict[str, ComfortBandResult],
     entities_state: dict,
     timestamp: datetime,
-) -> PlantSnapshot:
+) -> PlantSnapshot | None:
     """Build a plant snapshot collecting HA entity states."""
 
-    def _build_zones_snapshot(runtime_config: RuntimeConfig, ts: datetime) -> dict[str, ZoneSnapshot]:
-        """Helper to build a ZoneSnapshot from area configs."""
+    def _build_indoor_zones_snapshot(
+            runtime_config: RuntimeConfig, 
+            ts: datetime,
+            sensor_aggr: SensorAggregator,
+            confort_bands: dict[str, ComfortBandResult],
+    ) -> dict[str, ZoneSnapshot] | None:
         zone_snapshots: dict[str, ZoneSnapshot] = {}
 
-        # log_debug(_LOGGER, "RuntimeConfig: 22 %s", runtime_config.climate.areas)
-        supply_unit_sensor: SupplyUnitSensors = runtime_config.climate.devices.supply_units.sensors
-        flow_t = as_float(get_entity_value(entities_state, supply_unit_sensor.boiler_temp_system_supply))
-        return_t = as_float(get_entity_value(entities_state, supply_unit_sensor.boiler_temp_system_return))
+        areas: List[AreaConfig] = runtime_config.climate.areas
+
+        try:
+            for area in areas:
+                timestamp=ts
+                name=slugify(area.name)
+
+                if area.indoor and area.radiant and area.ceiling:
+                    condensation_margin: AggregatedValue = sensor_aggr.get(name=f"{name}.condensation_margin")
+                    indoor_dew_point: AggregatedValue = sensor_aggr.get(name=f"{name}.indoor_dew_point")
+                    indoor_heat_index: AggregatedValue = sensor_aggr.get(name=f"{name}.indoor_heat_index")
+                    indoor_humidity: AggregatedValue = sensor_aggr.get(name=f"{name}.indoor_humidity")
+                    indoor_temperature: AggregatedValue = sensor_aggr.get(name=f"{name}.indoor_temperature")
+                    mrt: AggregatedValue = sensor_aggr.get(name=f"{name}.mrt")
+                    plant_active: AggregatedValue = sensor_aggr.get(name=f"{name}.plant_active")
+                    radiant_valve_open: AggregatedValue = sensor_aggr.get(name=f"{name}.radiant_valve_open")
+                    t_op: AggregatedValue = sensor_aggr.get(name=f"{name}.t_op")
+
+                    confort_band: ComfortBandResult | None = confort_bands.get(name)
+                else:
+                    continue
+
+                zone_snapshot: ZoneSnapshot = make_class(
+                                    ZoneSnapshot,
+                                    timestamp=timestamp,
+                                    name=name,
+                                    temperature=indoor_temperature,
+                                    humidity=indoor_humidity,
+                                    heat_index=indoor_heat_index,
+                                    dew_point=indoor_dew_point,
+                                    t_op=t_op,
+                                    mrt=mrt,
+                                    condensation_margin=condensation_margin,
+                                    radiant_valve=radiant_valve_open,
+                                    confort_band=confort_band,
+                )
+
+                zone_snapshots[name] = zone_snapshot
+
+            return zone_snapshots
+        except TypeError as ex:
+            # Parametri mancanti/extra o mismatch firma costruttore
+            log_warning(_LOGGER, "Error creating indoor ZoneSnapshot %s", ex, exc_info=True)
+            return None
+        except Exception as ex:
+            # Qualsiasi altro errore inaspettato
+            log_exception(_LOGGER, "Unexpected error creating indoor ZoneSnapshot %s", ex)
+            return None
+
+    def _build_outdoor_zones_snapshot(
+            runtime_config: RuntimeConfig,
+            ts: datetime, 
+            sensor_aggr: SensorAggregator
+    ) -> dict[str, ZoneSnapshot] | None:
+        zone_snapshots: dict[str, ZoneSnapshot] = {}
 
         areas: List[AreaConfig] = runtime_config.climate.areas
-        for area in areas:
-            # log_debug(_LOGGER, "RuntimeConfig: 22 %s", area.sensors)
-            sensors=area.sensors
-            timestamp=ts
-            name=area.name
-            valve_state = None
-            room_t = as_float(get_entity_value(entities_state, sensors.temperature))
-            room_rh = as_float(get_entity_value(entities_state, sensors.humidity))
 
-            if area.indoor:
-                room_dp = as_float(get_entity_value(entities_state, sensors.dew_point))
-                room_hi = as_float(get_entity_value(entities_state, sensors.heat_index))
-                # log_debug(_LOGGER, f"Entity ids for area {name}: T={sensors.temperature}, RH={sensors.humidity}, DP={sensors.dew_point}, HI={sensors.heat_index}")
+        try:
+            for area in areas:
+                timestamp=ts
+                name=slugify(area.name)
 
-            if area.radiant:
-                valve_state = as_bool(get_entity_value(entities_state, area.thermal_collector_valve_switch))
+                if area.indoor:
+                    continue
 
-            try:
-                zone_sensor: SensorPair = make_class(
-                    SensorPair,
-                    temperature=room_t,
-                    humidity=room_rh,
-                    dew_point=room_dp if area.indoor else None,
-                    heat_index=room_hi if area.indoor else None,
-                )
+                indoor_humidity: AggregatedValue = sensor_aggr.get(name=f"{name}.indoor_humidity")
+                indoor_temperature: AggregatedValue = sensor_aggr.get(name=f"{name}.indoor_temperature")
+
                 zone_snapshot: ZoneSnapshot = make_class(
-                    ZoneSnapshot,
-                    timestamp=timestamp,
-                    name=area.name,
-
-                    sensors=zone_sensor,
-
-                    flow_t=flow_t if area.radiant else None,
-                    return_t=return_t if area.radiant else None,
-
-                    act_state=valve_state if area.radiant else None,
+                                    ZoneSnapshot,
+                                    timestamp=timestamp,
+                                    name=name,
+                                    temperature=indoor_temperature,
+                                    humidity=indoor_humidity,
                 )
-                zone_snapshots[ area.name ] = zone_snapshot
-            except TypeError as ex:
-                # Parametri mancanti/extra o mismatch firma costruttore
-                line = [
-                    f"Error creating ZoneSnapshot for area {name} - {exc_one_line(ex)}",
-                    f"room t entity: {sensors.temperature}, value: {get_entity_value(entities_state, sensors.temperature)}",
-                    f"room rh entity: {sensors.humidity}, value: {get_entity_value(entities_state, sensors.humidity)}",
-                    f"room dp entity: {sensors.dew_point}, value: {get_entity_value(entities_state, sensors.dew_point)}",
-                    f"room hi entity: {sensors.heat_index}, value: {get_entity_value(entities_state, sensors.heat_index)}",
-                    f"valve entity: {area.thermal_collector_valve_switch}, value: {get_entity_value(entities_state, area.thermal_collector_valve_switch)}",
-                ]
-                log_warning(_LOGGER, "\n".join(line))
-                # _LOGGER.warning("Error creating ZoneSnapshot for area %s: %s", name, ex, exc_info=True)
-                continue
-            except Exception as ex:
-                # Qualsiasi altro errore inaspettato
-                _LOGGER.exception("Unexpected error creating ZoneSnapshot for area %s: %s", name, ex)
-                continue
 
-        return zone_snapshots
+                zone_snapshots[name] = zone_snapshot
 
-    def _build_pdc_snapshot(runtime_config: RuntimeConfig, ts: datetime) -> PDCSnapshot | None:
+            return zone_snapshots
+        except TypeError as ex:
+            # Parametri mancanti/extra o mismatch firma costruttore
+            log_warning(_LOGGER, "Error creating outdoor ZoneSnapshot %s", ex, exc_info=True)
+            return None
+        except Exception as ex:
+            # Qualsiasi altro errore inaspettato
+            log_exception(_LOGGER, "Unexpected error creating outdoor ZoneSnapshot %s", ex)
+            return None
+
+
+    def _build_pdc_snapshot(
+        runtime_config: RuntimeConfig,
+        ts: datetime,
+    ) -> PDCSnapshot | None:
 
         radiant: RadiantConfig | None = runtime_config.climate.devices.radiant
         if radiant is None:
             return None
 
         try:
+            power_state = entities_state.get(radiant.power) if radiant.power else None
+            last_changed = (
+                getattr(power_state, "last_changed", None)
+                or getattr(power_state, "last_updated", None)
+                if power_state
+                else None
+            )
+            power_on = as_bool(get_entity_value(entities_state, radiant.power)) or False
+            minutes_power_on = None
+            minutes_power_off = None
+            if last_changed is not None:
+                minutes = (ts - last_changed).total_seconds() / 60.0
+                if minutes < 0:
+                    minutes = 0.0
+                if power_on:
+                    minutes_power_on = minutes
+                else:
+                    minutes_power_off = minutes
+
             pdc_snapshot: PDCSnapshot = make_class(
                 PDCSnapshot,
                 timestamp=ts,
                 fm_power_on=as_bool(get_entity_value(entities_state, radiant.fm_power)) or False,
-                power_on=as_bool(get_entity_value(entities_state, radiant.power)) or False,
+                power_on=power_on,
                 device_mode=as_int(get_entity_value(entities_state, radiant.mode.actuator)),
                 wot_heat=as_float(get_entity_value(entities_state, radiant.heating_t_setpoint.actuator)),
                 delta_t_heat=as_float(get_entity_value(entities_state, radiant.heating_dt_setpoint.actuator)),
@@ -124,51 +181,24 @@ def take_plant_snapshot(
                 delta_t_cool=as_float(get_entity_value(entities_state, radiant.cooling_dt_setpoint.actuator)),
                 sensor_t_water_in_pe=as_float(get_entity_value(entities_state, radiant.sensors.pdc_temp_water_in)),
                 sensor_t_water_out_pe=as_float(get_entity_value(entities_state, radiant.sensors.pdc_temp_water_out)),
-                minutes_power_on=None, #TODO
-                minutes_power_off=None,
+                minutes_power_on=minutes_power_on,
+                minutes_power_off=minutes_power_off,
             )
 
             return pdc_snapshot
         except TypeError as ex:
             # Parametri mancanti/extra o mismatch firma costruttore
-            _LOGGER.warning("Error creating PDCSnapshot %s", ex, exc_info=True)
+            log_warning(_LOGGER, "Error creating PDCSnapshot %s", ex, exc_info=True)
             return None
         except Exception as ex:
             # Qualsiasi altro errore inaspettato
-            _LOGGER.exception("Unexpected error creating PDCSnapshot %s", ex)
+            log_exception(_LOGGER, "Unexpected error creating PDCSnapshot %s", ex)
             return None
 
-    def _build_supply_unit_snapshot(runtime_config: RuntimeConfig, ts: datetime) -> SupplyUnitSnapshot | None:
-
-        supply_unit: SupplyUnitsConfig | None = runtime_config.climate.devices.supply_units
-        if supply_unit is None:
-            return None
-
-        try:
-            supply_unic_snapshot: SupplyUnitSnapshot = make_class(
-                SupplyUnitSnapshot,
-                timestamp=ts,
-                direct_su_power_on=as_bool(get_entity_value(entities_state, supply_unit.direct_supply_unit)) or False,
-                adjustable_su_power_on=as_bool(get_entity_value(entities_state, supply_unit.adjustable_supply_unit)) or False,
-                three_point_mixing_valve=as_int(get_entity_value(entities_state, supply_unit.three_point_mixing_valve)),
-                sensor_boiler_temp_system_supply=as_float(get_entity_value(entities_state, supply_unit.sensors.boiler_temp_system_supply)),
-                sensor_boiler_temp_system_return=as_float(get_entity_value(entities_state, supply_unit.sensors.boiler_temp_system_return)),
-                sensor_adjustable_temp_system_supply=as_float(get_entity_value(entities_state, supply_unit.sensors.adjustable_temp_system_supply)),
-                sensor_adjustable_temp_system_return=as_float(get_entity_value(entities_state, supply_unit.sensors.adjustable_temp_system_return)),
-                sensor_direct_temp_system_supply=as_float(get_entity_value(entities_state, supply_unit.sensors.direct_temp_system_supply)),
-                sensor_direct_temp_system_return=as_float(get_entity_value(entities_state, supply_unit.sensors.direct_temp_system_return)),
-            )
-            return supply_unic_snapshot
-        except TypeError as ex:
-            # Parametri mancanti/extra o mismatch firma costruttore
-            _LOGGER.warning("Error creating SupplyUnitSnapshot %s", ex, exc_info=True)
-            return None
-        except Exception as ex:
-            # Qualsiasi altro errore inaspettato
-            _LOGGER.exception("Unexpected error creating SupplyUnitSnapshot %s", ex)
-            return None
-
-    def _build_vmc_snapshot(runtime_config: RuntimeConfig, ts: datetime) -> VMCSnapshot | None:
+    def _build_vmc_snapshot(
+            runtime_config: RuntimeConfig, 
+            ts: datetime
+        ) -> VMCSnapshot | None:
 
         vmc: VMCConfig | None = runtime_config.climate.devices.vmc
         if vmc is None:
@@ -215,66 +245,100 @@ def take_plant_snapshot(
             return vmc_snapshot
         except TypeError as ex:
             # Parametri mancanti/extra o mismatch firma costruttore
-            _LOGGER.warning("Error creating VMCSnapshot %s", ex, exc_info=True)
+            log_warning(_LOGGER, "Error creating VMCSnapshot %s", ex, exc_info=True)
             return None
         except Exception as ex:
             # Qualsiasi altro errore inaspettato
-            _LOGGER.exception("Unexpected error creating VMCSnapshot %s", ex)
+            log_exception(_LOGGER, "Unexpected error creating VMCSnapshot %s", ex)
             return None
-        
-    # --- Main logic --------------------------------------------------------
-    zones_snapshot: dict[str, ZoneSnapshot] =_build_zones_snapshot(runtime_config, timestamp)
-    terrace_area = zones_snapshot.get('Terrace') if zones_snapshot else None
 
+    def _build_supply_unit_snapshot(runtime_config: RuntimeConfig, ts: datetime) -> SupplyUnitSnapshot | None:
+
+        supply_unit: SupplyUnitsConfig | None = runtime_config.climate.devices.supply_units
+        if supply_unit is None:
+            return None
+
+        try:
+            supply_unic_snapshot: SupplyUnitSnapshot = make_class(
+                SupplyUnitSnapshot,
+                timestamp=ts,
+                direct_su_power_on=as_bool(get_entity_value(entities_state, supply_unit.direct_supply_unit)) or False,
+                adjustable_su_power_on=as_bool(get_entity_value(entities_state, supply_unit.adjustable_supply_unit)) or False,
+                three_point_mixing_valve=as_int(get_entity_value(entities_state, supply_unit.three_point_mixing_valve)),
+                sensor_boiler_temp_system_supply=as_float(get_entity_value(entities_state, supply_unit.sensors.boiler_temp_system_supply)),
+                sensor_boiler_temp_system_return=as_float(get_entity_value(entities_state, supply_unit.sensors.boiler_temp_system_return)),
+                sensor_adjustable_temp_system_supply=as_float(get_entity_value(entities_state, supply_unit.sensors.adjustable_temp_system_supply)),
+                sensor_adjustable_temp_system_return=as_float(get_entity_value(entities_state, supply_unit.sensors.adjustable_temp_system_return)),
+                sensor_direct_temp_system_supply=as_float(get_entity_value(entities_state, supply_unit.sensors.direct_temp_system_supply)),
+                sensor_direct_temp_system_return=as_float(get_entity_value(entities_state, supply_unit.sensors.direct_temp_system_return)),
+            )
+            return supply_unic_snapshot
+        except TypeError as ex:
+            # Parametri mancanti/extra o mismatch firma costruttore
+            log_warning(_LOGGER, "Error creating SupplyUnitSnapshot %s", ex, exc_info=True)
+            return None
+        except Exception as ex:
+            # Qualsiasi altro errore inaspettato
+            log_exception(_LOGGER, "Unexpected error creating SupplyUnitSnapshot %s", ex)
+            return None
+
+# -------------------------------------------------------- 
+# Main logic
+# --------------------------------------------------------
     try:
-        mean_apt: SensorPair | None = make_class(
-            SensorPair,
-            temperature=as_float(get_entity_value(entities_state, runtime_config.climate.mean_apt.temperature)),
-            humidity=as_float(get_entity_value(entities_state, runtime_config.climate.mean_apt.humidity)),
-            dew_point=as_float(get_entity_value(entities_state, runtime_config.climate.mean_apt.dew_point)),
-            heat_index=as_float(get_entity_value(entities_state, runtime_config.climate.mean_apt.heat_index)),
+        indoor_zones_snapshot = _build_indoor_zones_snapshot(runtime_config, timestamp, sensor_aggr, confort_bands)
+        outdoor_zones_snapshot = _build_outdoor_zones_snapshot(runtime_config, timestamp, sensor_aggr)
+
+        pdc = _build_pdc_snapshot(runtime_config, timestamp)
+        vmc = _build_vmc_snapshot(runtime_config, timestamp)
+        supply_unit = _build_supply_unit_snapshot(runtime_config, timestamp)
+
+        runtime_windows=runtime_config.climate.windows
+        if runtime_windows:
+            windows_close_state=as_bool(get_entity_value(entities_state, runtime_windows.closed_state)) or False
+        else:
+            windows_close_state=False
+        presence_vacation=as_bool(get_entity_value(entities_state, runtime_config.climate.scenarios.vacation)) or False
+        presence_nobodysin=as_bool(get_entity_value(entities_state, runtime_config.climate.scenarios.nobodysin)) or False
+        
+        return make_class(
+            PlantSnapshot,
+            timestamp=timestamp,
+            season=season,
+
+            indoor_zones=indoor_zones_snapshot,
+            outdoor_zones=outdoor_zones_snapshot,
+            
+            pdc=pdc,
+            vmc=vmc,
+            supply_unit=supply_unit,
+
+            windows_close_state=windows_close_state,
+            presence_vacation=presence_vacation,
+            presence_nobodysin=presence_nobodysin,
+
+            global_indoor_dew_point=sensor_aggr.get("global.indoor_dew_point"),
+            global_indoor_heat_index=sensor_aggr.get("global.indoor_heat_index"),
+            global_indoor_humidity=sensor_aggr.get("global.indoor_humidity"),
+            global_indoor_temperature=sensor_aggr.get("global.indoor_temperature"),
+
+            global_outdoor_dew_point=sensor_aggr.get("global.outdoor_dew_point"),
+            global_outdoor_humidity=sensor_aggr.get("global.outdoor_humidity"),
+            global_outdoor_temperature=sensor_aggr.get("global.outdoor_temperature"),
+
+            global_condensation_margin_min=sensor_aggr.get("global.condensation_margin_min"),
+            global_radiant_mean_temperature=sensor_aggr.get("global.radiant_mean_temperature"),
         )
     except TypeError as ex:
-        mean_apt = None
-    
-    # log_debug(_LOGGER, f"zones_snapshot: {zones_snapshot}" )
-    # log_debug(_LOGGER, f"terrace_area: {terrace_area}" )
-    outdoor: SensorPair = make_class(
-        SensorPair,
-        temperature=terrace_area.sensors.temperature if terrace_area and terrace_area.sensors else None,
-        humidity=terrace_area.sensors.humidity if terrace_area and terrace_area.sensors else None,
-    )
-
-    apt_windows_open: Optional[bool] = None
-    if runtime_config.climate.apt_windows and runtime_config.climate.apt_windows.state:
-        apt_windows_open = (
-            as_bool(
-                get_entity_value(
-                    entities_state,
-                    runtime_config.climate.apt_windows.state,
-                )
-            )
-            or False
-        )
-
-    return make_class(
-        PlantSnapshot,
-        timestamp=timestamp,
-        season=season,
-        zones=zones_snapshot,
-
-        mean_apt=mean_apt,
-        outdoor=outdoor,
-
-        pdc=_build_pdc_snapshot(runtime_config, timestamp),
-        supply_unit=_build_supply_unit_snapshot(runtime_config, timestamp),
-        vmc=_build_vmc_snapshot(runtime_config, timestamp),
-
-        apt_windows_open=apt_windows_open,
-        presence_vacation=as_bool(get_entity_value(entities_state, runtime_config.climate.scenarios.vacation)) or False,
-        presence_nobodysin=as_bool(get_entity_value(entities_state, runtime_config.climate.scenarios.nobodysin)) or False,
-    )
+        # Parametri mancanti/extra o mismatch firma costruttore
+        log_warning( _LOGGER, "Error creating PlantSnapshot %s", ex, exc_info=True)
+        return None
+    except Exception as ex:
+        # Qualsiasi altro errore inaspettato
+        log_exception(_LOGGER, "Unexpected error creating PlantSnapshot %s", ex)
+        return None
 
 
 
 
+ 
