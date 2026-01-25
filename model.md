@@ -557,6 +557,151 @@ Dato che i sensori possono essere rumorosi o fallire, la logica include modalit�
 * Osservabilità: ogni decisione deve avere un reason code (es. “CondRisk HIGH → DEHUM-ASSIST”)
 * Safety-first: in estate la logica non “negozia” con la condensa
 
+------------------------------------------------------------------------------------------
+
+## Stima v_air (velocità aria in zona occupata) e integrazione in comfort zone computabile (ISO 7730 Cat. B)
+
+### Premessa e obiettivo
+Nel modello di comfort (ISO 7730 / ASHRAE 55), la velocità dell’aria `v_air` entra direttamente nel calcolo PMV/PPD e influenza la “comfort zone” risultante.  
+Nel nostro impianto, la `v_air` è generata prevalentemente dalla **VMC ENEREN RER/REV 020** tramite diffusori a soffitto (slot/lineari). Non potendo effettuare misure con anemometro, adottiamo un approccio **robusto**:  
+- definiamo una **stima nominale** `v_air_best` (per reporting e comportamento medio)
+- definiamo una **banda di incertezza** `[v_air_lo, v_air_hi]` per garantire affidabilità >95% della comfort-zone computata anche senza misure in campo.
+
+### Dati documentali (RER/REV 020)
+- Portata massima di **mandata in ambiente**: **260 m³/h**  
+- Portata massima di **ricambio aria esterna** (bilanciata): **0–130 m³/h**, regolata su **5 livelli** (1…5) come percentuale (es. 2/5 = 40%).  
+- In modalità di “trattamento aria” (raffrescamento/riscaldamento/deumidifica) il manuale indica mandata al massimo; nel nostro impianto la velocità è comunque regolabile 0..5 via HA → `speed` viene trattato come manopola di scalatura portata/impulso.
+
+### Geometria reale dei diffusori (slot a soffitto)
+- Living: diffusore lineare **2.5 m × 0.04 m**  → area geometrica A = **0.10 m²**
+- Kitchen: diffusore lineare **2.0 m × 0.04 m** → A = **0.08 m²**
+- Studio (Guest): diffusore lineare **0.5 m × 0.04 m** → A = **0.02 m²**
+- Master Bedroom: diffusore lineare **0.5 m × 0.04 m** → A = **0.02 m²**
+- Nota bagni: griglie **0.40 m × 0.25 m** (assunte non determinanti per `v_air` in zona occupata di living/bedroom).
+
+> Nota impiantistica critica (living): il diffusore living è **esattamente sopra il divano**, quindi la probabilità di percezione diretta del getto è maggiore → si adotta una stima più “alta” e una banda di incertezza più conservativa.
+
+---
+
+## Modello numerico per v_air
+
+### Principio di modellazione
+Senza misura diretta, la trasformazione “portata → v_air in zona occupata” dipende da:
+- area libera effettiva del diffusore (alette/feritoie)
+- effetto Coandă e decadimento del getto
+- distanza e posizione delle persone rispetto al getto
+- arredi / ostacoli
+
+Per garantire robustezza:
+- `v_air_lo` rappresenta aria quasi ferma (valore minimo realistico indoor)
+- `v_air_hi` rappresenta un caso “peggiore” (potenziale draft), soprattutto critico in inverno
+- `v_air_best` è una stima media per uso nominale
+
+### Parametri base
+- `v_air_lo = 0.05 m/s` (aria quasi ferma indoor, valore minimo operativo)
+- `v_air_best_max` (speed=5):
+  - Living: **0.15 m/s**
+  - Altre stanze (Studio, Master, Kitchen): **0.10 m/s**
+- `v_air_hi_max` (speed=5, caso conservativo):
+  - Living: **0.26 m/s**
+  - Altre stanze (Studio, Master, Kitchen): **0.17 m/s**
+
+### Mapping da speed (0..5) a v_air (m/s)
+
+#### Living (stima nominale `v_air_best`)
+| speed | v_air_best (m/s) |
+|------:|------------------:|
+| 0 | 0.05 |
+| 1 | 0.07 |
+| 2 | 0.09 |
+| 3 | 0.11 |
+| 4 | 0.13 |
+| 5 | 0.15 |
+
+#### Altre stanze (stima nominale `v_air_best`)
+| speed | v_air_best (m/s) |
+|------:|------------------:|
+| 0 | 0.05 |
+| 1 | 0.06 |
+| 2 | 0.07 |
+| 3 | 0.08 |
+| 4 | 0.09 |
+| 5 | 0.10 |
+
+#### Living (caso conservativo `v_air_hi`)
+| speed | v_air_hi (m/s) |
+|------:|----------------:|
+| 0 | 0.05 |
+| 1 | 0.092 |
+| 2 | 0.134 |
+| 3 | 0.176 |
+| 4 | 0.218 |
+| 5 | 0.260 |
+
+#### Altre stanze (caso conservativo `v_air_hi`)
+| speed | v_air_hi (m/s) |
+|------:|----------------:|
+| 0 | 0.05 |
+| 1 | 0.074 |
+| 2 | 0.098 |
+| 3 | 0.122 |
+| 4 | 0.146 |
+| 5 | 0.170 |
+
+> Nota: `v_air_lo` è fissato a 0.05 m/s e non dipende da speed (rappresenta il limite inferiore plausibile; se la VMC è ON, la realtà sarà ≥ questo valore, ma mantenerlo come bound rende il controllo robusto).
+
+---
+
+## Integrazione nel calcolo comfort (ISO 7730 – Category B)
+
+### Target comfort (Cat. B)
+La “comfort zone” è definita tramite il vincolo:
+- **PMV ∈ [-0.5, +0.5]**  (Categoria B)
+
+In pratica, anziché imporre un setpoint puntuale, si calcola una **banda ammissibile** per la temperatura operativa `T_op`:
+- `T_op_min` tale che `PMV(T_op_min, …) = -0.5`
+- `T_op_max` tale che `PMV(T_op_max, …) = +0.5`
+
+### Uso della banda di incertezza su v_air (robustezza >95%)
+Per garantire affidabilità senza misure:
+
+- **Inverno (heating)**: si usa il caso peggiore **`v_air_hi`**  
+  (aria più veloce → percezione più fredda → più difficile restare in comfort dal lato “freddo”)  
+  → si calcola `T_op_min` con `v_air = v_air_hi`
+
+- **Estate (cooling)**: si usa il caso peggiore **`v_air_lo`**  
+  (aria più ferma → percezione più calda → più difficile restare in comfort dal lato “caldo”)  
+  → si calcola `T_op_max` con `v_air = v_air_lo`
+
+In questo modo la comfort zone risultante è **conservativa** e rimane valida anche se `v_air_best` non coincide con il valore reale.
+
+### Schema operativo per il controllore
+Per ogni zona z:
+1. Misure: `T_air,z`, `RH_z`, stato VMC (speed, modalità)
+2. Calcoli:
+   - `v_air_best/z`, `v_air_hi/z` da tabelle
+   - `T_mrt,z` stimata (radiante)
+   - `T_op,z` (operative temperature)
+   - `PMV_z` e/o banda `T_op_min/max`
+3. Decisione comfort Cat. B:
+   - comfort se `T_op_min ≤ T_op,z ≤ T_op_max`
+4. Integrazione impiantistica:
+   - in raffrescamento, applicare sempre DewPoint Guard (vincolo hard):
+     `T_surface_est > DP_max_zone + margin`
+
+---
+
+## Valori raccomandati (default di progetto)
+- `v_air_lo = 0.05 m/s`
+- Living:
+  - `v_air_best_max = 0.15 m/s`, `v_air_hi_max = 0.26 m/s`
+- Altre stanze:
+  - `v_air_best_max = 0.10 m/s`, `v_air_hi_max = 0.17 m/s`
+- Strategia robusta Cat. B:
+  - inverno: usare `v_air_hi`
+  - estate: usare `v_air_lo`
+
+
 
 
 

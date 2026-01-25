@@ -340,7 +340,7 @@ class SeasonState:
                 f"Weather signals       :: t_low  = {self.weather.weather_day_signals.t_low} °C",
                 f"                      :: t_mean = {self.weather.weather_day_signals.t_mean} °C",
                 f"                      :: dew    = {self.weather.weather_day_signals.dew} °C",
-                f"                      :: wind   = {self.weather.weather_day_signals.wind} m/s",
+                f"                      :: wind   = {self.weather.weather_day_signals.wind} km/h",
                 f"                      :: cloud  = {((self.weather.weather_day_signals.cloud or 0) * 100):.1f} %",
                 f"                      :: t_smooth (engineered )   = {self.weather.weather_day_signals.t_smooth:.1f} °C",
                 f"                      :: dew_smooth (engineered ) = {self.weather.weather_day_signals.dew_smooth:.1f} °C",

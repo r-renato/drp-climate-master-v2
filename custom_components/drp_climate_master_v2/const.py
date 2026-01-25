@@ -78,6 +78,7 @@ OPT_UPDATE_INTERVAL_S: Final[int] = 90
 OPT_UPDATE_MIN_INTERVAL_S: Final[int] = 60
 
 ENTITIES_STATE: Final[str] = "entities_state"
+ENTITIES_OBSERVED_TS: Final[str] = "entities_observed_ts"
 SEASON_STATE: Final[str] = "season_state"
 
 # ======================================================

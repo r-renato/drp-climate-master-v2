@@ -30,33 +30,123 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import StrEnum
 from typing import Deque, Dict, List, Literal, Optional, Tuple
-
+import logging
 import math
 from collections import deque
 
 from homeassistant.core import State
 from homeassistant.util import dt as dt_util
 
+from .logger import log_debug, log_warning
+
 # -----------------------------
 # Types
 # -----------------------------
 
+_LOGGER = logging.getLogger(__name__)
+
 Number = float
 
-AggregationMethod = Literal["weighted_mean", "median", "trimmed_mean", "max", "min"]
-CrossOutlierMethod = Literal["none", "hampel", "zscore"]
-RateLimitMode = Literal["clip", "reject"]
-DerivedKind = Literal["aggregate", "compute"]
-ComputeFn = Literal[
-    "dew_point_c",
-    "heat_index_c",
-    "mrt_c",
-    "mrt_gated_c",
-    "t_op_c",
-    "condensation_margin_c",
-    "and01",
-]
+class AggregationMethod(StrEnum):
+    WEIGHTED_MEAN = "weighted_mean"
+    MEDIAN = "median"
+    TRIMMED_MEAN = "trimmed_mean"
+    MAX = "max"
+    MIN = "min"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        return [m.value for m in cls]
+
+    @classmethod
+    def from_value(cls, v: str | AggregationMethod) -> AggregationMethod:
+        if isinstance(v, cls):
+            return v
+        try:
+            return cls(v)
+        except ValueError as ex:
+            raise ValueError(f"Invalid {cls.__name__}: {v!r}. Allowed: {cls.values()}") from ex
+
+
+class CrossOutlierMethod(StrEnum):
+    NONE = "none"
+    HAMPEL = "hampel"
+    ZSCORE = "zscore"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        return [m.value for m in cls]
+
+    @classmethod
+    def from_value(cls, v: str | CrossOutlierMethod) -> CrossOutlierMethod:
+        if isinstance(v, cls):
+            return v
+        try:
+            return cls(v)
+        except ValueError as ex:
+            raise ValueError(f"Invalid {cls.__name__}: {v!r}. Allowed: {cls.values()}") from ex
+
+
+class RateLimitMode(StrEnum):
+    CLIP = "clip"
+    REJECT = "reject"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        return [m.value for m in cls]
+
+    @classmethod
+    def from_value(cls, v: str | RateLimitMode) -> RateLimitMode:
+        if isinstance(v, cls):
+            return v
+        try:
+            return cls(v)
+        except ValueError as ex:
+            raise ValueError(f"Invalid {cls.__name__}: {v!r}. Allowed: {cls.values()}") from ex
+
+
+class DerivedKind(StrEnum):
+    AGGREGATE = "aggregate"
+    COMPUTE = "compute"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        return [m.value for m in cls]
+
+    @classmethod
+    def from_value(cls, v: str | DerivedKind) -> DerivedKind:
+        if isinstance(v, cls):
+            return v
+        try:
+            return cls(v)
+        except ValueError as ex:
+            raise ValueError(f"Invalid {cls.__name__}: {v!r}. Allowed: {cls.values()}") from ex
+
+
+class ComputeFn(StrEnum):
+    DEW_POINT_C = "dew_point_c"
+    HEAT_INDEX_C = "heat_index_c"
+    MRT_C = "mrt_c"
+    MRT_GATED_C = "mrt_gated_c"
+    T_OP_C = "t_op_c"
+    CONDENSATION_MARGIN_C = "condensation_margin_c"
+    AND01 = "and01"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        return [m.value for m in cls]
+
+    @classmethod
+    def from_value(cls, v: str | ComputeFn) -> ComputeFn:
+        if isinstance(v, cls):
+            return v
+        try:
+            return cls(v)
+        except ValueError as ex:
+            raise ValueError(f"Invalid {cls.__name__}: {v!r}. Allowed: {cls.values()}") from ex
+
 
 # -----------------------------
 # Numerics
@@ -107,7 +197,7 @@ class FilterConfig:
 
     # Rate limiting: prevent spikes (bad packets, bogus reads). Units: value per minute.
     max_rate_per_min: Optional[float] = None
-    rate_limit_mode: RateLimitMode = "clip"  # clip keeps continuity; reject creates gaps
+    rate_limit_mode: RateLimitMode = RateLimitMode.CLIP  # clip keeps continuity; reject creates gaps
 
     # Smoothing
     ema_alpha: float = 0.25  # 0..1 (higher=less smoothing)
@@ -132,10 +222,10 @@ class GroupSpec:
     name: str
     sensors: Tuple[SensorSpec, ...]
 
-    method: AggregationMethod = "weighted_mean"
+    method: AggregationMethod = AggregationMethod.WEIGHTED_MEAN
 
     # Cross-sensor outlier handling at the current instant
-    cross_outlier_method: CrossOutlierMethod = "hampel"
+    cross_outlier_method: CrossOutlierMethod = CrossOutlierMethod.HAMPEL
     cross_outlier_k: float = 3.0
 
     # Trimmed mean (only used if method='trimmed_mean')
@@ -181,10 +271,10 @@ class DerivedSpec:
     name: str  # e.g., "global.indoor_temperature"
     inputs: Tuple[Tuple[str, float], ...]
 
-    kind: DerivedKind = "aggregate"
+    kind: DerivedKind = DerivedKind.AGGREGATE
     compute: Optional[ComputeFn] = None
 
-    method: AggregationMethod = "weighted_mean"
+    method: AggregationMethod = AggregationMethod.WEIGHTED_MEAN
     trimmed_fraction: float = 0.2
 
     min_sources: int = 1
@@ -348,28 +438,26 @@ def _ensure_utc(ts: datetime) -> datetime:
     # Normalizzo sempre a UTC
     return dt_util.as_utc(ts)
 
-def _source_ts(state_obj: State, now_utc: datetime) -> datetime:
+def _source_ts(state_obj: State, now_utc: datetime) -> tuple[datetime | None, datetime | None, datetime]:
     """Best-effort HA timestamp for diagnostics/hard guards.
 
     Prefer last_reported if present, else last_updated, else now.
     """
-    ts = (
-        getattr(state_obj, "last_reported", None)
-        or getattr(state_obj, "last_updated", None)
-        or now_utc
+    last_reported = getattr(state_obj, "last_reported", None)
+    last_updated = getattr(state_obj, "last_updated", None)
+
+    # ts = (
+    #     getattr(state_obj, "last_reported", None)
+    #     or getattr(state_obj, "last_updated", None)
+    #     or now_utc
+    # )
+    # return _ensure_utc(ts)
+
+    return (
+        _ensure_utc(last_reported) if last_reported else None,
+        _ensure_utc(last_updated) if last_updated else None,
+        now_utc
     )
-    return _ensure_utc(ts)
-
-# def _source_ts(state_obj: State, now: datetime) -> datetime:
-#     """Best-effort HA timestamp for diagnostics/hard guards.
-
-#     Prefer last_reported if present, else last_updated, else now.
-#     """
-#     return _ensure_tz(
-#         getattr(state_obj, "last_reported", None)
-#         or getattr(state_obj, "last_updated", None)
-#         or now
-#     )
 
 def _convert_unit_if_needed(value: float, unit: Optional[str]) -> float:
     """Convert supported units to canonical.
@@ -526,10 +614,12 @@ class SensorAggregator:
 
     def __init__(
         self,
-        entities_state_store: dict[str, State],
+        entities_state: dict[str, State],
+        entities_observed_ts: dict[str, datetime],
         mapping: MappingConfig,
     ):
-        self._entities_state_store = entities_state_store
+        self._entities_state = entities_state
+        self._entities_observed_ts = entities_observed_ts
         self._mapping = mapping
 
         # Flatten groups: zones
@@ -685,14 +775,16 @@ class SensorAggregator:
         f = spec.filters
 
         try:
-            state_obj = self._entities_state_store.get(spec.entity_id)
+            state_obj = self._entities_state.get(spec.entity_id)
             if state_obj is None:
                 rt.last_error = "entity_not_found"
+                log_warning(_LOGGER, f"Entity {spec.entity_id} not found.")
                 return
 
             raw_state = getattr(state_obj, "state", None)
             if raw_state in (None, "unknown", "unavailable", "none", "None", ""):
                 rt.last_error = "unavailable"
+                log_warning(_LOGGER, f"Entity {spec.entity_id} unavailable.")
                 return
 
             if isinstance(raw_state, str):
@@ -713,7 +805,21 @@ class SensorAggregator:
                 return
 
             # Diagnostic source timestamp (may not advance when value doesn't change)
-            ts_src = _source_ts(state_obj, now)
+            ts_src = now
+            ts_src_tp = _source_ts(state_obj, now)
+            ts_obs_raw = self._entities_observed_ts.get(spec.entity_id)
+            ts_obs = _ensure_utc(ts_obs_raw) if ts_obs_raw else None
+
+            # log_debug(
+            #     _LOGGER, 
+            #     f"datate time cmp {spec.entity_id} now={ts_src_tp[2]} last_report={ts_src_tp[0]} last_update={ts_src_tp[1]} observed={ts_obs}"
+            # )
+
+            if ts_obs and ts_src_tp[0]:
+                ts_src = max(ts_obs, ts_src_tp[0])
+            else:
+                ts_src = ts_src_tp[1] or ts_src_tp[2]
+
             rt.last_source_ts_seen = ts_src
 
             # OPTIONAL hard guard on HA timestamps (off by default)
@@ -1132,13 +1238,33 @@ class SensorAggregator:
         sources_used = len(inputs_vals)
         sources_rejected = sources_total - sources_used
 
-        is_insufficient = sources_used < max(2, dspec.min_sources)
+        # --- required inputs per compute (evita IndexError e compute parziali) ---
+        def _required_inputs_for_compute() -> int:
+            # 2-input computes (3rd param optional dove previsto)
+            if dspec.compute in ("dew_point_c", "heat_index_c", "t_op_c", "condensation_margin_c"):
+                return 2
+            if dspec.compute == "mrt_c":
+                return 2  # k_rad opzionale
+            if dspec.compute == "and01":
+                return 1
+            if dspec.compute == "mrt_gated_c":
+                # Supporta due convenzioni:
+                # - (t_air, t_rad_mean, active_01[, k_rad]) -> 3 richiesti (k_rad opzionale anche se configurato)
+                # - (t_air, t_rad_mean, valve_01, pump_01[, k_rad]) -> 4 richiesti (k_rad opzionale)
+                cfg_n = len(dspec.inputs)
+                return 3 if cfg_n in (3, 4) else 4
+            return 2
+
+        required_n_base = _required_inputs_for_compute()
+        required_n = max(required_n_base, int(dspec.min_sources or 1))
+
+        is_insufficient = sources_used < required_n
         if is_insufficient:
             reasons.append("insufficient_sources")
         if degraded:
             reasons.append("inputs_degraded")
 
-        if sources_used < 2:
+        if sources_used < required_n:
             fail = AggregatedValue(
                 name=dspec.name,
                 value=None,
@@ -1148,7 +1274,7 @@ class SensorAggregator:
                 sources_rejected=sources_rejected,
                 is_stale=True,
                 is_insufficient=True,
-                reasons=tuple(reasons + ["need_two_inputs"] + rejected),
+                reasons=tuple(reasons + [f"need_{required_n}_inputs"] + rejected),
             )
             held = self._maybe_hold_last_good_derived(
                 now=now,
@@ -1184,30 +1310,21 @@ class SensorAggregator:
                 t_air = inputs_vals[0][1]
                 t_rad_mean = inputs_vals[1][1]
 
-                # Supporta sia:
-                # - 3 input: (t_air, t_rad_mean, plant_active_01)
-                # - 4 input: (t_air, t_rad_mean, plant_active_01, k_rad)
-                # - 4/5 input legacy: (t_air, t_rad_mean, valve_01, pump_01, [k_rad])
-                if len(inputs_vals) == 3:
+                # Determina la convenzione dalla config (non dalla lunghezza residua degli input validi)
+                cfg_n = len(dspec.inputs)
+                if cfg_n in (3, 4):
+                    # (t_air, t_rad_mean, active_01[, k_rad])  -- k_rad opzionale
                     active_01 = inputs_vals[2][1]
+                    k_rad = inputs_vals[3][1] if len(inputs_vals) >= 4 else MRT_K_RAD_DEFAULT
                     val = mrt_gated_c(
                         t_air,
                         t_rad_mean,
                         valve_open_01=active_01,  # active = valve*pump già “composto”
                         pump_on_01=1.0,
-                        k_rad=MRT_K_RAD_DEFAULT,
-                    )
-                elif len(inputs_vals) == 4:
-                    active_01 = inputs_vals[2][1]
-                    k_rad = inputs_vals[3][1]
-                    val = mrt_gated_c(
-                        t_air,
-                        t_rad_mean,
-                        valve_open_01=active_01,
-                        pump_on_01=1.0,
                         k_rad=k_rad,
                     )
                 else:
+                    # (t_air, t_rad_mean, valve_01, pump_01[, k_rad]) -- k_rad opzionale
                     valve_01 = inputs_vals[2][1]
                     pump_01 = inputs_vals[3][1]
                     k_rad = inputs_vals[4][1] if len(inputs_vals) >= 5 else MRT_K_RAD_DEFAULT
@@ -1220,6 +1337,9 @@ class SensorAggregator:
                 mrt_val = inputs_vals[1][1]
                 val = t_op_c(t_air, mrt_val)
         except Exception as e:
+            _exc = type(e).__name__
+            _msg = str(e).strip()
+            _tag = f"{_exc}:{_msg}" if _msg else _exc
             fail = AggregatedValue(
                 name=dspec.name,
                 value=None,
@@ -1229,7 +1349,7 @@ class SensorAggregator:
                 sources_rejected=sources_rejected,
                 is_stale=True,
                 is_insufficient=True,
-                reasons=tuple(reasons + [f"compute_exception:{type(e).__name__}"] + rejected),
+                reasons=tuple(reasons + [f"compute_exception:{_tag}"] + rejected),
             )
             held = self._maybe_hold_last_good_derived(
                 now=now,
@@ -1280,7 +1400,7 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
         max_valid=35.0,
         time_hampel_k=4.0,
         max_rate_per_min=0.6,  # °C/min (tune carefully if you see clipping)
-        rate_limit_mode="clip",
+        rate_limit_mode=RateLimitMode.CLIP,
         ema_alpha=0.2,
         rolling_median_window=3,
     )
@@ -1293,7 +1413,7 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
         max_valid=100.0,
         time_hampel_k=4.0,
         max_rate_per_min=5.0,  # %RH/min
-        rate_limit_mode="clip",
+        rate_limit_mode=RateLimitMode.CLIP,
         ema_alpha=0.25,
         rolling_median_window=3,
     )
@@ -1304,7 +1424,7 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
         variables=(
             GroupSpec(
                 name="indoor_temperature",
-                method="weighted_mean",
+                method=AggregationMethod.WEIGHTED_MEAN,
                 sensors=(SensorSpec("sensor.livingroom_temperature", weight=1.0, filters=temp_filters),),
                 min_sources=1,
                 clamp_min=5.0,
@@ -1312,7 +1432,7 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
             ),
             GroupSpec(
                 name="indoor_humidity",
-                method="median",
+                method=AggregationMethod.MEDIAN,
                 sensors=(SensorSpec("sensor.livingroom_humidity", weight=1.0, filters=rh_filters),),
                 min_sources=1,
                 clamp_min=1.0,
@@ -1327,7 +1447,7 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
         variables=(
             GroupSpec(
                 name="indoor_temperature",
-                method="weighted_mean",
+                method=AggregationMethod.WEIGHTED_MEAN,
                 sensors=(SensorSpec("sensor.bedroom_temperature", weight=1.0, filters=temp_filters),),
                 min_sources=1,
                 clamp_min=5.0,
@@ -1335,7 +1455,7 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
             ),
             GroupSpec(
                 name="indoor_humidity",
-                method="median",
+                method=AggregationMethod.MEDIAN,
                 sensors=(SensorSpec("sensor.bedroom_humidity", weight=1.0, filters=rh_filters),),
                 min_sources=1,
                 clamp_min=1.0,
@@ -1347,9 +1467,9 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
     derived = (
         DerivedSpec(
             name="global.indoor_temperature",
-            kind="aggregate",
+            kind=DerivedKind.AGGREGATE,
             inputs=(("living.indoor_temperature", 1.0), ("bedroom.indoor_temperature", 0.7)),
-            method="weighted_mean",
+            method=AggregationMethod.WEIGHTED_MEAN,
             min_sources=1,
             clamp_min=5.0,
             clamp_max=35.0,
@@ -1357,9 +1477,9 @@ def example_mapping_with_dewpoint_and_heatindex() -> MappingConfig:
         ),
         DerivedSpec(
             name="global.indoor_humidity",
-            kind="aggregate",
+            kind=DerivedKind.AGGREGATE,
             inputs=(("living.indoor_humidity", 1.0), ("bedroom.indoor_humidity", 0.7)),
-            method="median",
+            method=AggregationMethod.MEDIAN,
             min_sources=1,
             clamp_min=1.0,
             clamp_max=100.0,

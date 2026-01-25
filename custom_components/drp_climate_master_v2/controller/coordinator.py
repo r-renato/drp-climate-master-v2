@@ -16,6 +16,7 @@ from homeassistant.const import CONF_NAME, EVENT_HOMEASSISTANT_STARTED, PERCENTA
 from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, State, callback
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from ..domain.models.plant import PlantSnapshot
 
@@ -35,7 +36,7 @@ from ..helpers.config_sensors import build_sensor_mapping
 
 from ..helpers.sensor_aggregator import SensorAggregator
 
-from ..const import CONF_INDOOR, CONF_RADIANT, DOMAIN, ENTITIES_STATE, NAME_AREA_HOME, SEASON_STATE
+from ..const import CONF_INDOOR, CONF_RADIANT, DOMAIN, ENTITIES_OBSERVED_TS, ENTITIES_STATE, NAME_AREA_HOME, SEASON_STATE
 from ..domain.models.runtime_schema import AreaConfig, RuntimeConfig, SensorPair, WeatherConfig
 from ..helpers.config_entries import (
     build_runtime_config,
@@ -88,7 +89,8 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._runtime: RuntimeConfig = build_runtime_config(entry)
 
         self._sensor_aggregator = SensorAggregator(
-            entities_state_store=self._entities_state, 
+            entities_state=self._entities_state, 
+            entities_observed_ts=self._entities_observed_ts,
             mapping=build_sensor_mapping(self._runtime.climate)
         )
 
@@ -158,6 +160,10 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @property
     def _entities_state(self) -> dict[str, State]:
         return self._entry_store.setdefault(ENTITIES_STATE, {})
+
+    @property
+    def _entities_observed_ts(self) -> dict[str, datetime]:
+        return self._entry_store.setdefault(ENTITIES_OBSERVED_TS, {})
 
     # @property
     # def _store_entities_state(self) -> dict[str, State]:
@@ -414,6 +420,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         try:
             self._entities_state[entity_id] = new_state
+            self._entities_observed_ts[entity_id] = event.time_fired or dt_util.utcnow()
         except Exception as ex:  # noqa: BLE001
             log_warning(_LOGGER, "Ignore state change for %s (%s)", entity_id, ex)
             return

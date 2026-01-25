@@ -139,8 +139,7 @@ class PDCSnapshot:
     sensor_t_water_in_pe: Optional[float] = None
     sensor_t_water_out_pe: Optional[float] = None
 
-    # boiler_supply_temp: Optional[float]
-    # boiler_return_temp: Optional[float]
+    sensor_compressor_state: Optional[bool] = None
 
     minutes_power_on: Optional[float] = None
     minutes_power_off: Optional[float] = None
@@ -461,11 +460,12 @@ class PlantSnapshot:
         if indoor:
             for key in sorted(indoor.keys()):
                 z = indoor[key]
+                cb = z.confort_band
 
                 sensors = (
                     f":: ["
                     f"T:{fav(z.temperature)} °C "
-                    f"HI:{fav(z.heat_index)} °C"
+                    f"HI:{fav(z.heat_index)} °C "
                     f"RH:{fav(z.humidity, 0)} % "
                     f"DP:{fav(z.dew_point)} °C "
                     f"]"
@@ -478,6 +478,37 @@ class PlantSnapshot:
                     f"Valve:{fav(z.radiant_valve, 0)} "
                     f"[t_op:{fav(z.t_op)} °C mrt:{fav(z.mrt)} °C cm:{fav(z.condensation_margin)} °C]"
                 ]
+
+                if cb:
+                    conf_band_air = (
+                        f":: Opr. season: {cb.season} "
+                        f"Air set: {fnum(cb.speed)} "
+                        f"Air best: {fnum(cb.v_air_best)} "
+                        f"Air low: {fnum(cb.v_air_lo)} "
+                        f"Air High: {fnum(cb.v_air_hi)} "
+                    )
+                    conf_band_pov = (
+                        f":: t_op: {cb.t_op} °C "
+                        f"t_op_min: {fnum(cb.t_op_min)} °C "
+                        f"t_op_max: {fnum(cb.t_op_max)} °C "
+                        f"pmv: {fnum(cb.pmv)} "
+                        f"ppd: {fnum(cb.ppd)} "
+                        f"is in band: {fbool(cb.ok)} "
+                    )
+                    conf_band_diagnostic = (
+                        f":: pmv_center: {cb.pmv_center} "
+                        f"pmv_band: {fnum(cb.pmv_band)} "
+                        f"met_used: {fnum(cb.met_used)} "
+                        f"clo_used: {fnum(cb.clo_used)} "
+                    )
+                    lines += [
+                        f"  {pad("", width=16)}   "
+                        f"{conf_band_air}",
+                        f"  {pad("", width=16)}   "
+                        f"{conf_band_pov}",
+                        f"  {pad("", width=16)}   "
+                        f"{conf_band_diagnostic}"
+                    ]
 
         # --- dettaglio zone outdoor (se utile) ---
         if outdoor:
@@ -509,20 +540,20 @@ class PlantSnapshot:
             lines += [
                 f"------------------------------------------------------------------",
                 f"Global aggregates",
-                f"  Indoor means       :: [T:{fav(self.global_indoor_temperature)}°C RH:{fav(self.global_indoor_humidity,0)}% "
-                f"DP:{fav(self.global_indoor_dew_point)}°C HI:{fav(self.global_indoor_heat_index)}°C]",
-                f"  Outdoor means      :: [T:{fav(self.global_outdoor_temperature)}°C RH:{fav(self.global_outdoor_humidity,0)}% "
+                f"  Indoor means       :: [T:{fav(self.global_indoor_temperature)} °C RH:{fav(self.global_indoor_humidity,0)} % "
+                f"DP:{fav(self.global_indoor_dew_point)} °C HI:{fav(self.global_indoor_heat_index)} °C]",
+                f"  Outdoor means      :: [T:{fav(self.global_outdoor_temperature)} °C RH:{fav(self.global_outdoor_humidity,0)} % "
                 f"DP:{fav(self.global_outdoor_dew_point)}°C]",
-                f"  CM min             :: {fav(self.global_condensation_margin_min)}°C",
-                f"  RMT                :: {fav(self.global_radiant_mean_temperature)}°C",
+                f"  CM min             :: {fav(self.global_condensation_margin_min)} °C (condensation margin)",
+                f"  RMT                :: {fav(self.global_radiant_mean_temperature)} °C (radiant mean temperature)",
             ]
 
         # --- presence / safety / faults ---
         lines += [
             f"------------------------------------------------------------------",
-            f"Home windows stat    :: {fbool(self.windows_close_state, 'All Closed', 'Some Open')}",
-            f"Vacation             :: {fbool(self.presence_vacation, 'Yes', 'No')}",
-            f"Nobody's in          :: {fbool(self.presence_nobodysin, 'True', 'False')}",
+            f"Home windows state   :: {fbool(self.windows_close_state, 'All Closed', 'Some Open')}",
+            f"Vacation state       :: {fbool(self.presence_vacation, 'True', 'False')}",
+            f"Nobody's in state    :: {fbool(self.presence_nobodysin, 'True', 'False')}",
             f"Dew guard active     :: {fbool(self.dew_guard_active, 'Yes', 'No')}",
             f"Free-cooling possible:: {fbool(self.free_cooling_possible, 'Yes', 'No')}",
             f"Faults               :: {ffaults(self.faults)}",
@@ -538,18 +569,19 @@ class PlantSnapshot:
                 else None
             )
             lines += [
-                f"  FM power           :: {fbool(self.pdc.fm_power_on, 'On', 'Off')}",
+                f"  Workload FM power  :: {fbool(self.pdc.fm_power_on, 'On', 'Off')}",
                 f"  Device Power       :: {fbool(self.pdc.power_on, 'On', 'Off')}",
-                f"  Mode               :: {self.pdc.device_mode if self.pdc.device_mode is not None else '-'}",
-                f"  WOT-Heat           :: {fnum(self.pdc.wot_heat)}°C",
-                f"  ΔT-Heat            :: {fnum(self.pdc.delta_t_heat)}°C",
-                f"  WOT-Cool           :: {fnum(self.pdc.wot_cool)}°C",
-                f"  ΔT-Cool            :: {fnum(self.pdc.delta_t_cool)}°C",
-                f"  In                 :: {fnum(self.pdc.sensor_t_water_in_pe)}°C",
-                f"  Out                :: {fnum(self.pdc.sensor_t_water_out_pe)}°C",
-                f"  ΔT(PE)             :: {fnum(dt_pe)}°C",
-                f"  MinOn              :: {fnum(self.pdc.minutes_power_on,0)}min",
-                f"  MinOff             :: {fnum(self.pdc.minutes_power_off,0)}min",
+                f"  Mode               :: {('heating' if self.pdc.device_mode == 1 else 'cooling') if self.pdc.device_mode is not None else '-'}",
+                f"  Heat-WOT           :: {fnum(self.pdc.wot_heat)} °C",
+                f"  Heat-ΔT            :: {fnum(self.pdc.delta_t_heat)} °C",
+                f"  Cool-WOT           :: {fnum(self.pdc.wot_cool)} °C",
+                f"  Cool-ΔT            :: {fnum(self.pdc.delta_t_cool)} °C",
+                f"  Water-PE-In        :: {fnum(self.pdc.sensor_t_water_in_pe)} °C",
+                f"  Water-PE-Out       :: {fnum(self.pdc.sensor_t_water_out_pe)} °C",
+                f"  Water-PE-ΔT        :: {fnum(dt_pe)} °C",
+                f"  Compressor         :: {fbool(self.pdc.sensor_compressor_state, 'On', 'Off')}",
+                f"  Uptime             :: {fnum(self.pdc.minutes_power_on,0)} min",
+                f"  Downtime           :: {fnum(self.pdc.minutes_power_off,0)} min",
             ]
         else:
             lines += [f"  -"]
@@ -558,16 +590,34 @@ class PlantSnapshot:
         # --- Supply Unit ---
         lines += [f"Supply Unit"]
         if self.supply_unit:
+            dt_direct = (
+                (self.supply_unit.sensor_direct_temp_system_supply - self.supply_unit.sensor_direct_temp_system_return)
+                if (self.supply_unit.sensor_direct_temp_system_return is not None and self.supply_unit.sensor_direct_temp_system_supply is not None)
+                else None
+            )
+            dt_adj = (
+                (self.supply_unit.sensor_adjustable_temp_system_supply - self.supply_unit.sensor_adjustable_temp_system_return)
+                if (self.supply_unit.sensor_adjustable_temp_system_return is not None and self.supply_unit.sensor_adjustable_temp_system_supply is not None)
+                else None
+            )
+            dt_boiler = (
+                (self.supply_unit.sensor_boiler_temp_system_supply - self.supply_unit.sensor_boiler_temp_system_return)
+                if (self.supply_unit.sensor_boiler_temp_system_return is not None and self.supply_unit.sensor_boiler_temp_system_supply is not None)
+                else None
+            )
             lines += [
                 f"  Direct Device Power:: {fbool(self.supply_unit.direct_su_power_on, 'On', 'Off')}",
-                f"  Direct Supply Flow :: {fnum(self.supply_unit.sensor_direct_temp_system_supply)}°C",
-                f"  Direct Return Flow :: {fnum(self.supply_unit.sensor_direct_temp_system_return)}°C",
-                f"  Adjust Device Power:: {fbool(self.supply_unit.adjustable_su_power_on, 'On', 'Off')}",
-                f"  3-pt Valve         :: {self.supply_unit.three_point_mixing_valve if self.supply_unit.three_point_mixing_valve is not None else '-'}",
-                f"  Adj Supply         :: {fnum(self.supply_unit.sensor_adjustable_temp_system_supply)}°C",
-                f"  Adj Return         :: {fnum(self.supply_unit.sensor_adjustable_temp_system_return)}°C",
-                f"  Boiler Supply      :: {fnum(self.supply_unit.sensor_boiler_temp_system_supply)}°C",
-                f"  Boiler Return      :: {fnum(self.supply_unit.sensor_boiler_temp_system_return)}°C",
+                f"  Direct Supply Flow :: {fnum(self.supply_unit.sensor_direct_temp_system_supply)} °C",
+                f"  Direct Return Flow :: {fnum(self.supply_unit.sensor_direct_temp_system_return)} °C",
+                f"  Direct-Water-ΔT    :: {fnum(dt_direct)} °C",
+                f"  Adj Device Power   :: {fbool(self.supply_unit.adjustable_su_power_on, 'On', 'Off')}",
+                f"  Adj Supply Flow    :: {fnum(self.supply_unit.sensor_adjustable_temp_system_supply)} °C",
+                f"  Adj Return Flow    :: {fnum(self.supply_unit.sensor_adjustable_temp_system_return)} °C",
+                f"  Adj-Water-ΔT       :: {fnum(dt_adj)} °C",
+                f"  3-Way Valve        :: {self.supply_unit.three_point_mixing_valve if self.supply_unit.three_point_mixing_valve is not None else '-'} %",
+                f"  Boiler Supply Flow :: {fnum(self.supply_unit.sensor_boiler_temp_system_supply)} °C",
+                f"  Boiler Return Flow :: {fnum(self.supply_unit.sensor_boiler_temp_system_return)} °C",
+                f"  Boiler-Water-ΔT    :: {fnum(dt_boiler)} °C",
             ]
         else:
             lines += [f"  -"]
@@ -578,26 +628,26 @@ class PlantSnapshot:
         if self.vmc:
             lines += [
                 f"  Device Power       :: {fbool(self.vmc.power_on, 'On', 'Off')}",
-                f"  T-Setpoint         :: {fnum(self.vmc.t_setpoint)}°C",
-                f"  RH-Setpoint        :: {fnum(self.vmc.rh_setpoint,0)}%",
-                f"  DP-Setpoint        :: {fnum(self.vmc.t_dew_point_setpoint)}°C",
-                f"  ΔDP-Setpoint       :: {fnum(self.vmc.delta_t_dew_point_setpoint)}°C",
+                f"  Setpoint T         :: {fnum(self.vmc.t_setpoint)} °C",
+                f"  Setpoint RH        :: {fnum(self.vmc.rh_setpoint,0)} %",
+                f"  Setpoint DP        :: {fnum(self.vmc.t_dew_point_setpoint)} °C",
+                f"  Setpoint ΔDP       :: {fnum(self.vmc.delta_t_dew_point_setpoint)} °C",
                 f"  Mode               :: {self.vmc.processing_mode if self.vmc.processing_mode is not None else '-'}",
                 f"  Req Water          :: {fbool(self.vmc.request_water)}",
                 f"  Req Dehumidif      :: {fbool(self.vmc.request_dehumidification)}",
                 f"  Req Heating        :: {fbool(self.vmc.request_heating)}",
                 f"  Req Cooling        :: {fbool(self.vmc.request_cooling)}",
-                f"  Sensor Ambient T   :: {fnum(self.vmc.sensor_t_ambient)}°C",
-                f"  Sensor Ambient RH  :: {fnum(self.vmc.sensor_h_ambient,0)}%",
-                f"  Sensor Water T     :: {fnum(self.vmc.sensor_t_water)}°C",
-                f"  Sensor Outdoor T   :: {fnum(self.vmc.sensor_t_outdoor)}°C",
-                f"  Power Today        :: {fnum(self.vmc.sensor_power_on_today,0)}min",
-                f"  Power Night        :: {fnum(self.vmc.sensor_power_on_night,0)}min",
+                f"  Sensor Ambient T   :: {fnum(self.vmc.sensor_t_ambient)} °C",
+                f"  Sensor Ambient RH  :: {fnum(self.vmc.sensor_h_ambient,0)} %",
+                f"  Sensor Water T     :: {fnum(self.vmc.sensor_t_water)} °C",
+                f"  Sensor Outdoor T   :: {fnum(self.vmc.sensor_t_outdoor)} °C",
                 f"  Alarm High Press   :: {fbool(self.vmc.alarm_high_pressure)}",
                 f"  Alarm Dew Point    :: {fbool(self.vmc.alarm_dew_point)}",
                 f"  Alarm Low Water T  :: {fbool(self.vmc.alarm_low_water_temp)}",
                 f"  Alarm High Water T :: {fbool(self.vmc.alarm_high_water_temp)}",
                 f"  Alarm General      :: {fbool(self.vmc.alarm_alarm)}",
+                f"  Uptime             :: {fnum(self.vmc.sensor_power_on_today,0)} min",
+                f"  Downtime           :: {fnum(self.vmc.sensor_power_on_night,0)} min",
             ]
         else:
             lines += [f"  -"]

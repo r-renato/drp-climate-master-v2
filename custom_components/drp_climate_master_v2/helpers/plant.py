@@ -116,8 +116,8 @@ def take_plant_snapshot(
                 if area.indoor:
                     continue
 
-                indoor_humidity: AggregatedValue = sensor_aggr.get(name=f"{name}.indoor_humidity")
-                indoor_temperature: AggregatedValue = sensor_aggr.get(name=f"{name}.indoor_temperature")
+                indoor_temperature: AggregatedValue = sensor_aggr.get(name=f"{name}.outdoor_temperature")
+                indoor_humidity: AggregatedValue = sensor_aggr.get(name=f"{name}.outdoor_humidity")
 
                 zone_snapshot: ZoneSnapshot = make_class(
                                     ZoneSnapshot,
@@ -174,13 +174,17 @@ def take_plant_snapshot(
                 timestamp=ts,
                 fm_power_on=as_bool(get_entity_value(entities_state, radiant.fm_power)) or False,
                 power_on=power_on,
+
                 device_mode=as_int(get_entity_value(entities_state, radiant.mode.actuator)),
                 wot_heat=as_float(get_entity_value(entities_state, radiant.heating_t_setpoint.actuator)),
                 delta_t_heat=as_float(get_entity_value(entities_state, radiant.heating_dt_setpoint.actuator)),
                 wot_cool=as_float(get_entity_value(entities_state, radiant.cooling_t_setpoint.actuator)),
                 delta_t_cool=as_float(get_entity_value(entities_state, radiant.cooling_dt_setpoint.actuator)),
+                
                 sensor_t_water_in_pe=as_float(get_entity_value(entities_state, radiant.sensors.pdc_temp_water_in)),
                 sensor_t_water_out_pe=as_float(get_entity_value(entities_state, radiant.sensors.pdc_temp_water_out)),
+
+                sensor_compressor_state=as_bool(get_entity_value(entities_state, radiant.sensors.pdc_compressor_state)) or False,
                 minutes_power_on=minutes_power_on,
                 minutes_power_off=minutes_power_off,
             )
