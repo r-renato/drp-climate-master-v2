@@ -505,6 +505,11 @@ def condensation_margin_c(
     """
     # If upstream guarantees floats, this is enough; keep defensive anyway.
     if radiant_mean_temp_c is None or dew_point_c is None:
+        log_warning(
+            _LOGGER, 
+            "condensation_margin_c missing inputs [radiant_mean_temp_c=%s, dew_point_c=%s, surface_offset_c=%s]",
+            radiant_mean_temp_c, dew_point_c, surface_offset_c
+        )
         raise ValueError("condensation_margin_c requires two valid numeric inputs")
 
     return (float(radiant_mean_temp_c) + float(surface_offset_c)) - float(dew_point_c)
@@ -588,6 +593,7 @@ def and01(*xs: float, threshold: float = 0.5) -> float:
     Returns 1.0 if all inputs are >= threshold, else 0.0.
     """
     if not xs:
+        log_warning(_LOGGER, "and01 requires at least one input [xs=%s, threshold=%s]", xs, threshold)
         raise ValueError("and01 requires at least one input")
     return 1.0 if all(float(x) >= threshold for x in xs) else 0.0
 
@@ -628,6 +634,7 @@ class SensorAggregator:
             for g in z.variables:
                 key = f"{z.zone}.{g.name}" if "." not in g.name else g.name
                 if key in self._groups:
+                    log_warning(_LOGGER, "Duplicate group name: %s", key)
                     raise ValueError(f"Duplicate group name: {key}")
                 self._groups[key] = GroupSpec(
                     name=key,
@@ -798,10 +805,12 @@ class SensorAggregator:
                 raw_val = float(raw_state)
             except (TypeError, ValueError):
                 rt.last_error = "non_numeric"
+                log_warning(_LOGGER, f"Entity {spec.entity_id} non-numeric state: {raw_state!r}.")
                 return
 
             if not _is_finite(raw_val):
                 rt.last_error = "non_finite"
+                log_warning(_LOGGER, f"Entity {spec.entity_id} non-finite state: {raw_state!r}.")
                 return
 
             # Diagnostic source timestamp (may not advance when value doesn't change)
@@ -825,6 +834,10 @@ class SensorAggregator:
             # OPTIONAL hard guard on HA timestamps (off by default)
             if f.max_source_age is not None and (now - ts_src) > f.max_source_age:
                 rt.last_error = "stale_source"
+                log_warning(
+                    _LOGGER,
+                    f"Entity {spec.entity_id} stale source timestamp: last_source_ts={ts_src}, now={now}, max_source_age={f.max_source_age}.",
+                )
                 return
 
             # Unit conversion (optional)
@@ -839,9 +852,17 @@ class SensorAggregator:
             # Range checks
             if f.min_valid is not None and candidate < f.min_valid:
                 rt.last_error = "below_min_valid"
+                log_warning(
+                    _LOGGER,
+                    f"Entity {spec.entity_id} value below min_valid: {candidate} < {f.min_valid}.",
+                )
                 return
             if f.max_valid is not None and candidate > f.max_valid:
                 rt.last_error = "above_max_valid"
+                log_warning(
+                    _LOGGER,
+                    f"Entity {spec.entity_id} value above max_valid: {candidate} > {f.max_valid}.",
+                )
                 return
 
             # If value did not change AND HA timestamps did not change, treat as a "heartbeat":
@@ -868,6 +889,9 @@ class SensorAggregator:
                 # refresh timestamps to keep group freshness
                 rt.last_raw = Sample(value=prev_ref, ts=now)
                 rt.last_filtered = Sample(value=rt.last_filtered.value, ts=now)
+                # Heartbeat è atteso (specie su switch): non è un WARNING.
+                log_debug(_LOGGER, "Entity %s heartbeat (no change): value=%s, ts_src=%s",
+                          spec.entity_id, candidate, ts_src)
                 return
 
             # Time-series outlier (Hampel on raw history)
@@ -878,9 +902,34 @@ class SensorAggregator:
                 if mad != 0:
                     sigma = 1.4826 * mad
                     if abs(candidate - med) > f.time_hampel_k * sigma:
-                        rt.last_error = "time_outlier"
-                        rt.rejected_count += 1
-                        return
+                        # Se siamo in CLIP e abbiamo rate-limit, preferiamo clippare e NON bucare la pipeline.
+                        # Questo evita cascata di hold_last_good/insufficient sui derived.
+                        if (
+                            f.max_rate_per_min is not None
+                            and rt.last_raw is not None
+                            and f.rate_limit_mode == RateLimitMode.CLIP
+                        ):
+                            dt_s = max(1.0, (now - rt.last_raw.ts).total_seconds())
+                            dt_min = dt_s / 60.0
+                            max_delta = float(f.max_rate_per_min) * dt_min
+                            delta = candidate - rt.last_raw.value
+                            if abs(delta) > max_delta:
+                                candidate = rt.last_raw.value + math.copysign(max_delta, delta)
+                                rt.clipped_count += 1
+                            # Log a DEBUG: è un "soft outlier" gestito.
+                            log_debug(_LOGGER,
+                                      "Entity %s time-series outlier -> clipped/accepted: cand=%s med=%s mad=%s",
+                                      spec.entity_id, candidate, med, mad)
+                        else:
+                            # Modalità REJECT (o senza rate-limit): mantieni comportamento attuale.
+                            rt.last_error = "time_outlier"
+                            rt.rejected_count += 1
+                            log_warning(
+                                _LOGGER,
+                                "Entity %s time-series outlier (rejected): candidate=%s, med=%s, mad=%s",
+                                spec.entity_id, candidate, med, mad
+                            )
+                            return
 
             # Rate limiting against last accepted raw (use observed dt; conservative)
             if f.max_rate_per_min is not None and rt.last_raw is not None:
@@ -892,6 +941,9 @@ class SensorAggregator:
                     if f.rate_limit_mode == "reject":
                         rt.last_error = "rate_reject"
                         rt.rejected_count += 1
+                        log_warning(
+                            _LOGGER,
+                            f"Entity {spec.entity_id} rate limit reject: candidate={candidate}, last={rt.last_raw.value}, delta={delta}, max_delta={max_delta}.",)
                         return
                     # clip
                     candidate = rt.last_raw.value + math.copysign(max_delta, delta)
@@ -927,6 +979,10 @@ class SensorAggregator:
 
         except Exception as e:
             rt.last_error = f"exception:{type(e).__name__}"
+            log_warning(
+                _LOGGER,
+                f"Exception updating entity {spec.entity_id}: {e}",
+            )
 
     # -------------------------
     # Group computations
@@ -941,6 +997,7 @@ class SensorAggregator:
             rt = self._sensor_rt.get(ss.entity_id)
             if rt is None:
                 rejected.append(f"{ss.entity_id}:not_registered")
+                log_warning(_LOGGER, f"Sensor {ss.entity_id} not registered in runtime.")
                 continue
 
             # If error: try hold-last-good
@@ -1132,8 +1189,10 @@ class SensorAggregator:
 
         is_insufficient = sources_used < max(1, dspec.min_sources)
         if is_insufficient:
+            log_warning(_LOGGER, f"Derived {dspec.name} insufficient sources: {sources_used} < {dspec.min_sources}")
             reasons.append("insufficient_sources")
         if degraded:
+            log_warning(_LOGGER, f"Derived {dspec.name} inputs degraded (hold_last_good used)")
             reasons.append("inputs_degraded")
 
         values = [v for _n, v, _w, _t in used_vals]
@@ -1167,6 +1226,7 @@ class SensorAggregator:
         max_age = dspec.max_age if dspec.max_age is not None else timedelta(minutes=15)
         is_stale = (now - ts) > max_age
         if is_stale:
+            log_warning(_LOGGER, f"Derived {dspec.name} is stale: now={now}, ts={ts}, max_age={max_age}")
             reasons.append("derived_stale")
 
         return AggregatedValue(
@@ -1260,8 +1320,10 @@ class SensorAggregator:
 
         is_insufficient = sources_used < required_n
         if is_insufficient:
+            log_warning(_LOGGER, f"Derived {dspec.name} insufficient sources: {sources_used} < {required_n}")   
             reasons.append("insufficient_sources")
         if degraded:
+            log_warning(_LOGGER, f"Derived {dspec.name} inputs degraded (hold_last_good used)")
             reasons.append("inputs_degraded")
 
         if sources_used < required_n:

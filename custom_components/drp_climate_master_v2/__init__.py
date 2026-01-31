@@ -216,7 +216,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_store[WEATHER_COORDINATOR] = weather_coordinator
 
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-        await supervisor.async_start()
+        # await supervisor.async_start()
 
         entry.async_on_unload(entry.add_update_listener(_options_updated))
 
@@ -243,6 +243,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
         except Exception:  # noqa: BLE001
             _LOGGER.exception("%s: failed unloading platforms after setup failure", DOMAIN)
+
+        if weather_coordinator is not None and hasattr(weather_coordinator, "async_stop"):
+            try:
+                await weather_coordinator.async_stop()
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("%s: failed stopping weather_coordinator after setup failure", DOMAIN)
 
         if supervisor is not None and hasattr(supervisor, "async_stop"):
             try:

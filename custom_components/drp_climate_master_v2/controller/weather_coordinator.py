@@ -1,18 +1,18 @@
+# custom_components/drp_climate_master_v2/controller/weather_coordinator.py
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import logging
-from typing import Any, Callable, Literal, Mapping, Optional, TypedDict, cast
+from typing import Any, Callable, Literal, Mapping, Optional, cast
 
-from homeassistant.core import HomeAssistant, CALLBACK_TYPE, Event, callback
-from homeassistant.helpers.event import async_track_point_in_time
-from homeassistant.helpers.storage import Store
+from homeassistant.core import HomeAssistant, Event, callback
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.util import dt as dt_util
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
+from .coordinator import ClimateCoordinator
 from ..domain.models.season import SeasonState
 from ..domain.models.weather import Forecast, Historical
 
@@ -26,8 +26,8 @@ from ..helpers.weather.pirateweather_client import (
     PirateWeatherTimeMachineClient,
     ProviderOptions,
 )
+from ..helpers.scheduler import IntervalGatedSchedulerBase, ThrottledAsyncJob
 
-from .coordinator import ClimateCoordinator
 from ..const import DOMAIN, SEASON_STATE
 
 ForecastType = Literal["daily", "hourly", "twice_daily"]
@@ -42,7 +42,7 @@ class WeatherCoordinatorConfig:
     days_back: int = 730
 
     # How often to *check* if a daily update is due.
-    # (Remote fetch is gated to once every 24h via meta store.)
+    # NOTE: no longer used (tick is point-in-time). Keep only if you later add a periodic safety check.
     update_interval: timedelta = timedelta(hours=6)
 
     # Extra trigger path (climate updates) is gated by age.
@@ -61,26 +61,19 @@ class WeatherCoordinatorConfig:
 
     # --- FIXES: throttle heavy season detection + debounce HVAC decider ---
 
-    # Min interval between expensive season detection runs (cache dump + get_forecasts + model.fit).
-    # With ClimateCoordinator updates every 5 minutes, 30 minutes is a safe default.
+    # Min interval between expensive season detection runs.
     season_detect_min_interval: timedelta = timedelta(minutes=30)
 
     # Debounce for HVAC decider (prevents feedback loops / repeated work).
     decider_debounce_cooldown_s: float = 20.0
 
 
-class WeatherCoordinatorMetaConfig(TypedDict, total=False):
-    last_run_utc: str
+class WeatherCoordinator(IntervalGatedSchedulerBase):
+    """Weather orchestrator: daily-gated refresh + cache + attach to ClimateCoordinator.
 
-
-class WeatherCoordinator:
-    """Weather orchestrator: periodic refresh + cache + attach to ClimateCoordinator.
-
-    Fixes included:
-    - Dedup + throttle for expensive season detection.
-    - Proper UTC handling for last daily run.
-    - Debounced HVAC decider to avoid feedback loops.
-    - Daily tick rescheduling bug fix.
+    Refactor (scheduling extraction)
+    - Daily gating + tick scheduling moved to DailyGatedSchedulerBase.
+    - Season detect uses ThrottledAsyncJob.
     """
 
     def __init__(
@@ -116,6 +109,15 @@ class WeatherCoordinator:
             f"{self._runtime_weather_config.historical_data.longitude:.4f}"
         )
 
+        # Init base scheduler (daily gating + point-in-time tick)
+        super().__init__(
+            hass,
+            store_key=store_cache_key,
+            gate_interval=self._wc_cfg.daily_interval,
+            tick_interval=self._wc_cfg.update_interval,
+            logger=_LOGGER,
+        )
+
         historical_codec: Codec[Historical] = Codec(
             encode=lambda f: cast(JsonObject, dict(f)),
             decode=lambda raw: cast(Historical, dict(raw)),
@@ -132,28 +134,24 @@ class WeatherCoordinator:
             persist=self._wc_cfg.cache_persist,
         )
 
-        self._meta_data_store: Store = Store(hass, version=1, key=f"{store_cache_key}.meta")
-
-        self._unsub_coordinator: CALLBACK_TYPE | None = None
-        self._unsub_interval: CALLBACK_TYPE | None = None
-        self._unsub_daily: CALLBACK_TYPE | None = None
+        self._unsub_coordinator: Callable[[], None] | None = None
 
         # Refresh dedup
         self._refresh_lock = asyncio.Lock()
         self._refresh_task: asyncio.Task[dict[date, Historical]] | None = None
 
-        # Daily gating lock
-        self._daily_lock = asyncio.Lock()
-
-        # NOTE: always stored as UTC
-        self._last_daily_run_utc: datetime | None = None
-
-        # Season detect dedup + throttle
-        self._season_lock = asyncio.Lock()
-        self._season_task: asyncio.Task[None] | None = None
-        self._last_season_detect_utc: datetime | None = None
+        # Season detect (dedup + throttle)
+        self._season_job = ThrottledAsyncJob(
+            hass,
+            min_interval=self._wc_cfg.season_detect_min_interval,
+            name_prefix="drp_season_detect",
+            logger=_LOGGER,
+        )
 
         self.data: dict[date, Historical] = {}
+
+        # In-memory last success (optional; useful for cheap age checks without reading meta)
+        self._last_success_utc: datetime | None = None
 
         # Debounced decider (prevents loops and reduces CPU)
         self._decider_debouncer = Debouncer(
@@ -170,11 +168,11 @@ class WeatherCoordinator:
 
         log_info(
             _LOGGER,
-            "Initialized (id=%s) entry=%s unit=%s update_interval=%s",
+            "Initialized (id=%s) entry=%s unit=%s daily_interval=%s",
             hex(id(self)),
             self._entry_id,
             self._unit_system,
-            self._wc_cfg.update_interval,
+            self._wc_cfg.daily_interval,
         )
 
     def _set_season_state(self, season_state: SeasonState) -> None:
@@ -192,39 +190,33 @@ class WeatherCoordinator:
 
     async def _async_weather_first_refresh(self, event: Event) -> None:
         await self._async_start()
+
+        # Attempt a refresh if due; otherwise keep cached.
+        await self.async_refresh_weather_daily(reason="startup")
+
         # Do NOT run heavy season detect repeatedly during startup storms; schedule once.
         self._schedule_season_detect("startup")
         log_info(_LOGGER, "Done.")
 
     async def _async_start(self) -> None:
         await self._cache.async_load()
-        await self._meta_load()
+        await self._load_data_from_cache_if_empty()
+
+        # Start base scheduler (loads meta + schedules next tick)
+        await super().async_start()
 
         if self._unsub_coordinator is None:
             self._unsub_coordinator = self._coordinator.async_add_listener(self._on_coordinator_update)
 
-        # Schedule the first daily tick
-        self._schedule_next_daily_tick()
-
     async def async_stop(self) -> None:
-        if self._unsub_interval is not None:
-            self._unsub_interval = None
-
-        if self._unsub_daily is not None:
-            self._unsub_daily()
-            self._unsub_daily = None
+        # Stop base scheduler (tick + daily run task)
+        await super().async_stop()
 
         if self._unsub_coordinator is not None:
             self._unsub_coordinator()
             self._unsub_coordinator = None
 
-        if self._season_task and not self._season_task.done():
-            self._season_task.cancel()
-            try:
-                await self._season_task
-            except asyncio.CancelledError:
-                pass
-            self._season_task = None
+        await self._season_job.async_cancel()
 
         if self._refresh_task and not self._refresh_task.done():
             self._refresh_task.cancel()
@@ -237,123 +229,72 @@ class WeatherCoordinator:
         await self._cache.async_shutdown(flush=True)
 
     # -----------------------------
-    # Meta store (daily gating)
+    # Daily gating (wrapper around base)
     # -----------------------------
 
-    async def _meta_load(self) -> None:
-        meta = await self._meta_data_store.async_load() or {}
-        iso = meta.get("last_run_utc")
-        if not isinstance(iso, str):
-            self._last_daily_run_utc = None
-            return
-        dt = dt_util.parse_datetime(iso)
-        self._last_daily_run_utc = dt_util.as_utc(dt) if dt else None
+    async def async_refresh_weather_daily(self, *, reason: str) -> dict[date, Historical]:
+        """Attempt refresh only if due (persisted gating). Always returns current self.data."""
+        ran = await super().async_run_if_due(reason=reason)
 
-    async def _meta_save_last_run(self, when_utc: datetime) -> None:
-        when_utc = dt_util.as_utc(when_utc)
-        await self._meta_data_store.async_save({"last_run_utc": when_utc.isoformat()})
+        # If not due and we still have no data (startup edge), attach cached.
+        if not ran:
+            await self._load_data_from_cache_if_empty()
 
-    def _next_due_utc(self) -> datetime:
-        now = dt_util.utcnow()
-        if self._last_daily_run_utc is None:
-            return now
-        due = self._last_daily_run_utc + self._wc_cfg.daily_interval
-        return now if due <= now else due
+        return self.data
 
-    def _schedule_next_daily_tick(self) -> None:
-        if self._unsub_daily is not None:
-            return
-        when = self._next_due_utc()
-        log_debug(_LOGGER, "Scheduling next daily weather tick at %s (UTC)", when.isoformat())
-        self._unsub_daily = async_track_point_in_time(self._hass, self._handle_daily_tick, when)
-
-    async def _handle_daily_tick(self, _now) -> None:
-        # FIX: unsubscribe first, so reschedule works correctly.
-        if self._unsub_daily is not None:
-            self._unsub_daily()
-            self._unsub_daily = None
-
-        await self.async_refresh_weather_daily(reason="daily_tick")
-        self._schedule_season_detect("daily_tick")
-
-        # always reschedule
-        self._schedule_next_daily_tick()
+    async def _async_on_due(self, reason: str) -> None:
+        """Base scheduler hook: do the real daily work."""
+        await self.async_refresh_historical_weather(reason=reason)
+        self._schedule_season_detect(reason)
 
     # -----------------------------
     # Triggers
     # -----------------------------
 
-    def _should_refresh_on_climate_update(self) -> bool:
-        if self._last_daily_run_utc is None:
-            log_info(_LOGGER, "No previous weather update, refreshing on climate update.")
-            return True
-        age = dt_util.utcnow() - self._last_daily_run_utc
-        log_debug(_LOGGER, "Last weather update age: %s / %s", age, self._wc_cfg.refresh_on_climate_update_if_older_than)
-        return age >= self._wc_cfg.refresh_on_climate_update_if_older_than
-
     def _on_coordinator_update(self) -> None:
         """Called when ClimateCoordinator publishes an update (every ~5 minutes)."""
 
-        # async def _async_handle() -> None:
-        #     await self.async_refresh_weather_daily(reason="climate_update")
-        #     # IMPORTANT: season detection is expensive; throttle+dedup.
-        #     self._schedule_season_detect("climate_update")
-
+        # OPTIONAL (currently disabled): gate-check daily refresh occasionally on coordinator ticks
+        #
         # if self._should_refresh_on_climate_update():
-        #     log_debug(_LOGGER, "Climate coordinator update triggered weather daily gate check.")
-        #     self._hass.async_create_task(_async_handle())
+        #     self._hass.async_create_task(self.async_refresh_weather_daily(reason="climate_update"))
+        #     self._schedule_season_detect("climate_update")
         # else:
-        #     # Even if no refresh is due, we may still want occasional season updates,
-        #     # but never on every 5-min tick.
         #     self._schedule_season_detect("climate_update_no_refresh")
 
         # Debounced HVAC decider (prevents feedback loop storms)
         self._schedule_decider()
 
-    # -----------------------------
-    # Season detection (dedup + throttle)
-    # -----------------------------
+    def _should_refresh_on_climate_update(self) -> bool:
+        """Cheap age gate for triggering the *check* on coordinator updates.
 
-    def _should_run_season_detect(self) -> bool:
-        now = dt_util.utcnow()
-        
-        if self._last_season_detect_utc is None:
+        NOTE: The actual remote refresh is still enforced by the 24h persisted gate.
+        """
+        last = self.last_attempt_utc
+        if last is None:
+            log_info(_LOGGER, "No previous weather attempt, allowed to check on climate update.")
             return True
-        
-        return (now - self._last_season_detect_utc) >= self._wc_cfg.season_detect_min_interval
+        age = dt_util.utcnow() - last
+        log_debug(_LOGGER, "Last weather attempt age: %s / %s", age, self._wc_cfg.refresh_on_climate_update_if_older_than)
+        return age >= self._wc_cfg.refresh_on_climate_update_if_older_than
+
+    # -----------------------------
+    # Season detection (throttle + dedup)
+    # -----------------------------
 
     def _schedule_season_detect(self, reason: str) -> None:
-        # Dedup: if already running, do nothing.
-        if self._season_task and not self._season_task.done():
-            log_warning(_LOGGER, "Dedup: if already running, do nothing.")
-            return
-        
-        # Throttle: run at most once per configured interval.
-        if not self._should_run_season_detect():
-            return
-        
-        self._season_task = self._hass.async_create_task(
-            target=self._async_season_detect_guarded(reason),
-            name=f"drp_season_detect:{reason}",
-        )
+        self._season_job.schedule(lambda: self._async_season_detect_guarded(reason), reason=reason)
 
     async def _async_season_detect_guarded(self, reason: str) -> None:
-        async with self._season_lock:
-            # Double-check after acquiring lock
-            if not self._should_run_season_detect():
-                return
-            
-            self._last_season_detect_utc = dt_util.utcnow()
-            
-            try:
-                await self._async_season_detect()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:  # noqa: BLE001
-                log_exception(_LOGGER, "Season detect (%s) failed : %r", reason, e)
+        try:
+            await self._async_season_detect()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log_exception(_LOGGER, "Season detect (%s) failed : %r", reason, e)
 
     # -----------------------------
-    # Forecast + daily refresh
+    # Forecast
     # -----------------------------
 
     async def _async_get_forecast(self, entity_id: str, ftype: ForecastType = "daily") -> dict[str, Forecast]:
@@ -394,59 +335,38 @@ class WeatherCoordinator:
 
         return out
 
-    async def async_refresh_weather_daily(self, *, reason: str) -> dict[date, Historical]:
-        """Attempt a remote refresh only if >=24h since last attempt (persisted via meta store)."""
-        async with self._daily_lock:
-            await self._meta_load()
-            now_utc = dt_util.utcnow()
-
-            due = self._last_daily_run_utc is None or (now_utc - self._last_daily_run_utc) >= self._wc_cfg.daily_interval
-
-            if not due:
-                # Ensure we at least attach cached data on startup if we have none.
-                if reason == "startup" and not self.data:
-                    days = self._target_days()
-                    cached = await self._cache.async_get_many(days)
-                    self.data = {d: cached[d] for d in days if d in cached}
-                # Keep next tick scheduled
-                self._schedule_next_daily_tick()
-                return self.data
-
-            # Mark attempt immediately (one attempt/24h even if it fails)
-            self._last_daily_run_utc = now_utc
-            await self._meta_save_last_run(now_utc)
-
-        try:
-            data = await self.async_refresh_historical_weather(reason=reason)
-        finally:
-            self._schedule_next_daily_tick()
-
-        return data
-
     # -----------------------------
     # Date helpers
     # -----------------------------
 
     def _target_days(self) -> list[date]:
+        """Days to keep in cache / refresh.
+
+        IMPORTANT: includes *today* so `always_refresh_today` can take effect.
+        """
         today_local = dt_util.now().date()
         days_back = max(1, int(self._wc_cfg.days_back))
-        start = today_local - timedelta(days=1)  # yesterday
+        start = today_local  # include today
         return [start - timedelta(days=i) for i in range(days_back)]
 
+    async def _load_data_from_cache_if_empty(self) -> None:
+        if self.data:
+            return
+        days = self._target_days()
+        cached = await self._cache.async_get_many(days)
+        self.data = {d: cached[d] for d in days if d in cached}
+
     # -----------------------------
-    # Season detect core (unchanged logic; now guarded by throttle+dedup)
+    # Season detect core
     # -----------------------------
 
     async def _async_season_detect(self) -> None:
         today = date.today()
 
         season_calendar = CalendarSeason()
-        current_season = (season_calendar.windows())[CalendarSeason().season_for(today)]
+        current_season = (season_calendar.windows())[season_calendar.season_for(today)]
 
         historical = await self._cache.async_dump()
-
-        forecast_raw: dict[str, Forecast] = {}
-        forecast_norm: dict[str, Forecast] = {}
 
         forecast_raw = await self._async_get_forecast(entity_id=self._weather_forecast_provider, ftype="daily")
         forecast_norm = {k: forecast_legacy_to_native(v, drop_legacy=False) for k, v in forecast_raw.items()}
@@ -478,7 +398,6 @@ class WeatherCoordinator:
             window=current_season,
             weather=info.replace_windows(model.windows()),
             detect_model=source,
-            
         )
         self._set_season_state(season_state)
         self._coordinator.set_season_state(season_state)
@@ -487,7 +406,7 @@ class WeatherCoordinator:
         log_debug(_LOGGER, "Season state=%s", season_state)
 
     # -----------------------------
-    # Historical refresh (your existing dedup logic, with UTC bookkeeping fixed)
+    # Historical refresh (dedup)
     # -----------------------------
 
     async def async_refresh_historical_weather(self, *, reason: str) -> dict[date, Historical]:
@@ -547,9 +466,9 @@ class WeatherCoordinator:
                     raise
                 except Exception as e:  # noqa: BLE001
                     log_debug(_LOGGER, "Cache put_many failed (%s), fallback: %r", reason, e)
-                    for d, fc in fetched.items():
+                    for d, fc2 in fetched.items():
                         try:
-                            await self._cache.async_put(d, fc)
+                            await self._cache.async_put(d, fc2)
                         except asyncio.CancelledError:
                             raise
                         except Exception as e2:  # noqa: BLE001
@@ -577,8 +496,7 @@ class WeatherCoordinator:
             return self.data
 
         self.data = data
-        # IMPORTANT: keep UTC
-        self._last_daily_run_utc = dt_util.utcnow()
+        self._last_success_utc = dt_util.utcnow()
         self._schedule_decider()
         return self.data
 

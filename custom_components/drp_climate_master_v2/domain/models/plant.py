@@ -356,17 +356,19 @@ class PlantSnapshot:
     presence_vacation: Optional[bool] = None
     presence_nobodysin: Optional[bool] = None
 
-    global_indoor_dew_point: Optional[AggregatedValue] = None
-    global_indoor_heat_index: Optional[AggregatedValue] = None
-    global_indoor_humidity: Optional[AggregatedValue] = None
-    global_indoor_temperature: Optional[AggregatedValue] = None
+    global_indoor_zone: Optional[ZoneSnapshot] = None
+
+    # global_indoor_dew_point: Optional[AggregatedValue] = None
+    # global_indoor_heat_index: Optional[AggregatedValue] = None
+    # global_indoor_humidity: Optional[AggregatedValue] = None
+    # global_indoor_temperature: Optional[AggregatedValue] = None
 
     global_outdoor_dew_point: Optional[AggregatedValue] = None
     global_outdoor_humidity: Optional[AggregatedValue] = None
     global_outdoor_temperature: Optional[AggregatedValue] = None
 
-    global_condensation_margin_min: Optional[AggregatedValue] = None
-    global_radiant_mean_temperature: Optional[AggregatedValue] = None
+    # global_condensation_margin_min: Optional[AggregatedValue] = None
+    # global_radiant_mean_temperature: Optional[AggregatedValue] = None
 
 
     dew_guard_active: Optional[bool] = None
@@ -530,22 +532,67 @@ class PlantSnapshot:
                 ]
 
         # --- global aggregates (se presenti) ---
-        if any([
-            self.global_indoor_temperature, self.global_indoor_humidity,
-            self.global_indoor_dew_point, self.global_indoor_heat_index,
+        if self.global_indoor_zone and any([
             self.global_outdoor_temperature, self.global_outdoor_humidity,
             self.global_outdoor_dew_point,
-            self.global_condensation_margin_min, self.global_radiant_mean_temperature
         ]):
+            z = self.global_indoor_zone
+            cb = z.confort_band
             lines += [
                 f"------------------------------------------------------------------",
                 f"Global aggregates",
-                f"  Indoor means       :: [T:{fav(self.global_indoor_temperature)} °C RH:{fav(self.global_indoor_humidity,0)} % "
-                f"DP:{fav(self.global_indoor_dew_point)} °C HI:{fav(self.global_indoor_heat_index)} °C]",
+            ]
+            sensors = (
+                f":: ["
+                f"T:{fav(z.temperature)} °C "
+                f"HI:{fav(z.heat_index)} °C "
+                f"RH:{fav(z.humidity, 0)} % "
+                f"DP:{fav(z.dew_point)} °C "
+                f"]"
+            )
+
+            lines += [
+                f"  {pad("Indoor means", width=16)}   "
+                f"{pad(sensors, width=44)}   -   "
+                f"[Flow:{fnum(z.flow_t)} °C Ret:{fnum(z.return_t)} °C] "
+                f"Valve:{fav(z.radiant_valve, 0)} "
+                f"[t_op:{fav(z.t_op)} °C mrt:{fav(z.mrt)} °C cm:{fav(z.condensation_margin)} °C]"
+            ]
+
+            if cb:
+                conf_band_air = (
+                    f":: Opr. season: {cb.season} "
+                    f"Air set: {fnum(cb.speed)} "
+                    f"Air best: {fnum(cb.v_air_best)} "
+                    f"Air low: {fnum(cb.v_air_lo)} "
+                    f"Air High: {fnum(cb.v_air_hi)} "
+                )
+                conf_band_pov = (
+                    f":: t_op: {cb.t_op} °C "
+                    f"t_op_min: {fnum(cb.t_op_min)} °C "
+                    f"t_op_max: {fnum(cb.t_op_max)} °C "
+                    f"pmv: {fnum(cb.pmv)} "
+                    f"ppd: {fnum(cb.ppd)} "
+                    f"is in band: {fbool(cb.ok)} "
+                )
+                conf_band_diagnostic = (
+                    f":: pmv_center: {cb.pmv_center} "
+                    f"pmv_band: {fnum(cb.pmv_band)} "
+                    f"met_used: {fnum(cb.met_used)} "
+                    f"clo_used: {fnum(cb.clo_used)} "
+                )
+                lines += [
+                    f"  {pad("", width=16)}   "
+                    f"{conf_band_air}",
+                    f"  {pad("", width=16)}   "
+                    f"{conf_band_pov}",
+                    f"  {pad("", width=16)}   "
+                    f"{conf_band_diagnostic}"
+                ]
+
+            lines += [
                 f"  Outdoor means      :: [T:{fav(self.global_outdoor_temperature)} °C RH:{fav(self.global_outdoor_humidity,0)} % "
-                f"DP:{fav(self.global_outdoor_dew_point)}°C]",
-                f"  CM min             :: {fav(self.global_condensation_margin_min)} °C (condensation margin)",
-                f"  RMT                :: {fav(self.global_radiant_mean_temperature)} °C (radiant mean temperature)",
+                f"DP:{fav(self.global_outdoor_dew_point)}°C]"
             ]
 
         # --- presence / safety / faults ---

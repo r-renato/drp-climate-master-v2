@@ -116,15 +116,17 @@ def take_plant_snapshot(
                 if area.indoor:
                     continue
 
-                indoor_temperature: AggregatedValue = sensor_aggr.get(name=f"{name}.outdoor_temperature")
-                indoor_humidity: AggregatedValue = sensor_aggr.get(name=f"{name}.outdoor_humidity")
+                outdoor_temperature: AggregatedValue = sensor_aggr.get(name=f"{name}.outdoor_temperature")
+                outdoor_humidity: AggregatedValue = sensor_aggr.get(name=f"{name}.outdoor_humidity")
+                outdoor_dew_point: AggregatedValue = sensor_aggr.get(name=f"{name}.outdoor_dew_point")
 
                 zone_snapshot: ZoneSnapshot = make_class(
                                     ZoneSnapshot,
                                     timestamp=timestamp,
                                     name=name,
-                                    temperature=indoor_temperature,
-                                    humidity=indoor_humidity,
+                                    temperature=outdoor_temperature,
+                                    humidity=outdoor_humidity,
+                                    dew_point=outdoor_dew_point,
                 )
 
                 zone_snapshots[name] = zone_snapshot
@@ -295,7 +297,7 @@ def take_plant_snapshot(
 
         pdc = _build_pdc_snapshot(runtime_config, timestamp)
         vmc = _build_vmc_snapshot(runtime_config, timestamp)
-        supply_unit = _build_supply_unit_snapshot(runtime_config, timestamp)
+        supply_unit: SupplyUnitSnapshot | None = _build_supply_unit_snapshot(runtime_config, timestamp)
 
         runtime_windows=runtime_config.climate.windows
         if runtime_windows:
@@ -305,6 +307,25 @@ def take_plant_snapshot(
         presence_vacation=as_bool(get_entity_value(entities_state, runtime_config.climate.scenarios.vacation)) or False
         presence_nobodysin=as_bool(get_entity_value(entities_state, runtime_config.climate.scenarios.nobodysin)) or False
         
+        global_indoor_zone_snapshot = make_class(
+            ZoneSnapshot,
+            timestamp=timestamp,
+            name="global_indoor",
+            temperature=sensor_aggr.get("global.indoor_temperature"),
+            humidity=sensor_aggr.get("global.indoor_humidity"),
+            heat_index=sensor_aggr.get("global.indoor_heat_index"),
+            dew_point=sensor_aggr.get("global.indoor_dew_point"),
+
+            t_op=sensor_aggr.get("global.t_op"),
+            mrt=sensor_aggr.get("global.mrt"),
+            condensation_margin=sensor_aggr.get("global.condensation_margin_min"),
+
+            confort_band=confort_bands.get("global_indoor"),
+            
+            flow_t=supply_unit.sensor_adjustable_temp_system_supply if supply_unit else None,
+            return_t=supply_unit.sensor_adjustable_temp_system_return if supply_unit else None
+        )
+
         return make_class(
             PlantSnapshot,
             timestamp=timestamp,
@@ -321,17 +342,19 @@ def take_plant_snapshot(
             presence_vacation=presence_vacation,
             presence_nobodysin=presence_nobodysin,
 
-            global_indoor_dew_point=sensor_aggr.get("global.indoor_dew_point"),
-            global_indoor_heat_index=sensor_aggr.get("global.indoor_heat_index"),
-            global_indoor_humidity=sensor_aggr.get("global.indoor_humidity"),
-            global_indoor_temperature=sensor_aggr.get("global.indoor_temperature"),
+            global_indoor_zone=global_indoor_zone_snapshot,
+
+            # global_indoor_dew_point=sensor_aggr.get("global.indoor_dew_point"),
+            # global_indoor_heat_index=sensor_aggr.get("global.indoor_heat_index"),
+            # global_indoor_humidity=sensor_aggr.get("global.indoor_humidity"),
+            # global_indoor_temperature=sensor_aggr.get("global.indoor_temperature"),
 
             global_outdoor_dew_point=sensor_aggr.get("global.outdoor_dew_point"),
             global_outdoor_humidity=sensor_aggr.get("global.outdoor_humidity"),
             global_outdoor_temperature=sensor_aggr.get("global.outdoor_temperature"),
 
-            global_condensation_margin_min=sensor_aggr.get("global.condensation_margin_min"),
-            global_radiant_mean_temperature=sensor_aggr.get("global.radiant_mean_temperature"),
+            # global_condensation_margin_min=sensor_aggr.get("global.condensation_margin_min"),
+            # global_radiant_mean_temperature=sensor_aggr.get("global.radiant_mean_temperature"),
         )
     except TypeError as ex:
         # Parametri mancanti/extra o mismatch firma costruttore

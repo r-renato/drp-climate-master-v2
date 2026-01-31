@@ -5,10 +5,24 @@ from typing import List
 
 from .utils import slugify
 
-from ..domain.models.runtime_schema import AreaConfig, ClimateConfig, SupplyUnitsConfig
-
-from .sensor_aggregator import DerivedSpec, FilterConfig, GroupSpec, MappingConfig, SensorSpec, ZoneConfig
-
+from ..domain.models.runtime_schema import (
+    AreaConfig, 
+    ClimateConfig, 
+    SupplyUnitsConfig
+)
+from .sensor_aggregator import (
+    AggregationMethod,
+    ComputeFn,
+    CrossOutlierMethod,
+    DerivedKind,
+    DerivedSpec, 
+    FilterConfig, 
+    GroupSpec, 
+    MappingConfig, 
+    RateLimitMode, 
+    SensorSpec, 
+    ZoneConfig
+)
 
 def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
     zones: List[ZoneConfig] = []
@@ -18,11 +32,15 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
         hold_last_good=timedelta(minutes=5),
         min_valid=5.0,
         max_valid=35.0,
-        time_hampel_k=4.0,
+        # Indoor: Hampel un filo meno aggressivo (evita falsi outlier quando MAD è molto piccolo)
+        time_hampel_k=5.0,
+        time_hampel_min_samples=12,
         max_rate_per_min=0.6,  # °C/min
-        rate_limit_mode="clip",
+        rate_limit_mode=RateLimitMode.CLIP,
         ema_alpha=0.2,
         rolling_median_window=3,
+        raw_history_size=60,
+        filtered_history_size=60,
     )
 
     indoor_rh_filters = FilterConfig(
@@ -30,9 +48,9 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
         hold_last_good=timedelta(minutes=5),
         min_valid=1.0,
         max_valid=100.0,
-        time_hampel_k=4.0,
+        time_hampel_k=None, #4.0,
         max_rate_per_min=8.0,  # %RH/min
-        rate_limit_mode="clip",
+        rate_limit_mode=RateLimitMode.CLIP,
         ema_alpha=0.25,
         rolling_median_window=3,
     )
@@ -40,7 +58,8 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
     switch_filters = FilterConfig(
         auto_unit_convert=False,
         max_age=timedelta(minutes=5),
-        hold_last_good=timedelta(minutes=2),
+        # Switch: può restare invariato giorni; vogliamo solo resilienza a glitch brevi
+        hold_last_good=timedelta(minutes=10),
         min_valid=0.0,
         max_valid=1.0,
         time_hampel_k=None,          # evita Hampel su switch
@@ -57,8 +76,8 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                         GroupSpec(
                             name="indoor_temperature",
                             sensors=(SensorSpec(area.sensors.temperature, weight=1.0, filters=indoor_temp_filters),),
-                            method="weighted_mean",
-                            cross_outlier_method="none",
+                            method=AggregationMethod.WEIGHTED_MEAN,
+                            cross_outlier_method=CrossOutlierMethod.NONE,
                             min_sources=1,
                             clamp_min=5.0,
                             clamp_max=35.0 if area.radiant else 60.0,
@@ -66,8 +85,8 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                         GroupSpec(
                             name="indoor_humidity",
                             sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=indoor_rh_filters),),
-                            method="weighted_mean",
-                            cross_outlier_method="none",
+                            method=AggregationMethod.WEIGHTED_MEAN,
+                            cross_outlier_method=CrossOutlierMethod.NONE,
                             min_sources=1,
                             clamp_min=1.0,
                             clamp_max=100.0,
@@ -82,8 +101,8 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                                     filters=switch_filters,
                                 ),
                             ),
-                            method="weighted_mean",
-                            cross_outlier_method="none",
+                            method=AggregationMethod.WEIGHTED_MEAN,
+                            cross_outlier_method=CrossOutlierMethod.NONE,
                             min_sources=1,
                             clamp_min=0.0,
                             clamp_max=1.0,
@@ -94,8 +113,8 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                         GroupSpec(
                             name="indoor_temperature",
                             sensors=(SensorSpec(area.sensors.temperature, weight=1.0, filters=indoor_temp_filters),),
-                            method="weighted_mean",
-                            cross_outlier_method="none",
+                            method=AggregationMethod.WEIGHTED_MEAN,
+                            cross_outlier_method=CrossOutlierMethod.NONE,
                             min_sources=1,
                             clamp_min=5.0,
                             clamp_max=35.0 if area.radiant else 60.0,
@@ -103,8 +122,8 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                         GroupSpec(
                             name="indoor_humidity",
                             sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=indoor_rh_filters),),
-                            method="weighted_mean",
-                            cross_outlier_method="none",
+                            method=AggregationMethod.WEIGHTED_MEAN,
+                            cross_outlier_method=CrossOutlierMethod.NONE,
                             min_sources=1,
                             clamp_min=1.0,
                             clamp_max=100.0,
@@ -129,9 +148,11 @@ def _build_outdoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
         hold_last_good=timedelta(minutes=10),
         min_valid=-30.0,
         max_valid=55.0,
-        time_hampel_k=6.0,
+        # Outdoor: Hampel time-series tende a fare falsi positivi (MAD piccolo) -> disabilitato.
+        # Affidati a range + rate-limit + smoothing.
+        time_hampel_k=None,
         max_rate_per_min=3.0,  # °C/min
-        rate_limit_mode="clip",
+        rate_limit_mode=RateLimitMode.CLIP,
         ema_alpha=0.15,
         rolling_median_window=1,
     )
@@ -141,9 +162,10 @@ def _build_outdoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
         hold_last_good=timedelta(minutes=10),
         min_valid=1.0,
         max_valid=100.0,
-        time_hampel_k=6.0,
+        # Outdoor RH: stessa motivazione dell'outdoor temp (MAD piccolo -> falsi outlier)
+        time_hampel_k=None,
         max_rate_per_min=20.0,  # %RH/min
-        rate_limit_mode="clip",
+        rate_limit_mode=RateLimitMode.CLIP,
         ema_alpha=0.15,
         rolling_median_window=1,
     )
@@ -162,8 +184,8 @@ def _build_outdoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                                 SensorSpec(area.sensors.temperature, weight=1.0, filters=outdoor_temp_filters),
                                 SensorSpec("sensor.hmi080_outdoor_temperature", weight=1.0, filters=outdoor_temp_filters),
                             ),
-                            method="weighted_mean",
-                            cross_outlier_method="none",
+                            method=AggregationMethod.WEIGHTED_MEAN,
+                            cross_outlier_method=CrossOutlierMethod.NONE,
                             min_sources=1,
                             clamp_min=-30.0,
                             clamp_max=55.0,
@@ -171,8 +193,8 @@ def _build_outdoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                         GroupSpec(
                             name="outdoor_humidity",
                             sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=outdoor_rh_filters),),
-                            method="weighted_mean",
-                            cross_outlier_method="none",
+                            method=AggregationMethod.WEIGHTED_MEAN,
+                            cross_outlier_method=CrossOutlierMethod.NONE,
                             min_sources=1,
                             clamp_min=1.0,
                             clamp_max=100.0,
@@ -192,8 +214,21 @@ def _build_plant_radiant(supply_units: SupplyUnitsConfig) -> tuple[ZoneConfig, .
         max_valid=60.0,
         time_hampel_k=6.0,
         max_rate_per_min=5.0,  # °C/min
-        rate_limit_mode="clip",
+        rate_limit_mode=RateLimitMode.CLIP,
         ema_alpha=0.2,
+        rolling_median_window=1,
+    )
+
+    switch_filters = FilterConfig(
+        auto_unit_convert=False,
+        max_age=timedelta(minutes=5),
+        # Pump/supply enable: resilienza a glitch; non “scade” se resta invariato
+        hold_last_good=timedelta(minutes=10),
+        min_valid=0.0,
+        max_valid=1.0,
+        time_hampel_k=None,          # evita Hampel su switch
+        max_rate_per_min=None,       # niente rate limit su switch
+        ema_alpha=1.0,               # niente EMA su switch
         rolling_median_window=1,
     )
 
@@ -210,8 +245,8 @@ def _build_plant_radiant(supply_units: SupplyUnitsConfig) -> tuple[ZoneConfig, .
                                 filters=radiant_water_filters,
                             ),
                         ),
-                        method="weighted_mean",
-                        cross_outlier_method="none",
+                        method=AggregationMethod.WEIGHTED_MEAN,
+                        cross_outlier_method=CrossOutlierMethod.NONE,
                         min_sources=1,
                         clamp_min=5.0,
                         clamp_max=60.0,
@@ -225,30 +260,45 @@ def _build_plant_radiant(supply_units: SupplyUnitsConfig) -> tuple[ZoneConfig, .
                                 filters=radiant_water_filters,
                             ),
                         ),
-                        method="weighted_mean",
-                        cross_outlier_method="none",
+                        method=AggregationMethod.WEIGHTED_MEAN,
+                        cross_outlier_method=CrossOutlierMethod.NONE,
                         min_sources=1,
                         clamp_min=5.0,
                         clamp_max=60.0,
                     ),
                     GroupSpec(
                         name="adj_supply_on",
-                        sensors=(SensorSpec(supply_units.adjustable_supply_unit, weight=1.0, filters=FilterConfig(
-                            max_age=timedelta(minutes=5),
-                            hold_last_good=timedelta(minutes=2),
-                            min_valid=0.0,
-                            max_valid=1.0,
-                            ema_alpha=1.0,  # per switch: niente smoothing
-                            rolling_median_window=1,
-                        )),),
-                        method="weighted_mean",
-                        cross_outlier_method="none",
+                        sensors=(SensorSpec(supply_units.adjustable_supply_unit, weight=1.0, filters=switch_filters),),
+                        method=AggregationMethod.WEIGHTED_MEAN,
+                        cross_outlier_method=CrossOutlierMethod.NONE,
                         min_sources=1,
                         clamp_min=0.0,
                         clamp_max=1.0,
                     ),
                 ),
             ),
+    )
+
+def _build_plant_water_derived() -> tuple[DerivedSpec, ...]:
+    """
+    Plant water proxy (NOT MRT):
+    - water_mean_temperature is an hydraulic mean (supply/return) and must NOT be used as MRT directly.
+    """
+    return (
+        DerivedSpec(
+            name="plant_radiant.water_mean_temperature",
+            kind=DerivedKind.AGGREGATE,
+            inputs=(
+                ("plant_radiant.adj_supply_temperature", 1.0),
+                ("plant_radiant.adj_return_temperature", 1.0),
+            ),
+            method=AggregationMethod.WEIGHTED_MEAN,
+            min_sources=1,
+            clamp_min=5.0,
+            clamp_max=60.0,
+            max_age=timedelta(minutes=10),
+            hold_last_good=timedelta(minutes=5),
+        ),
     )
 
 def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
@@ -260,8 +310,8 @@ def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             psychro_derived.append(
                 DerivedSpec(
                     name=f"{name}.indoor_dew_point",
-                    kind="compute",
-                    compute="dew_point_c",
+                    kind=DerivedKind.COMPUTE,
+                    compute=ComputeFn.DEW_POINT_C,
                     inputs=(
                         (f"{name}.indoor_temperature", 1.0),
                         (f"{name}.indoor_humidity", 1.0),
@@ -276,8 +326,8 @@ def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             psychro_derived.append(
                 DerivedSpec(
                     name=f"{name}.indoor_heat_index",
-                    kind="compute",
-                    compute="heat_index_c",
+                    kind=DerivedKind.COMPUTE,
+                    compute=ComputeFn.HEAT_INDEX_C,
                     inputs=(
                         (f"{name}.indoor_temperature", 1.0),
                         (f"{name}.indoor_humidity", 1.0),
@@ -292,10 +342,12 @@ def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             psychro_derived.append(
                 DerivedSpec(
                     name=f"{name}.condensation_margin",
-                    kind="compute",
-                    compute="condensation_margin_c",
+                    kind=DerivedKind.COMPUTE,
+                    compute=ComputeFn.CONDENSATION_MARGIN_C,
                     inputs=(
-                        ("global.radiant_mean_temperature", 1.0),
+                        # (C) Conservative proxy: use the coldest relevant hydraulic point (supply)
+                        # rather than a mean water temperature or a misnamed "radiant mean".
+                        ("plant_radiant.adj_supply_temperature", 1.0),
                         (f"{name}.indoor_dew_point", 1.0),
                     ),
                     min_sources=2,
@@ -304,6 +356,23 @@ def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
                     max_age=timedelta(minutes=10),
                     hold_last_good=timedelta(minutes=5),
                 ),
+            )
+        elif not area.indoor and not area.radiant:
+            psychro_derived.append(
+                DerivedSpec(
+                    name=f"{name}.outdoor_dew_point",
+                    kind=DerivedKind.COMPUTE,
+                    compute=ComputeFn.DEW_POINT_C,
+                    inputs=(
+                        (f"{name}.outdoor_temperature", 1.0),
+                        (f"{name}.outdoor_humidity", 1.0),
+                    ),
+                    min_sources=2,
+                    clamp_min=-30.0,
+                    clamp_max=30.0,
+                    max_age=timedelta(minutes=20),
+                    hold_last_good=timedelta(minutes=10),
+                )
             )
 
     return tuple(psychro_derived)
@@ -318,8 +387,8 @@ def _build_actuation_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]
             out.append(
                 DerivedSpec(
                     name=f"{name}.plant_active",
-                    kind="compute",
-                    compute="and01",
+                    kind=DerivedKind.COMPUTE,
+                    compute=ComputeFn.AND01,
                     inputs=(
                         ("plant_radiant.adj_supply_on", 1.0),     # pump
                         (f"{name}.radiant_valve_open", 1.0),      # valve zona
@@ -328,7 +397,8 @@ def _build_actuation_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]
                     clamp_min=0.0,
                     clamp_max=1.0,
                     max_age=timedelta(minutes=5),
-                    hold_last_good=timedelta(minutes=2),
+                    # Evita degradi gratuiti del gating MRT per micro-buchi su switch/valvole
+                    hold_last_good=timedelta(minutes=10),
                 )
             )
 
@@ -344,11 +414,11 @@ def _build_mrt_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             mrt_derived.append(
                 DerivedSpec(
                     name=f"{name}.mrt",
-                    kind="compute",
-                    compute="mrt_gated_c",
+                    kind=DerivedKind.COMPUTE,
+                    compute=ComputeFn.MRT_GATED_C,
                     inputs=(
                         (f"{name}.indoor_temperature", 1.0),
-                        ("global.radiant_mean_temperature", 1.0),
+                        ("plant_radiant.water_mean_temperature", 1.0),
                         (f"{name}.plant_active", 1.0),  # <-- nuovo input
                     ),
                     min_sources=3,
@@ -362,8 +432,8 @@ def _build_mrt_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             mrt_derived.append(
                 DerivedSpec(
                     name=f"{name}.t_op",
-                    kind="compute",
-                    compute="t_op_c",
+                    kind=DerivedKind.COMPUTE,
+                    compute=ComputeFn.T_OP_C,
                     inputs=(
                         (f"{name}.indoor_temperature", 1.0),
                         (f"{name}.mrt", 1.0),
@@ -384,6 +454,7 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
     indoor_dp_inputs = []
     indoor_hi_inputs = []
     indoor_cm_inputs = []
+    indoor_mrt_inputs = []
 
     for area in areas:
         name = slugify(area.name)
@@ -393,13 +464,14 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             indoor_dp_inputs.append((f"{name}.indoor_dew_point", 1.0))
             indoor_hi_inputs.append((f"{name}.indoor_heat_index", 1.0))
             indoor_cm_inputs.append((f"{name}.condensation_margin", 1.0))
+            indoor_mrt_inputs.append((f"{name}.mrt", area.ceiling))
 
     return (
         DerivedSpec(
             name="global.indoor_temperature",
-            kind="aggregate",
+            kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_temp_inputs),
-            method="weighted_mean",
+            method=AggregationMethod.WEIGHTED_MEAN,
             min_sources=2,
             clamp_min=5.0,
             clamp_max=35.0,
@@ -408,9 +480,9 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         ),
         DerivedSpec(
             name="global.indoor_humidity",
-            kind="aggregate",
+            kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_rh_inputs),
-            method="median",
+            method=AggregationMethod.MEDIAN,
             min_sources=2,
             clamp_min=1.0,
             clamp_max=100.0,
@@ -420,9 +492,9 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         # Conservative: max dew point among representative zones (exclude foyer duplication)
         DerivedSpec(
             name="global.indoor_dew_point",
-            kind="aggregate",
+            kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_dp_inputs),
-            method="max",
+            method=AggregationMethod.MAX,
             min_sources=2,
             clamp_min=-20.0,
             clamp_max=30.0,
@@ -432,9 +504,9 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         # Keep prior behavior: max heat index among zones (mostly meaningful in summer)
         DerivedSpec(
             name="global.indoor_heat_index",
-            kind="aggregate",
+            kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_hi_inputs),
-            method="max",
+            method=AggregationMethod.MAX,
             min_sources=2,
             clamp_min=-20.0,
             clamp_max=60.0,
@@ -443,9 +515,9 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         ),
         DerivedSpec(
             name="global.outdoor_temperature",
-            kind="aggregate",
+            kind=DerivedKind.AGGREGATE,
             inputs=(("terrace.outdoor_temperature", 1.0),),
-            method="weighted_mean",
+            method=AggregationMethod.WEIGHTED_MEAN,
             min_sources=1,
             clamp_min=-30.0,
             clamp_max=55.0,
@@ -454,9 +526,9 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         ),
         DerivedSpec(
             name="global.outdoor_humidity",
-            kind="aggregate",
+            kind=DerivedKind.AGGREGATE,
             inputs=(("terrace.outdoor_humidity", 1.0),),
-            method="weighted_mean",
+            method=AggregationMethod.WEIGHTED_MEAN,
             min_sources=1,
             clamp_min=1.0,
             clamp_max=100.0,
@@ -465,8 +537,8 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         ),
         DerivedSpec(
             name="global.outdoor_dew_point",
-            kind="compute",
-            compute="dew_point_c",
+            kind=DerivedKind.COMPUTE,
+            compute=ComputeFn.DEW_POINT_C,
             inputs=(
                 ("global.outdoor_temperature", 1.0),
                 ("global.outdoor_humidity", 1.0),
@@ -475,25 +547,38 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             max_age=timedelta(minutes=15),
             hold_last_good=timedelta(minutes=10),  # opzionale ma utile
         ),
+        # (B) True global MRT: aggregate zonal MRT (already gated by plant_active)
         DerivedSpec(
-            name="global.radiant_mean_temperature",
-            kind="aggregate",
+            name="global.mrt",
+            kind=DerivedKind.AGGREGATE,
+            inputs=tuple(indoor_mrt_inputs),
+            method=AggregationMethod.WEIGHTED_MEAN,
+            min_sources=2,
+            clamp_min=-10.0,
+            clamp_max=40.0,
+            max_age=timedelta(minutes=10),
+            hold_last_good=timedelta(minutes=5),
+        ),
+        # (B) Global operative temperature uses indoor air + true MRT (NOT hydraulic temps)
+        DerivedSpec(
+            name="global.t_op",
+            kind=DerivedKind.COMPUTE,
+            compute=ComputeFn.T_OP_C,
             inputs=(
-                ("plant_radiant.adj_supply_temperature", 1.0),
-                ("plant_radiant.adj_return_temperature", 1.0),
+                ("global.indoor_temperature", 1.0),
+                ("global.mrt", 1.0),
             ),
-            method="weighted_mean",
-            min_sources=1,
-            clamp_min=5.0,
-            clamp_max=60.0,
+            min_sources=2,
+            clamp_min=-10.0,
+            clamp_max=40.0,
             max_age=timedelta(minutes=10),
             hold_last_good=timedelta(minutes=5),
         ),
         DerivedSpec(
             name="global.condensation_margin_min",
-            kind="aggregate",
+            kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_cm_inputs),
-            method="min",
+            method=AggregationMethod.MIN,
             min_sources=2,
             clamp_min=-20.0,
             clamp_max=30.0,
@@ -508,8 +593,14 @@ def build_sensor_mapping(climate: ClimateConfig) -> MappingConfig:
         zones=_build_indoor_zones(climate.areas) \
                 + _build_outdoor_zones(climate.areas) \
                 + _build_plant_radiant(climate.devices.supply_units),
-        derived=_build_global_derived(climate.areas) \
+        # Order matters for readability and (if the engine is single-pass) dependency resolution:
+        # - plant water proxy first
+        # - psychrometrics next (dew point, heat index, condensation margin)
+        # - actuation (plant_active) then MRT/T_op per-zone
+        # - global aggregates last (global.mrt, global.t_op, condensation_margin_min, etc.)
+        derived=_build_plant_water_derived() \
                 + _build_psychro_derived(climate.areas) \
                 + _build_actuation_derived(climate.areas) \
-                + _build_mrt_derived(climate.areas)
+                + _build_mrt_derived(climate.areas) \
+                + _build_global_derived(climate.areas)
     )

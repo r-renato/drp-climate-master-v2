@@ -476,7 +476,7 @@ def collect_entity_ids_for_state_changes(runtime: "RuntimeConfig") -> list[str]:
         _walk(getattr(vmc, "alarms", None))
 
     # --- APT WINDOWS / WEATHER / SCENARIOS
-    _walk(getattr(climate, "apt_windows", None))
+    _walk(getattr(climate, "windows", None))
     _walk(getattr(climate, "weather", None))
     _walk(getattr(climate, "scenarios", None))
 

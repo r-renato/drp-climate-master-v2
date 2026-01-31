@@ -36,19 +36,6 @@ RESPONSABILITÀ PRINCIPALI
    - Si sottoscrive agli update del Coordinator (SLOW loop) e decide non appena cambia lo
      snapshot; sincronizza l’UI chiamando `async_set_updated_data`.
 
-INTERAZIONI
------------
-- Legge lo **snapshot** dal Coordinator e la **configurazione** (PlantConfig).
-- Comanda tutto **solo** tramite Adapters (mai servizi diretti HA).
-- Espone a `climate.py` le proprietà correnti (`current_hvac_mode`, `current_hvac_action`,
-  `current_profile`) e metodi per cambiare modalità/target/strategie.
-
-CICLO DI VITA
--------------
-- `async_start()` → registra listener al Coordinator e avvia il primo ciclo decisionale.
-- `async_stop()` → rimuove listener e chiude eventuali task interni.
-- I metodi `async_set_*` (mode/profile/target/strategy) schedulano un nuovo ciclo decisionale.
-
 INVARIANTI & LINEE GUIDA
 ------------------------
 - Le decisioni sono **idempotenti**: ripetere lo stesso stato non deve generare flood di comandi.
@@ -56,27 +43,37 @@ INVARIANTI & LINEE GUIDA
 - La logica di sicurezza (anticondensa, interlock) ha **priorità** su comfort/risparmio.
 - Nessuna manipolazione diretta di entità: gli Adapters gestiscono backoff, retry e clamp.
 
-ANTI-PATTERN (da evitare)
--------------------------
-- Inserire algoritmi numerici “di regolazione” (PID) nel Supervisor → restano nel Coordinator.
-- Spostare qui calcoli di psicrometria o stima domanda → li fornisce il Coordinator/snapshot.
-- Aggirare gli Adapters per inviare comandi.
+NOTE IMPLEMENTATIVE (scheduler)
+-------------------------------
+Questo Supervisor estende `DailyGatedSchedulerBase` per:
+- schedulare un "tick" alla prossima scadenza (point-in-time)
+- tentare l'esecuzione *al più* una volta per intervallo (persistito su storage)
+- gestire correttamente unsubscribe/reschedule e dedup di run concorrenti
+
+L'intervallo può essere 24h, 8 minuti, ecc. (qualunque `timedelta`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Callable, Optional
 
 from homeassistant.components.climate.const import HVACAction, HVACMode
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import HomeAssistant, Event, callback
+
+from ..const import DOMAIN
+from ..helpers.logger import log_debug, log_info
+from ..helpers.scheduler import IntervalGatedSchedulerBase
 
 from ..domain.enums import HVACOperatingProfile
-
-from ..controller.coordinator import ClimateCoordinator
+from .coordinator import ClimateCoordinator
+from .rcmpc.engine import ControlEngine
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,36 +81,79 @@ _LOGGER = logging.getLogger(__name__)
 @dataclass(slots=True)
 class _State:
     """Stato corrente (esposto a ClimateEntity)."""
+
     hvac_mode: HVACMode = HVACMode.AUTO
     hvac_action: HVACAction = HVACAction.IDLE
     hvac_profile: Optional[HVACOperatingProfile] = None
-   #  target_temp_c: float = 22.0
-   #  cooling_strategy: CoolingStrategy = CoolingStrategy.FIRST_WATER_THEN_COMPRESSOR
 
 
-class ClimateSupervisor:
+class ClimateSupervisor(IntervalGatedSchedulerBase):
+    """Supervisore: decide la modalità dell'impianto e invia comandi agli adapters.
+
+    Scheduling
+    - Usa `IntervalGatedSchedulerBase` come scheduler persistito (gating su intervallo).
+    - Tutti i trigger (coordinator updates, bootstrap, ecc.) chiamano `async_run_if_due()`.
+    - Il lavoro vero è implementato in `_async_on_due()`.
+
+    Nota
+    - Non accedere direttamente a membri protetti del base (es. `_run_task`).
+      Usa le API (`async_run_if_due`, `async_start`, `async_stop`).
     """
-    Supervisore: decide la modalità dell'impianto e invia comandi agli adapters.
-    - Reagisce agli update del DataUpdateCoordinator (SLOW loop)
-    - Avvia il FAST loop del coordinator (PID miscelatrice, PID umidità VMC)
-    - Mantiene coerenza di sicurezza (anticondensa, short-cycle demandato agli adapters)
-    """
 
-    def __init__(self, hass: HomeAssistant, coordinator: ClimateCoordinator) -> None:
-        self.hass = hass
-        self.coordinator = coordinator
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        coordinator: ClimateCoordinator,
+        *,
+        decision_interval: timedelta = timedelta(minutes=3),
+    ) -> None:
+        # ✅ IMPORTANTISSIMO: inizializza prima la base (evita Pylint E0203 e assicura init completo)
+        super().__init__(
+            hass,
+            store_key=f"{DOMAIN}.supervisor.{coordinator.entry_id}",
+            daily_interval=decision_interval,
+            logger=_LOGGER,
+        )
+
+        self._hass = hass
+        self._coordinator = coordinator
+
+        self._entry_id = coordinator.entry_id
+        self._unit_system = coordinator.unit_system
+        self._instance_id: str = f"{id(self):x}"
+
         self.state = _State(
             hvac_mode=HVACMode.AUTO,
             hvac_action=HVACAction.IDLE,
-            # profile=self.coordinator.adapters.get_operating_profile() or OperatingProfile.COMFORT,
-            # target_temp_c=22.0,
-            # cooling_strategy=CoolingStrategy.FIRST_WATER_THEN_COMPRESSOR,
         )
 
+        self._engine = ControlEngine(hass=hass, coordinator=coordinator)
+
         self._unsub_coordinator: Optional[Callable[[], None]] = None
-        self._task_decider: Optional[asyncio.Task] = None
+
+        # Decision concurrency guard (se il job parte da tick e da evento, l'engine non gira in parallelo)
+        self._decider_lock = asyncio.Lock()
+
+        # Stop flag
         self._stop_event = asyncio.Event()
-        _LOGGER.info("component initialized.")
+
+        # Start when HA is ready
+        self._unsub_hastarted_event: Optional[Callable[[], None]] = self._hass.bus.async_listen_once(
+            EVENT_HOMEASSISTANT_STARTED, self._on_ha_started
+        )
+
+        log_info(
+            _LOGGER,
+            "Initialized (id=%s) entry=%s unit=%s interval=%s",
+            hex(id(self)),
+            self._entry_id,
+            self._unit_system,
+            decision_interval,
+        )
+
+    # -----------------------------
+    # Exposed properties
+    # -----------------------------
 
     @property
     def current_hvac_mode(self) -> HVACMode:
@@ -122,25 +162,127 @@ class ClimateSupervisor:
     @property
     def current_hvac_action(self) -> HVACAction:
         return self.state.hvac_action
-    
+
+    @property
+    def current_profile(self) -> Optional[HVACOperatingProfile]:
+        return self.state.hvac_profile
+
+    # -----------------------------
+    # HA lifecycle
+    # -----------------------------
+
+    @callback
+    def _on_ha_started(self, event: Event) -> None:
+        """Boot hook: start supervisor and arm scheduler only after HA STARTED."""
+        self._hass.async_create_task(self.async_start(), name=f"drp_supervisor_start:{self._instance_id}")
+
     async def async_start(self) -> None:
+        """Start supervisor.
+
+        - subscribe coordinator listener
+        - start persisted scheduler (meta load + next tick)
+        - optionally trigger a first decision run if due
+        """
+        if self._stop_event.is_set():
+            return
+
         if self._unsub_coordinator is None:
-            self._unsub_coordinator = self.coordinator.async_add_listener(self._on_coordinator_update)
-        # await self.coordinator.async_start_fast_loop()
-        self._schedule_decider()
-      #   _LOGGER.info("Supervisor started with hvac_mode=%s, profile=%s, target=%.1f°C",
-      #                self.state.hvac_mode, self.state.profile, self.state.target_temp_c)
+            self._unsub_coordinator = self._coordinator.async_add_listener(self._on_coordinator_update)
 
-    async def async_stop(self):
-        """..."""
+        # Start the persisted tick scheduler
+        await super().async_start()
 
-    def _schedule_decider(self) -> None:
-      """..."""
-      #   if self._task_decider and not self._task_decider.done():
-      #       return
-      #   self._task_decider = self.hass.async_create_task(self._decide_and_act(), name="drp_decider")
+        # Let the scheduler tick drive the very first run (it will be due immediately if no meta).
+        # If you prefer an explicit immediate run, uncomment:
+        # await self.async_run_if_due(reason="startup")
+
+    async def async_stop(self) -> None:
+        """Stop supervisor: unsubscribe listeners and stop background tasks."""
+        if self._stop_event.is_set():
+            return
+        self._stop_event.set()
+
+        if self._unsub_coordinator is not None:
+            with contextlib.suppress(Exception):
+                self._unsub_coordinator()
+            self._unsub_coordinator = None
+
+        # Stop scheduler (cancels tick + in-flight due job)
+        await super().async_stop()
+
+        log_info(_LOGGER, "Supervisor stopped. instance=%s", self._instance_id)
+
+    # -----------------------------
+    # Coordinator trigger
+    # -----------------------------
 
     def _on_coordinator_update(self) -> None:
-      """..."""
-      #   self._schedule_decider()
+        """Called when ClimateCoordinator publishes an update (every ~5 minutes)."""
+        self._request_run(reason="coordinator")
+
+    def _request_run(self, *, reason: str) -> None:
+        """Thread-safe scheduling of an interval-gated run."""
+        if self._stop_event.is_set():
+            return
+
+        # Be defensive: coordinator callbacks *should* be on-loop, but keep a guard.
+        try:
+            if asyncio.get_running_loop() is not self._hass.loop:
+                raise RuntimeError
+        except RuntimeError:
+            self._hass.loop.call_soon_threadsafe(functools.partial(self._request_run, reason=reason))
+            return
+
+        self._hass.async_create_task(
+            self.async_run_if_due(reason=reason),
+            name=f"drp_supervisor_due:{self._instance_id}:{reason}",
+        )
+
+    # -----------------------------
+    # Scheduler hook (DailyGatedSchedulerBase)
+    # -----------------------------
+
+    async def _async_on_due(self, reason: str) -> None:
+        """Job executed when the interval gate allows a run."""
+        await self.async_decide_and_act(reason=reason)
+
+    # -----------------------------
+    # Core decision
+    # -----------------------------
+
+    async def async_decide_and_act(self, *, reason: str) -> None:
+        """Compute a control plan and apply it.
+
+        Single entry-point for decision making.
+
+        Notes
+        - This method is called by `_async_on_due()` (gated scheduler).
+        - It can also be called directly (e.g., future services) if needed.
+        """
+        if self._stop_event.is_set():
+            return
+
+        # Avoid heavy IO / side effects while the coordinator isn't ready yet.
+        if getattr(self._coordinator, "data", None) is None or getattr(self._coordinator, "last_update_success", True) is False:
+            log_debug(_LOGGER, "Skip decision: coordinator not ready (reason=%s)", reason)
+            return
+
+        async with self._decider_lock:
+            try:
+                plan = await self._engine.async_run_once(reason=reason)
+            except asyncio.CancelledError:
+                return
+
+            log_debug(_LOGGER, "ControlPlan %s", plan)
+
+            if plan is None:
+                return
+
+            # Expose to UI
+            if getattr(plan, "any_heat_demand", False):
+                self.state.hvac_action = HVACAction.HEATING
+            else:
+                self.state.hvac_action = HVACAction.IDLE
+
+            # TODO: qui puoi aggiornare hvac_mode / profile quando li colleghi a plan/state machine
 
