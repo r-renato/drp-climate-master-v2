@@ -5,6 +5,9 @@ from datetime import datetime
 from typing import Iterable, Optional
 import logging
 
+from homeassistant.components.climate.const import HVACMode
+
+from ...domain.enums import HVACOperatingProfile
 from ...helpers.confort.confort_band import ComfortBandResult
 from ...helpers.sensor_aggregator import AggregatedValue
 
@@ -358,46 +361,16 @@ class PlantSnapshot:
 
     global_indoor_zone: Optional[ZoneSnapshot] = None
 
-    # global_indoor_dew_point: Optional[AggregatedValue] = None
-    # global_indoor_heat_index: Optional[AggregatedValue] = None
-    # global_indoor_humidity: Optional[AggregatedValue] = None
-    # global_indoor_temperature: Optional[AggregatedValue] = None
-
     global_outdoor_dew_point: Optional[AggregatedValue] = None
     global_outdoor_humidity: Optional[AggregatedValue] = None
     global_outdoor_temperature: Optional[AggregatedValue] = None
 
-    # global_condensation_margin_min: Optional[AggregatedValue] = None
-    # global_radiant_mean_temperature: Optional[AggregatedValue] = None
-
-
-    dew_guard_active: Optional[bool] = None
-    free_cooling_possible: Optional[bool] = None
+    climate_hvac_mode: Optional[HVACMode] = None
+    climate_preset_mode: Optional[HVACOperatingProfile] = None
+    # dew_guard_active: Optional[bool] = None
+    # free_cooling_possible: Optional[bool] = None
     faults: tuple[str, ...] = ()
 
-    # def mean_indoor_temperature(self) -> Optional[float]:
-    #     """
-    #     Restituisce la **media semplice** delle temperature delle zone disponibili.
-    #     Esclude valori None; se nessuna temperatura è disponibile, restituisce None.
-    #     """
-    #     if not self.zones:
-    #         return None
-    #     temps = [z.room_t for z in self.zones.values() if z.room_t is not None]
-    #     if not temps:
-    #         return None
-    #     return sum(temps) / len(temps)
-
-    # def mean_indoor_humidity(self) -> Optional[float]:
-    #     """
-    #     Restituisce la **media semplice** delle umidità relative delle zone disponibili.
-    #     Esclude valori None; se nessuna RH è disponibile, restituisce None.
-    #     """
-    #     if not self.zones:
-    #         return None
-    #     humis = [z.room_rh for z in self.zones.values() if z.room_rh is not None]
-    #     if not humis:
-    #         return None
-    #     return sum(humis) / len(humis)
 
     def iter_indoor_zone_names(self) -> Iterable[str]:
         """Itera i nomi delle zone presenti nello snapshot."""
@@ -450,8 +423,15 @@ class PlantSnapshot:
         #     f"  Weather anomaly    :: {self.season.weather_anomaly if self.season else '-'}",
         #     f"------------------------------------------------------------------",
         # ]
-
-        lines = str(self.season).splitlines()
+        lines = [
+            f"",
+            f"Climate entity setting",
+            f"  HVAC mode          :: {self.climate_hvac_mode or '-'}",
+            f"  Preset mode        :: {self.climate_preset_mode.value if self.climate_preset_mode else '-'}",
+            f"------------------------------------------------------------------",
+        ]
+        
+        lines += [line for line in str(self.season).splitlines() if line.strip()]
 
         # --- conteggio zone ---
         lines += [
@@ -601,8 +581,8 @@ class PlantSnapshot:
             f"Home windows state   :: {fbool(self.windows_close_state, 'All Closed', 'Some Open')}",
             f"Vacation state       :: {fbool(self.presence_vacation, 'True', 'False')}",
             f"Nobody's in state    :: {fbool(self.presence_nobodysin, 'True', 'False')}",
-            f"Dew guard active     :: {fbool(self.dew_guard_active, 'Yes', 'No')}",
-            f"Free-cooling possible:: {fbool(self.free_cooling_possible, 'Yes', 'No')}",
+            # f"Dew guard active     :: {fbool(self.dew_guard_active, 'Yes', 'No')}",
+            # f"Free-cooling possible:: {fbool(self.free_cooling_possible, 'Yes', 'No')}",
             f"Faults               :: {ffaults(self.faults)}",
             f"------------------------------------------------------------------",
         ]

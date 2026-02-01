@@ -4,10 +4,13 @@ import logging
 from typing import List, Optional
 from datetime import datetime
 
+from homeassistant.components.climate.const import HVACMode
+
+from ..domain.enums import HVACOperatingProfile
 from .confort.confort_band import ComfortBandResult
 from .sensor_aggregator import AggregatedValue, SensorAggregator
 
-from .logger import exc_one_line, log_debug, log_exception, log_warning
+from .logger import log_debug, log_exception, log_warning
 
 from .ha import get_entity_value
 
@@ -38,6 +41,8 @@ def take_plant_snapshot(
     sensor_aggr: SensorAggregator,
     confort_bands: dict[str, ComfortBandResult],
     entities_state: dict,
+    climate_hvac_mode: HVACMode,
+    climate_preset_mode: HVACOperatingProfile,
     timestamp: datetime,
 ) -> PlantSnapshot | None:
     """Build a plant snapshot collecting HA entity states."""
@@ -355,6 +360,8 @@ def take_plant_snapshot(
 
             # global_condensation_margin_min=sensor_aggr.get("global.condensation_margin_min"),
             # global_radiant_mean_temperature=sensor_aggr.get("global.radiant_mean_temperature"),
+            climate_hvac_mode=climate_hvac_mode,
+            climate_preset_mode=climate_preset_mode,
         )
     except TypeError as ex:
         # Parametri mancanti/extra o mismatch firma costruttore

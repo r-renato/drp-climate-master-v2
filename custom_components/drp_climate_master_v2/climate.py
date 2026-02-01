@@ -84,6 +84,7 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
         self._preset_mode = HVACOperatingProfile.COMFORT
         coordinator.set_preset_mode( HVACOperatingProfile.COMFORT )
         self.map_on_hvac_mode = self._attr_hvac_mode = HVACMode.AUTO
+        coordinator.set_hvac_mode( HVACMode.AUTO )
 
         self._target_temp = 22.0
         self._attr_min_temp = 16.0
@@ -103,6 +104,11 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
     def hvac_mode(self) -> HVACMode:
         return self._supervisor.current_hvac_mode
 
+    def set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        """Set new target hvac mode."""
+        self.map_on_hvac_mode = hvac_mode
+        self._attr_hvac_mode = hvac_mode
+    
     def set_preset_mode(self, preset_mode: str) -> None:
         self._preset_mode = preset_mode
         self._attr_preset_mode = preset_mode

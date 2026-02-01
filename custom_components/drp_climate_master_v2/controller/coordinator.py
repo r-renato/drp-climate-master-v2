@@ -6,17 +6,18 @@ import contextlib
 import json
 import logging
 from dataclasses import fields, replace
-from typing import Any, Dict, Mapping
-from datetime import datetime, timedelta, timezone
+from typing import Any, Dict
+from datetime import datetime, timezone
 
 import psychrolib
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME, EVENT_HOMEASSISTANT_STARTED, PERCENTAGE
 from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, State, callback
+from homeassistant.components.climate.const import HVACMode
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
+from homeassistant.const import CONF_NAME, EVENT_HOMEASSISTANT_STARTED, PERCENTAGE
 
 from ..domain.models.plant import PlantSnapshot
 
@@ -95,6 +96,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         self._climate_preset_mode: HVACOperatingProfile | None = None
+        self._climate_hvac_mode: HVACMode | None = None
         self._season_state = None
 
         self._policy_layer: ComfortPolicyLayer = build_policy_layer()
@@ -722,7 +724,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             await self._sensor_aggregator.async_update()
 
-            if self._season_state:
+            if self._season_state and self._climate_hvac_mode and self._climate_preset_mode:
                 self._plant_snapshot = take_plant_snapshot(
                     timestamp=now_utc(),
                     runtime_config=self._runtime,
@@ -730,6 +732,8 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     entities_state=self._entities_state,
                     sensor_aggr=self._sensor_aggregator,
                     confort_bands=self._compute_confort_band(),
+                    climate_hvac_mode=self._climate_hvac_mode,
+                    climate_preset_mode=self._climate_preset_mode,
                 )
             else:
                 log_warning(_LOGGER, "Invalid season state %s", self._season_state)
@@ -773,6 +777,9 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def set_preset_mode(self, preset_mode: HVACOperatingProfile) -> None:
         self._climate_preset_mode = preset_mode
+
+    def set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        self._climate_hvac_mode = hvac_mode
 
     def set_season_state(self, season_state: SeasonState) -> None:
         self._season_state = season_state

@@ -74,6 +74,8 @@ from ..helpers.scheduler import IntervalGatedSchedulerBase
 from ..domain.enums import HVACOperatingProfile
 from .coordinator import ClimateCoordinator
 from .rcmpc.engine import ControlEngine
+from .plant_control.engine import PlantControlEngine
+from .plant_control.contracts import PlantDecision
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -128,6 +130,12 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
         )
 
         self._engine = ControlEngine(hass=hass, coordinator=coordinator)
+        self._plant_engine = PlantControlEngine(
+            hass=self._hass,
+            runtime=self._coordinator.runtime_config,
+            enabled=False,
+        )
+        self._last_plant_decision: PlantDecision | None = None
 
         self._unsub_coordinator: Optional[Callable[[], None]] = None
 
@@ -166,6 +174,10 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
     @property
     def current_profile(self) -> Optional[HVACOperatingProfile]:
         return self.state.hvac_profile
+
+    @property
+    def last_plant_decision(self) -> PlantDecision | None:
+        return self._last_plant_decision
 
     # -----------------------------
     # HA lifecycle
@@ -269,11 +281,24 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
 
         async with self._decider_lock:
             try:
+                # Plant control decision (separate from zone MPC-lite)
+                snap = self._coordinator.plant_snapshot
+                if snap is not None:
+                    try:
+                        self._last_plant_decision = await self._plant_engine.async_run_once(
+                            snapshot=snap,
+                            reason="tick",
+                        )
+                    except Exception as e:
+                        _LOGGER.exception("Plant control decision failed: %s", e)
+                        self._last_plant_decision = None
+
                 plan = await self._engine.async_run_once(reason=reason)
             except asyncio.CancelledError:
                 return
 
             log_debug(_LOGGER, "ControlPlan %s", plan)
+            log_debug(_LOGGER, "PlantDecision %s", self._last_plant_decision)
 
             if plan is None:
                 return
@@ -285,4 +310,3 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                 self.state.hvac_action = HVACAction.IDLE
 
             # TODO: qui puoi aggiornare hvac_mode / profile quando li colleghi a plan/state machine
-
