@@ -484,11 +484,11 @@ class PlantSnapshot:
                         f"clo_used: {fnum(cb.clo_used)} "
                     )
                     lines += [
-                        f"  {pad("", width=16)}   "
+                        f"  {pad("confort band Air", width=18, align="right")} "
                         f"{conf_band_air}",
-                        f"  {pad("", width=16)}   "
+                        f"  {pad("Pov", width=18, align="right")} "
                         f"{conf_band_pov}",
-                        f"  {pad("", width=16)}   "
+                        f"  {pad("diagnostic", width=18, align="right")} "
                         f"{conf_band_diagnostic}"
                     ]
 
@@ -562,11 +562,11 @@ class PlantSnapshot:
                     f"clo_used: {fnum(cb.clo_used)} "
                 )
                 lines += [
-                    f"  {pad("", width=16)}   "
+                    f"  {pad("confort band Air", width=18, align="right")} "
                     f"{conf_band_air}",
-                    f"  {pad("", width=16)}   "
+                    f"  {pad("Pov", width=18, align="right")} "
                     f"{conf_band_pov}",
-                    f"  {pad("", width=16)}   "
+                    f"  {pad("diagnostic", width=18, align="right")} "
                     f"{conf_band_diagnostic}"
                 ]
 

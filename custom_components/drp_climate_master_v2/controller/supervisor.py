@@ -67,15 +67,18 @@ from homeassistant.components.climate.const import HVACAction, HVACMode
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant, Event, callback
 
+from ..plant.decision.zone.contracts import ZonesDecision
+from ..plant.decision.zone.planner import ZoneDecisionPlanner
+
+from ..plant.decision.contracts import PlantDecision
+from ..plant.decision.planner import PlantDecisionPlanner
+
 from ..const import DOMAIN
-from ..helpers.logger import log_debug, log_info
+from ..helpers.logger import log_debug, log_exception, log_info
 from ..helpers.scheduler import IntervalGatedSchedulerBase
 
 from ..domain.enums import HVACOperatingProfile
 from .coordinator import ClimateCoordinator
-from .rcmpc.engine import ControlEngine
-from .plant_control.engine import PlantControlEngine
-from .plant_control.contracts import PlantDecision
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -129,13 +132,18 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
             hvac_action=HVACAction.IDLE,
         )
 
-        self._engine = ControlEngine(hass=hass, coordinator=coordinator)
-        self._plant_engine = PlantControlEngine(
-            hass=self._hass,
-            runtime=self._coordinator.runtime_config,
-            enabled=False,
-        )
+        self._plant_decision_planner: PlantDecisionPlanner = PlantDecisionPlanner()
+        self._zones_decision_planner: ZoneDecisionPlanner = ZoneDecisionPlanner()
+        
+        # self._engine = ControlEngine(hass=hass, coordinator=coordinator)
+        # self._plant_engine = PlantControlEngine(
+        #     hass=self._hass,
+        #     runtime=self._coordinator.runtime_config,
+        #     enabled=False,
+        # )
+
         self._last_plant_decision: PlantDecision | None = None
+        self._last_zones_decision: ZonesDecision | None = None
 
         self._unsub_coordinator: Optional[Callable[[], None]] = None
 
@@ -271,6 +279,7 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
         - This method is called by `_async_on_due()` (gated scheduler).
         - It can also be called directly (e.g., future services) if needed.
         """
+        plan = None
         if self._stop_event.is_set():
             return
 
@@ -285,20 +294,31 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                 snap = self._coordinator.plant_snapshot
                 if snap is not None:
                     try:
-                        self._last_plant_decision = await self._plant_engine.async_run_once(
+                        self._last_zones_decision = self._zones_decision_planner.plan(
                             snapshot=snap,
                             reason="tick",
                         )
+                        log_debug(_LOGGER, "ZonesDecision %s", self._last_zones_decision)
+                        self._last_plant_decision = self._plant_decision_planner.plan(
+                            snapshot=snap,
+                            zones_decision=self._last_zones_decision,
+                            reason="tick",
+                        )
+                        log_debug(_LOGGER, "PlantDecision %s", self._last_plant_decision)
+                        # self._last_plant_decision = await self._plant_engine.async_run_once(
+                        #     snapshot=snap,
+                        #     reason="tick",
+                        # )
                     except Exception as e:
-                        _LOGGER.exception("Plant control decision failed: %s", e)
+                        log_exception(_LOGGER, "Plant control decision failed: %s", e)
                         self._last_plant_decision = None
 
-                plan = await self._engine.async_run_once(reason=reason)
+                # plan = await self._engine.async_run_once(reason=reason)
             except asyncio.CancelledError:
                 return
 
-            log_debug(_LOGGER, "ControlPlan %s", plan)
-            log_debug(_LOGGER, "PlantDecision %s", self._last_plant_decision)
+            # log_debug(_LOGGER, "ControlPlan %s", plan)
+            
 
             if plan is None:
                 return

@@ -138,27 +138,27 @@ class PlantDecisionPlanner:
         pump_direct_on = bool(vmc_req_water) if vmc_req_water is not None else None
 
         d = PlantDecision(
-            ts=ts,
+            # ts=ts,
             reason=reason,
             mode=mode,
             pdc_power=pdc_on if season == "winter" else None,
-            pdc_mode=pdc_mode,
+            # pdc_mode=pdc_mode,
             pdc_heat_wot_c=wot,
-            pdc_heat_dt_k=self.heat_dt_k if (pdc_on and pdc_mode == "heating") else None,
+            # pdc_heat_dt_k=self.heat_dt_k if (pdc_on and pdc_mode == "heating") else None,
             pump_mix_on=pump_mix_on,
             pump_direct_on=pump_direct_on,
-            mix_valve_pct=None,
-            vmc_season="winter" if season == "winter" else None,
-            vmc_setpoints={},
+            # mix_valve_pct=None,
+            # vmc_season="winter" if season == "winter" else None,
+            # vmc_setpoints={},
             warnings=[],
-            debug={
-                "season": season,
-                "windows_closed": windows_closed,
-                "t_out": t_out,
-                "vmc_req_water": vmc_req_water,
-                "heat_demand": heat_demand,
-                "worst_deficit": worst_deficit,
-            },
+            # debug={
+            #     "season": season,
+            #     "windows_closed": windows_closed,
+            #     "t_out": t_out,
+            #     "vmc_req_water": vmc_req_water,
+            #     "heat_demand": heat_demand,
+            #     "worst_deficit": worst_deficit,
+            # },
         )
 
         if t_out is None:
