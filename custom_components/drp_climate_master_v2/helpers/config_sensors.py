@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from enum import StrEnum
 from typing import List
 
 from .utils import slugify
@@ -23,6 +24,37 @@ from .sensor_aggregator import (
     SensorSpec, 
     ZoneConfig
 )
+
+GLOBAL = "global"
+TERRACE = "terrace"
+PLANT_RADIANT = "plant_radiant"
+
+class FieldSuffix(StrEnum):
+    INDOOR_TEMPERATURE = "indoor_temperature"
+    INDOOR_HUMIDITY = "indoor_humidity"
+    INDOOR_DEW_POINT = "indoor_dew_point"
+    INDOOR_HEAT_INDEX = "indoor_heat_index"
+
+    RADIANT_VALVE_OPEN = "radiant_valve_open"
+
+    OUTDOOR_TEMPERATURE = "outdoor_temperature"
+    OUTDOOR_HUMIDITY = "outdoor_humidity"
+    OUTDOOR_DEW_POINT = "outdoor_dew_point"
+    
+    CONDENSATION_MARGIN = "condensation_margin"
+    MRT = "mrt"
+    T_OPT = "t_op"
+
+    ADJ_SUPPLY_TEMPERATURE = "adj_supply_temperature"
+    ADJ_RETURN_TEMPERATURE = "adj_return_temperature"
+    ADJ_SUPPLY_ON = "adj_supply_on"
+
+    WATER_MEAN_TEMPERATURE = "water_mean_temperature"
+    PLANT_ACTIVE = "plant_active"
+
+    def __call__(self, prefix: str, sep: str = ".") -> str:
+        return f"{prefix}{sep}{self}"
+
 
 def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
     zones: List[ZoneConfig] = []
@@ -74,7 +106,7 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
             if area.radiant and area.thermal_collector_valve_switch:
                 variables = (
                         GroupSpec(
-                            name="indoor_temperature",
+                            name=FieldSuffix.INDOOR_TEMPERATURE,
                             sensors=(SensorSpec(area.sensors.temperature, weight=1.0, filters=indoor_temp_filters),),
                             method=AggregationMethod.WEIGHTED_MEAN,
                             cross_outlier_method=CrossOutlierMethod.NONE,
@@ -83,7 +115,7 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                             clamp_max=35.0 if area.radiant else 60.0,
                         ),
                         GroupSpec(
-                            name="indoor_humidity",
+                            name=FieldSuffix.INDOOR_HUMIDITY,
                             sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=indoor_rh_filters),),
                             method=AggregationMethod.WEIGHTED_MEAN,
                             cross_outlier_method=CrossOutlierMethod.NONE,
@@ -92,15 +124,8 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                             clamp_max=100.0,
                         ),
                         GroupSpec(
-                            name="radiant_valve_open",
-                            sensors=(
-                                SensorSpec(
-                                    # se in futuro avrai area.sensors.valve, verrà usato automaticamente
-                                    area.thermal_collector_valve_switch,
-                                    weight=1.0,
-                                    filters=switch_filters,
-                                ),
-                            ),
+                            name=FieldSuffix.RADIANT_VALVE_OPEN,
+                            sensors=(SensorSpec(area.thermal_collector_valve_switch,weight=1.0,filters=switch_filters,),),
                             method=AggregationMethod.WEIGHTED_MEAN,
                             cross_outlier_method=CrossOutlierMethod.NONE,
                             min_sources=1,
@@ -111,7 +136,7 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
             else:
                 variables = (
                         GroupSpec(
-                            name="indoor_temperature",
+                            name=FieldSuffix.INDOOR_TEMPERATURE.value,
                             sensors=(SensorSpec(area.sensors.temperature, weight=1.0, filters=indoor_temp_filters),),
                             method=AggregationMethod.WEIGHTED_MEAN,
                             cross_outlier_method=CrossOutlierMethod.NONE,
@@ -120,7 +145,7 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                             clamp_max=35.0 if area.radiant else 60.0,
                         ),
                         GroupSpec(
-                            name="indoor_humidity",
+                            name=FieldSuffix.INDOOR_HUMIDITY.value,
                             sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=indoor_rh_filters),),
                             method=AggregationMethod.WEIGHTED_MEAN,
                             cross_outlier_method=CrossOutlierMethod.NONE,
@@ -179,7 +204,7 @@ def _build_outdoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                     weight=1.0,
                     variables=(
                         GroupSpec(
-                            name="outdoor_temperature",
+                            name=FieldSuffix.OUTDOOR_TEMPERATURE,
                             sensors=(
                                 SensorSpec(area.sensors.temperature, weight=1.0, filters=outdoor_temp_filters),
                                 SensorSpec("sensor.hmi080_outdoor_temperature", weight=1.0, filters=outdoor_temp_filters),
@@ -191,7 +216,7 @@ def _build_outdoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                             clamp_max=55.0,
                         ),
                         GroupSpec(
-                            name="outdoor_humidity",
+                            name=FieldSuffix.OUTDOOR_HUMIDITY,
                             sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=outdoor_rh_filters),),
                             method=AggregationMethod.WEIGHTED_MEAN,
                             cross_outlier_method=CrossOutlierMethod.NONE,
@@ -233,11 +258,11 @@ def _build_plant_radiant(supply_units: SupplyUnitsConfig) -> tuple[ZoneConfig, .
     )
 
     return (ZoneConfig(
-                zone="plant_radiant",
+                zone=PLANT_RADIANT,
                 weight=0.0,
                 variables=(
                     GroupSpec(
-                        name="adj_supply_temperature",
+                        name=FieldSuffix.ADJ_SUPPLY_TEMPERATURE,
                         sensors=(
                             SensorSpec(
                                 supply_units.sensors.adjustable_temp_system_supply,
@@ -252,7 +277,7 @@ def _build_plant_radiant(supply_units: SupplyUnitsConfig) -> tuple[ZoneConfig, .
                         clamp_max=60.0,
                     ),
                     GroupSpec(
-                        name="adj_return_temperature",
+                        name=FieldSuffix.ADJ_RETURN_TEMPERATURE,
                         sensors=(
                             SensorSpec(
                                 supply_units.sensors.adjustable_temp_system_return,
@@ -267,7 +292,7 @@ def _build_plant_radiant(supply_units: SupplyUnitsConfig) -> tuple[ZoneConfig, .
                         clamp_max=60.0,
                     ),
                     GroupSpec(
-                        name="adj_supply_on",
+                        name=FieldSuffix.ADJ_SUPPLY_ON,
                         sensors=(SensorSpec(supply_units.adjustable_supply_unit, weight=1.0, filters=switch_filters),),
                         method=AggregationMethod.WEIGHTED_MEAN,
                         cross_outlier_method=CrossOutlierMethod.NONE,
@@ -286,11 +311,11 @@ def _build_plant_water_derived() -> tuple[DerivedSpec, ...]:
     """
     return (
         DerivedSpec(
-            name="plant_radiant.water_mean_temperature",
+            name=FieldSuffix.WATER_MEAN_TEMPERATURE(PLANT_RADIANT),
             kind=DerivedKind.AGGREGATE,
             inputs=(
-                ("plant_radiant.adj_supply_temperature", 1.0),
-                ("plant_radiant.adj_return_temperature", 1.0),
+                (FieldSuffix.ADJ_SUPPLY_TEMPERATURE(PLANT_RADIANT), 1.0), 
+                (FieldSuffix.ADJ_RETURN_TEMPERATURE(PLANT_RADIANT), 1.0),
             ),
             method=AggregationMethod.WEIGHTED_MEAN,
             min_sources=1,
@@ -309,12 +334,12 @@ def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         if area.indoor and area.radiant and area.ceiling:
             psychro_derived.append(
                 DerivedSpec(
-                    name=f"{name}.indoor_dew_point",
+                    name=FieldSuffix.INDOOR_DEW_POINT(name),
                     kind=DerivedKind.COMPUTE,
                     compute=ComputeFn.DEW_POINT_C,
                     inputs=(
-                        (f"{name}.indoor_temperature", 1.0),
-                        (f"{name}.indoor_humidity", 1.0),
+                        (FieldSuffix.INDOOR_TEMPERATURE(name), 1.0),
+                        (FieldSuffix.INDOOR_HUMIDITY(name), 1.0),
                     ),
                     min_sources=2,
                     clamp_min=-20.0,
@@ -325,12 +350,12 @@ def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             )
             psychro_derived.append(
                 DerivedSpec(
-                    name=f"{name}.indoor_heat_index",
+                    name=FieldSuffix.INDOOR_HEAT_INDEX(name),
                     kind=DerivedKind.COMPUTE,
                     compute=ComputeFn.HEAT_INDEX_C,
                     inputs=(
-                        (f"{name}.indoor_temperature", 1.0),
-                        (f"{name}.indoor_humidity", 1.0),
+                        (FieldSuffix.INDOOR_TEMPERATURE(name), 1.0),
+                        (FieldSuffix.INDOOR_HUMIDITY(name), 1.0),
                     ),
                     min_sources=2,
                     clamp_min=-20.0,
@@ -341,14 +366,14 @@ def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             )
             psychro_derived.append(
                 DerivedSpec(
-                    name=f"{name}.condensation_margin",
+                    name=FieldSuffix.CONDENSATION_MARGIN(name),
                     kind=DerivedKind.COMPUTE,
                     compute=ComputeFn.CONDENSATION_MARGIN_C,
                     inputs=(
                         # (C) Conservative proxy: use the coldest relevant hydraulic point (supply)
                         # rather than a mean water temperature or a misnamed "radiant mean".
-                        ("plant_radiant.adj_supply_temperature", 1.0),
-                        (f"{name}.indoor_dew_point", 1.0),
+                        (FieldSuffix.ADJ_SUPPLY_TEMPERATURE(PLANT_RADIANT), 1.0),
+                        (FieldSuffix.INDOOR_DEW_POINT(name), 1.0),
                     ),
                     min_sources=2,
                     clamp_min=-20.0,
@@ -360,12 +385,12 @@ def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         elif not area.indoor and not area.radiant:
             psychro_derived.append(
                 DerivedSpec(
-                    name=f"{name}.outdoor_dew_point",
+                    name=FieldSuffix.OUTDOOR_DEW_POINT(name),
                     kind=DerivedKind.COMPUTE,
                     compute=ComputeFn.DEW_POINT_C,
                     inputs=(
-                        (f"{name}.outdoor_temperature", 1.0),
-                        (f"{name}.outdoor_humidity", 1.0),
+                        (FieldSuffix.OUTDOOR_TEMPERATURE(name), 1.0),
+                        (FieldSuffix.OUTDOOR_HUMIDITY(name), 1.0),
                     ),
                     min_sources=2,
                     clamp_min=-30.0,
@@ -386,12 +411,12 @@ def _build_actuation_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]
         if area.indoor and area.radiant and area.ceiling:
             out.append(
                 DerivedSpec(
-                    name=f"{name}.plant_active",
+                    name=FieldSuffix.PLANT_ACTIVE(name),
                     kind=DerivedKind.COMPUTE,
                     compute=ComputeFn.AND01,
                     inputs=(
-                        ("plant_radiant.adj_supply_on", 1.0),     # pump
-                        (f"{name}.radiant_valve_open", 1.0),      # valve zona
+                        (FieldSuffix.ADJ_SUPPLY_ON(PLANT_RADIANT), 1.0),  # pump
+                        (FieldSuffix.RADIANT_VALVE_OPEN(name), 1.0),      # valve zona
                     ),
                     min_sources=2,
                     clamp_min=0.0,
@@ -413,13 +438,13 @@ def _build_mrt_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         if area.indoor and area.radiant and area.ceiling:
             mrt_derived.append(
                 DerivedSpec(
-                    name=f"{name}.mrt",
+                    name=FieldSuffix.MRT(name),
                     kind=DerivedKind.COMPUTE,
                     compute=ComputeFn.MRT_GATED_C,
                     inputs=(
-                        (f"{name}.indoor_temperature", 1.0),
-                        ("plant_radiant.water_mean_temperature", 1.0),
-                        (f"{name}.plant_active", 1.0),  # <-- nuovo input
+                        (FieldSuffix.INDOOR_TEMPERATURE(name), 1.0),
+                        (FieldSuffix.WATER_MEAN_TEMPERATURE(PLANT_RADIANT), 1.0),
+                        (FieldSuffix.PLANT_ACTIVE(name), 1.0),  # <-- nuovo input
                     ),
                     min_sources=3,
                     clamp_min=-10.0,
@@ -431,12 +456,12 @@ def _build_mrt_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
 
             mrt_derived.append(
                 DerivedSpec(
-                    name=f"{name}.t_op",
+                    name=FieldSuffix.T_OPT(name),
                     kind=DerivedKind.COMPUTE,
                     compute=ComputeFn.T_OP_C,
                     inputs=(
-                        (f"{name}.indoor_temperature", 1.0),
-                        (f"{name}.mrt", 1.0),
+                        (FieldSuffix.INDOOR_TEMPERATURE(name), 1.0),
+                        (FieldSuffix.MRT(name), 1.0),
                     ),
                     min_sources=2,
                     clamp_min=-10.0,
@@ -459,16 +484,16 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
     for area in areas:
         name = slugify(area.name)
         if area.indoor and area.radiant and area.ceiling:
-            indoor_temp_inputs.append((f"{name}.indoor_temperature", area.ceiling))
-            indoor_rh_inputs.append((f"{name}.indoor_humidity", 1.0))
-            indoor_dp_inputs.append((f"{name}.indoor_dew_point", 1.0))
-            indoor_hi_inputs.append((f"{name}.indoor_heat_index", 1.0))
-            indoor_cm_inputs.append((f"{name}.condensation_margin", 1.0))
-            indoor_mrt_inputs.append((f"{name}.mrt", area.ceiling))
+            indoor_temp_inputs.append((FieldSuffix.INDOOR_TEMPERATURE(name), area.ceiling))
+            indoor_rh_inputs.append((FieldSuffix.INDOOR_HUMIDITY(name), 1.0))
+            indoor_dp_inputs.append((FieldSuffix.INDOOR_DEW_POINT(name), 1.0))
+            indoor_hi_inputs.append((FieldSuffix.INDOOR_HEAT_INDEX(name), 1.0))
+            indoor_cm_inputs.append((FieldSuffix.CONDENSATION_MARGIN(name), 1.0))
+            indoor_mrt_inputs.append((FieldSuffix.MRT(name), area.ceiling))
 
     return (
         DerivedSpec(
-            name="global.indoor_temperature",
+            name=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),
             kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_temp_inputs),
             method=AggregationMethod.WEIGHTED_MEAN,
@@ -479,7 +504,7 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             hold_last_good=timedelta(minutes=5),
         ),
         DerivedSpec(
-            name="global.indoor_humidity",
+            name=FieldSuffix.INDOOR_HUMIDITY(GLOBAL),
             kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_rh_inputs),
             method=AggregationMethod.MEDIAN,
@@ -491,7 +516,7 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         ),
         # Conservative: max dew point among representative zones (exclude foyer duplication)
         DerivedSpec(
-            name="global.indoor_dew_point",
+            name=FieldSuffix.INDOOR_DEW_POINT(GLOBAL),
             kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_dp_inputs),
             method=AggregationMethod.MAX,
@@ -503,7 +528,7 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         ),
         # Keep prior behavior: max heat index among zones (mostly meaningful in summer)
         DerivedSpec(
-            name="global.indoor_heat_index",
+            name=FieldSuffix.INDOOR_HEAT_INDEX(GLOBAL),
             kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_hi_inputs),
             method=AggregationMethod.MAX,
@@ -514,9 +539,9 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             hold_last_good=timedelta(minutes=5),
         ),
         DerivedSpec(
-            name="global.outdoor_temperature",
+            name=FieldSuffix.OUTDOOR_TEMPERATURE(GLOBAL),
             kind=DerivedKind.AGGREGATE,
-            inputs=(("terrace.outdoor_temperature", 1.0),),
+            inputs=((FieldSuffix.OUTDOOR_TEMPERATURE(TERRACE), 1.0),),
             method=AggregationMethod.WEIGHTED_MEAN,
             min_sources=1,
             clamp_min=-30.0,
@@ -525,9 +550,9 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             hold_last_good=timedelta(minutes=10),
         ),
         DerivedSpec(
-            name="global.outdoor_humidity",
+            name=FieldSuffix.OUTDOOR_HUMIDITY(GLOBAL),
             kind=DerivedKind.AGGREGATE,
-            inputs=(("terrace.outdoor_humidity", 1.0),),
+            inputs=((FieldSuffix.OUTDOOR_HUMIDITY(TERRACE), 1.0),),
             method=AggregationMethod.WEIGHTED_MEAN,
             min_sources=1,
             clamp_min=1.0,
@@ -536,12 +561,12 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             hold_last_good=timedelta(minutes=10),
         ),
         DerivedSpec(
-            name="global.outdoor_dew_point",
+            name=FieldSuffix.OUTDOOR_DEW_POINT(GLOBAL),
             kind=DerivedKind.COMPUTE,
             compute=ComputeFn.DEW_POINT_C,
             inputs=(
-                ("global.outdoor_temperature", 1.0),
-                ("global.outdoor_humidity", 1.0),
+                (FieldSuffix.OUTDOOR_TEMPERATURE(GLOBAL), 1.0),
+                (FieldSuffix.OUTDOOR_HUMIDITY(GLOBAL), 1.0),
             ),
             min_sources=2,
             max_age=timedelta(minutes=15),
@@ -549,7 +574,7 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         ),
         # (B) True global MRT: aggregate zonal MRT (already gated by plant_active)
         DerivedSpec(
-            name="global.mrt",
+            name=FieldSuffix.MRT(GLOBAL),
             kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_mrt_inputs),
             method=AggregationMethod.WEIGHTED_MEAN,
@@ -561,12 +586,12 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         ),
         # (B) Global operative temperature uses indoor air + true MRT (NOT hydraulic temps)
         DerivedSpec(
-            name="global.t_op",
+            name=FieldSuffix.T_OPT(GLOBAL),
             kind=DerivedKind.COMPUTE,
             compute=ComputeFn.T_OP_C,
             inputs=(
-                ("global.indoor_temperature", 1.0),
-                ("global.mrt", 1.0),
+                (FieldSuffix.INDOOR_TEMPERATURE(GLOBAL), 1.0),
+                (FieldSuffix.MRT(GLOBAL), 1.0),
             ),
             min_sources=2,
             clamp_min=-10.0,
@@ -575,7 +600,7 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             hold_last_good=timedelta(minutes=5),
         ),
         DerivedSpec(
-            name="global.condensation_margin_min",
+            name=FieldSuffix.CONDENSATION_MARGIN(GLOBAL),
             kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_cm_inputs),
             method=AggregationMethod.MIN,

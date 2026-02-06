@@ -33,11 +33,11 @@ from ..helpers.confort.confort_band import ComfortBandCalculator, ComfortBandRes
 from ..domain.influx import InfluxConfig
 # from ..strategies.plant_regime_pipeline import InfluxSeriesReader, PlantEntities, PlantRegimePipeline, RegimeConfig, RegimeSearchResult, daily_local_mean
 
-from ..helpers.config_sensors import build_sensor_mapping
+from ..helpers.config_sensors import GLOBAL, FieldSuffix, build_sensor_mapping
 
 from ..helpers.sensor_aggregator import SensorAggregator
 
-from ..const import CONF_INDOOR, CONF_RADIANT, DOMAIN, ENTITIES_OBSERVED_TS, ENTITIES_STATE, NAME_AREA_HOME, SEASON_STATE
+from ..const import CONF_CEILING, CONF_INDOOR, CONF_RADIANT, DOMAIN, ENTITIES_OBSERVED_TS, ENTITIES_STATE, NAME_AREA_HOME, SEASON_STATE
 from ..domain.models.runtime_schema import AreaConfig, RuntimeConfig, SensorPair, WeatherConfig
 from ..helpers.config_entries import (
     build_runtime_config,
@@ -162,6 +162,10 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def plant_snapshot(self) -> PlantSnapshot | None:
         return self._plant_snapshot
 
+    @property
+    def sensor_aggregator(self) -> SensorAggregator | None:
+        return self._sensor_aggregator
+    
     @property
     def _entry_store(self) -> dict[str, Any]:
         domain_store = self._hass.data.setdefault(DOMAIN, {})
@@ -345,9 +349,11 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         temps: list[str] = []
         humis: list[str] = []
 
+        sensor_prefix = "Climate Zone"
+
         for area in getattr(self._runtime.climate, "areas", []) or []:
             # i tuoi AreaConfig potrebbero essere dataclass: manteniamo getattr flessibile
-            if getattr(area, CONF_INDOOR, False) and getattr(area, CONF_RADIANT, False):
+            if getattr(area, CONF_INDOOR, False) and getattr(area, CONF_RADIANT, False) and getattr(area, CONF_CEILING, False):
                 sensors = getattr(area, "sensors", None)
                 if not sensors:
                     continue
@@ -357,10 +363,38 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 defs.append(
                     {
+                        "type": "TemperatureSensor",
+                        "area": area.name,
+                        "name": f"{sensor_prefix} {area.name}",
+                        "sensors": SensorPair(
+                            temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
+                            humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
+                        ),
+                        "unit": self._runtime.climate.unit_system.temperature,
+                    }
+                )
+                defs.append(
+                    {
+                        "type": "HumiditySensor",
+                        "area": area.name,
+                        "name": f"{sensor_prefix} {area.name}",
+                        "sensors": SensorPair(
+                            temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
+                            humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
+                        ),
+                        "unit": PERCENTAGE,
+                    }
+                )
+                defs.append(
+                    {
                         "type": "DewpointSensor",
                         "area": area.name,
-                        "name": f"Ambient {area.name}",
-                        "sensors": sensors,
+                        "name": f"{sensor_prefix} {area.name}",
+                        "sensors": SensorPair(
+                            temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
+                            humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
+                            dew_point=FieldSuffix.INDOOR_DEW_POINT(slugify(area.name)),
+                        ),
                         "unit": self._runtime.climate.unit_system.temperature,
                     }
                 )
@@ -368,52 +402,104 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     {
                         "type": "HeatIndexSensor",
                         "area": area.name,
-                        "name": f"Ambient {area.name}",
-                        "sensors": sensors,
+                        "name": f"{sensor_prefix} {area.name}",
+                        "sensors": SensorPair(
+                            temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
+                            humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
+                            heat_index=FieldSuffix.INDOOR_HEAT_INDEX(slugify(area.name)),
+                        ),
+                        "unit": self._runtime.climate.unit_system.temperature,
+                    }
+                )
+            elif getattr(area, CONF_INDOOR, False) is False and getattr(area, CONF_RADIANT, False) is False:
+                defs.append(
+                    {
+                        "type": "TemperatureSensor",
+                        "area": area.name,
+                        "name": f"{sensor_prefix} {area.name}",
+                        "sensors": SensorPair(
+                            temperature=FieldSuffix.OUTDOOR_TEMPERATURE(slugify(area.name)),
+                            humidity=FieldSuffix.OUTDOOR_HUMIDITY(slugify(area.name)),
+                        ),
+                        "unit": self._runtime.climate.unit_system.temperature,
+                    }
+                )
+                defs.append(
+                    {
+                        "type": "HumiditySensor",
+                        "area": area.name,
+                        "name": f"{sensor_prefix} {area.name}",
+                        "sensors": SensorPair(
+                            temperature=FieldSuffix.OUTDOOR_TEMPERATURE(slugify(area.name)),
+                            humidity=FieldSuffix.OUTDOOR_HUMIDITY(slugify(area.name)),
+                        ),
+                        "unit": PERCENTAGE,
+                    }
+                )
+                defs.append(
+                    {
+                        "type": "DewpointSensor",
+                        "area": area.name,
+                        "name": f"{sensor_prefix} {area.name}",
+                        "sensors": SensorPair(
+                            temperature=FieldSuffix.OUTDOOR_TEMPERATURE(slugify(area.name)),
+                            humidity=FieldSuffix.OUTDOOR_HUMIDITY(slugify(area.name)),
+                            dew_point=FieldSuffix.OUTDOOR_DEW_POINT(slugify(area.name)),
+                        ),
                         "unit": self._runtime.climate.unit_system.temperature,
                     }
                 )
 
+
         defs.append(
             {
-                "type": "CurrentTemperatureSensor",
-                "name": f"Ambient {NAME_AREA_HOME}",
-                "temp_sensors": temps,
+                "type": "TemperatureSensor",
+                "name": f"{sensor_prefix} {NAME_AREA_HOME}",
+                "sensors": SensorPair(
+                    temperature=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),
+                    humidity=FieldSuffix.INDOOR_HUMIDITY(GLOBAL),
+                ),
                 "unit": self._runtime.climate.unit_system.temperature,
             }
         )
         defs.append(
             {
-                "type": "CurrentHumiditySensor",
-                "name": f"Ambient {NAME_AREA_HOME}",
-                "humi_sensors": humis,
+                "type": "HumiditySensor",
+                "name": f"{sensor_prefix} {NAME_AREA_HOME}",
+                "sensors": SensorPair(
+                    temperature=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),
+                    humidity=FieldSuffix.INDOOR_HUMIDITY(GLOBAL),
+                ),
                 "unit": PERCENTAGE,
             }
         )
         defs.append(
             {
-                "type": "CurrentDewpointSensor",
-                "name": f"Ambient {NAME_AREA_HOME}",
-                "temp_sensors": temps,
-                "humi_sensors": humis,
+                "type": "DewpointSensor",
+                "name": f"{sensor_prefix} {NAME_AREA_HOME}",
+                "sensors": SensorPair(
+                    temperature=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),
+                    humidity=FieldSuffix.INDOOR_HUMIDITY(GLOBAL),
+                    dew_point=FieldSuffix.INDOOR_DEW_POINT(GLOBAL),
+                ),
                 "unit": self._runtime.climate.unit_system.temperature,
             }
         )
         defs.append(
             {
-                "type": "CurrentHeatIndexSensor",
-                "name": f"Ambient {NAME_AREA_HOME}",
-                "temp_sensors": temps,
-                "humi_sensors": humis,
+                "type": "HeatIndexSensor",
+                "name": f"{sensor_prefix} {NAME_AREA_HOME}",
+                "sensors": SensorPair(
+                    temperature=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),
+                    humidity=FieldSuffix.INDOOR_HUMIDITY(GLOBAL),
+                    heat_index=FieldSuffix.INDOOR_HEAT_INDEX(GLOBAL),
+                ),
                 "unit": self._runtime.climate.unit_system.temperature,
             }
         )
 
         log_debug(_LOGGER, "build_slave_sensor_defs: %d definitions", len(defs))
         return defs
-
-
-
 
     # ---------------------- Event handling -------------------------- #
 

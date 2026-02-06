@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, List
+from typing import Any, Optional, List, cast
 from abc import ABC, abstractmethod
 
 from statistics import fmean
@@ -28,6 +28,8 @@ from homeassistant.const import (
     PERCENTAGE,
     UnitOfTemperature,
 )
+
+from .helpers.sensor_aggregator import AggregatedValue
 
 from .controller.coordinator import ClimateCoordinator
 
@@ -81,6 +83,36 @@ async def async_setup_entry(
         area_data: dict[str, Any] = {}
         for cfg in coordinator.build_slave_sensor_defs():
             log_info(_LOGGER, "Try to add %s", cfg)
+
+            if cfg["type"] == "TemperatureSensor":
+                sensor = TemperatureSensor(
+                    hass=hass,
+                    coordinator=coordinator,
+                    entry=entry,
+                    name=cfg["name"],
+                    area=cfg.get("area"),
+                    sensors=cfg["sensors"],
+                    temperature_unit=cfg["unit"],
+                )
+                # unique_id[sensor.unique_id] = None
+                # area_data["temperature"] = sensor
+                # _set_area_id(cfg.get("area", "default"), "dew_point", sensor)
+                entities.append(sensor)
+
+            if cfg["type"] == "HumiditySensor":
+                sensor = HumiditySensor(
+                    hass=hass,
+                    coordinator=coordinator,
+                    entry=entry,
+                    name=cfg["name"],
+                    sensors=cfg["sensors"],
+                    temperature_unit=cfg["unit"],
+                )
+                # unique_id[sensor.unique_id] = None
+                # area_data["temperature"] = sensor
+                # _set_area_id(cfg.get("area", "default"), "dew_point", sensor)
+                entities.append(sensor)
+
             if cfg["type"] == "DewpointSensor":
                 sensor = DewpointSensor(
                     hass=hass,
@@ -206,11 +238,14 @@ class BaseSensor(
         entry: ConfigEntry,
         name: str,
         unique_key: str,
+        area: Optional[str] = None,
         sensor_unit: UnitOfTemperature | str = UnitOfTemperature.CELSIUS,
     ) -> None:
         super().__init__(coordinator)
         self._hass = hass
+        self._coordinator: ClimateCoordinator = cast(ClimateCoordinator, coordinator)
         self._entry = entry
+        self._area = area
         self._attr_name = name
         # unique_id stabile e safe
         self._attr_unique_id: str = slugify(f"{entry.entry_id}_{unique_key}")
@@ -248,6 +283,8 @@ class BaseSensor(
             pass
         self._window_size = max(1, min(3 * 3600 // interval_s, 1000))
         self._data_series: list[float] = []
+
+        self._zone_snapshot = None
 
     @property
     def _entities_state(self) -> dict[str, Any]:
@@ -291,8 +328,11 @@ class BaseSensor(
     @property
     def extra_state_attributes(self):
         """Return the extra state attributes of the device."""
+        
         data: dict[str, Any] = {}
+        data[ "integration" ] = INTEGRATION_NAME
         data[ "manufacturer" ] = INTEGRATION_MANUFACTURER
+
         return data
 
     async def async_added_to_hass(self) -> None:
@@ -329,6 +369,33 @@ class BaseSensor(
             except Exception as ex:  # noqa: BLE001
                 log_debug(_LOGGER, "Restore skipped for %s: %s", self.entity_id, ex)
 
+
+    def _slave_update_from_aggregator(self, entity_type: str, entity_id: str) -> bool:
+        attr_native_old_value = self._attr_native_value
+
+        if self._area is not None and self._coordinator.plant_snapshot is not None:
+            area = slugify(self._area)
+            indoor_zones = self._coordinator.plant_snapshot.indoor_zones
+            self._zone_snapshot = indoor_zones.get(area) if indoor_zones is not None else None
+
+        if self._coordinator.sensor_aggregator is not None:
+            entity_aggr_value: AggregatedValue = self._coordinator.sensor_aggregator.get(entity_id)
+            
+            if entity_aggr_value.is_stale or entity_aggr_value.is_insufficient or entity_aggr_value.value is None:
+                self._attr_available = False
+                log_warning(_LOGGER, "%s: %s non disponibile (source=%s, stale=%s, insufficient=%s)", 
+                    self.entity_id, entity_type, entity_id, entity_aggr_value.is_stale, entity_aggr_value.is_insufficient
+                )
+                return True
+            
+            self._attr_native_value = entity_aggr_value.value
+            self._attr_available = True
+        else:
+            self._attr_available = False
+            return True
+        
+        return attr_native_old_value != self._attr_native_value
+
     # --- QUI il metodo astratto che i figli DEVONO implementare ---
     @abstractmethod
     def _slave_update(self) -> bool:
@@ -353,6 +420,113 @@ class BaseSensor(
             # importantissimo: notifica HA che lo stato è cambiato
             super()._handle_coordinator_update()
         
+class TemperatureSensor(BaseSensor):
+    """
+    Sensore di Temperatura.
+    """
+
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+    _attr_entity_category = None  # è una misura "normale", non diagnostica
+
+    TEMP_NAME_POSTFIX = "Temperature"
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        coordinator: DataUpdateCoordinator[dict[str, Any]],
+        entry: ConfigEntry,
+        name: str,
+        sensors: SensorPair,
+        area: Optional[str] = None,
+        temperature_unit: UnitOfTemperature | str = UnitOfTemperature.CELSIUS,
+    ) -> None:
+        super().__init__(
+            hass=hass,
+            coordinator=coordinator,
+            entry=entry,
+            name=f"{name} {self.TEMP_NAME_POSTFIX}",
+            unique_key=f"{name} {self.TEMP_NAME_POSTFIX} uid",
+            area=area,
+            sensor_unit=temperature_unit,
+        )
+
+        self._sensors = sensors
+
+    @property
+    def extra_state_attributes(self):
+        """Return the extra state attributes of the device."""
+        def fnum(x, nd=1):
+            return f"{x:.{nd}f}" if x is not None else "-"
+        def fbool(b, on="on", off="off"):
+            return on if b is True else (off if b is False else "-")
+        
+        data: dict[str, Any] = super().extra_state_attributes
+
+        if self._area is not None and self._zone_snapshot is not None:
+            cb = self._zone_snapshot.confort_band
+            if cb is not None:
+                data[ "air band" ] = (
+                    f"in band={fbool(cb.v_air_best >= cb.v_air_lo and cb.v_air_best <= cb.v_air_hi, on='yes', off='no')}, "
+                    f"speed={fnum(cb.speed, 0)}, "
+                    f"best={fnum(cb.v_air_best, 2)}, "
+                    f"low={fnum(cb.v_air_lo, 2)}, "
+                    f"hi={fnum(cb.v_air_hi, 2)}"
+                    )
+                data[ "t band" ] = (
+                    f"in band={fbool(cb.t_op is not None and cb.t_op >= cb.t_op_min and cb.t_op <= cb.t_op_max, on='yes', off='no')}, "
+                    f"t_op={fnum(cb.t_op)}, "
+                    f"t_min={fnum(cb.t_op_min)}, "
+                    f"t_max={fnum(cb.t_op_max)}, "
+                    f"[pmv={fnum(cb.pmv)}, ppd={fnum(cb.ppd)}%]"
+                )
+                data[ "pmv legend" ] = (
+                    "-3=molto freddo, -2=freddo, -1=leggermente freddo, 0=neutro, +1=leggermente caldo, +2=caldo, +3=molto caldo"
+                )
+
+        return data
+    
+    def _slave_update(self) -> bool:
+        """..."""
+        return self._slave_update_from_aggregator(entity_type=self.TEMP_NAME_POSTFIX, entity_id=self._sensors.temperature)
+
+class HumiditySensor(BaseSensor):
+    """
+    Sensore di Umidità.
+    """
+
+    _attr_device_class = SensorDeviceClass.HUMIDITY
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
+    _attr_entity_category = None  # è una misura "normale", non diagnostica
+
+    HUMI_NAME_POSTFIX = "Humidity"
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        coordinator: DataUpdateCoordinator[dict[str, Any]],
+        entry: ConfigEntry,
+        name: str,
+        sensors: SensorPair,
+        temperature_unit: UnitOfTemperature | str = UnitOfTemperature.CELSIUS,
+    ) -> None:
+        super().__init__(
+            hass=hass,
+            coordinator=coordinator,
+            entry=entry,
+            name=f"{name} {self.HUMI_NAME_POSTFIX}",
+            unique_key=f"{name} {self.HUMI_NAME_POSTFIX} uid",
+            sensor_unit=temperature_unit,
+        )
+
+        self._sensors = sensors
+
+    def _slave_update(self) -> bool:
+        """..."""
+        return self._slave_update_from_aggregator(entity_type=self.HUMI_NAME_POSTFIX, entity_id=self._sensors.humidity)
+    
 class DewpointSensor(BaseSensor):
     """
     Sensore di Punto di Rugiada (Dew Point).
@@ -393,50 +567,58 @@ class DewpointSensor(BaseSensor):
         self._sensors = sensors
 
     def _slave_update(self) -> bool:
-        """
-        Valore nativo del sensore (dew point).
-
-        Ritorna:
-            float | None: dew point nella stessa unità dichiarata dall'entità.
-                          None se mancano i dati o non sono validi.
-        """
-        # Recupero valori grezzi dal registry interno dell’integrazione
-        raw_t = self._entities_state.get(self._sensors.temperature)
-        raw_rh = self._entities_state.get(self._sensors.humidity)
-
-        t_c = as_float(raw_t)
-        rh = as_float(raw_rh)
-
-        if t_c is None or rh is None:
+        """..."""
+        if self._sensors.dew_point is None:
             self._attr_available = False
             return True
+        
+        return self._slave_update_from_aggregator(entity_type=self.DWP_NAME_POSTFIX, entity_id=self._sensors.dew_point)
 
-        # dew_point_celsius richiede T in °C e RH in percento
-        try:
-            dp_c = dew_point_celsius(t_c, rh)
-        except Exception as ex:  # noqa: BLE001
-            log_debug(_LOGGER, "Impossibile calcolare il dew point: %s", ex)
-            self._attr_available = False
-            return True
+    # def _slave_update(self) -> bool:
+    #     """
+    #     Valore nativo del sensore (dew point).
 
-        # Conversione nell'unità richiesta dall'entità
-        if self._target_temp_unit == UnitOfTemperature.FAHRENHEIT:
-            dp_val = celsius_to_fahrenheit(dp_c)
-        else:
-            dp_val = dp_c
+    #     Ritorna:
+    #         float | None: dew point nella stessa unità dichiarata dall'entità.
+    #                       None se mancano i dati o non sono validi.
+    #     """
+    #     # Recupero valori grezzi dal registry interno dell’integrazione
+    #     raw_t = self._entities_state.get(self._sensors.temperature)
+    #     raw_rh = self._entities_state.get(self._sensors.humidity)
 
-        # Aggiorna la rolling window (lista) e calcola media con stdlib
-        self._data_series.append(dp_val)
-        if len(self._data_series) > self._window_size:
-            self._data_series = self._data_series[-self._window_size:]
+    #     t_c = as_float(raw_t)
+    #     rh = as_float(raw_rh)
 
-        avg = fmean(self._data_series) if self._data_series else dp_val
+    #     if t_c is None or rh is None:
+    #         self._attr_available = False
+    #         return True
 
-        attr_native_old_value = self._attr_native_value
-        self._attr_native_value = avg
-        self._attr_available = True
+    #     # dew_point_celsius richiede T in °C e RH in percento
+    #     try:
+    #         dp_c = dew_point_celsius(t_c, rh)
+    #     except Exception as ex:  # noqa: BLE001
+    #         log_debug(_LOGGER, "Impossibile calcolare il dew point: %s", ex)
+    #         self._attr_available = False
+    #         return True
 
-        return attr_native_old_value != self._attr_native_value
+    #     # Conversione nell'unità richiesta dall'entità
+    #     if self._target_temp_unit == UnitOfTemperature.FAHRENHEIT:
+    #         dp_val = celsius_to_fahrenheit(dp_c)
+    #     else:
+    #         dp_val = dp_c
+
+    #     # Aggiorna la rolling window (lista) e calcola media con stdlib
+    #     self._data_series.append(dp_val)
+    #     if len(self._data_series) > self._window_size:
+    #         self._data_series = self._data_series[-self._window_size:]
+
+    #     avg = fmean(self._data_series) if self._data_series else dp_val
+
+    #     attr_native_old_value = self._attr_native_value
+    #     self._attr_native_value = avg
+    #     self._attr_available = True
+
+    #     return attr_native_old_value != self._attr_native_value
 
 class HeatIndexSensor(BaseSensor):
     """
@@ -485,43 +667,11 @@ class HeatIndexSensor(BaseSensor):
         """
         Ritorna l’Heat Index nella stessa unità dell’entità (°C o °F).
         """
-        # 1) leggi valori sorgente
-        raw_t = self._entities_state.get(self._sensors.temperature)
-        raw_rh = self._entities_state.get(self._sensors.humidity)
-
-        t_c = as_float(raw_t)
-        rh = as_float(raw_rh)
-        if t_c is None or rh is None:
+        if self._sensors.heat_index is None:
             self._attr_available = False
             return True
-
-        # 2) normalizza RH (accetta 0..1 o 0..100) + clamping
-        if 0.0 <= rh <= 1.0:
-            rh *= 100.0
-        rh = max(0.0, min(100.0, rh))
-
-        # 3) calcola HI in °C usando il tuo helper
-        try:
-            hi_c = float(heat_index_celsius(t_c, rh))
-        except Exception as ex:  # noqa: BLE001
-            log_debug(_LOGGER, "Impossibile calcolare Heat Index per T=%s°C RH=%s%%: %s", t_c, rh, ex)
-            self._attr_available = False
-            return True
-
-        # 4) conversione unità finale
-        hi_val = celsius_to_fahrenheit(hi_c) if self._target_temp_unit == UnitOfTemperature.FAHRENHEIT else hi_c
-
-        # Aggiorna la rolling window (lista) e calcola media con stdlib
-        self._data_series.append(hi_val)
-        if len(self._data_series) > self._window_size:
-            self._data_series = self._data_series[-self._window_size:]
-
-        avg = fmean(self._data_series) if self._data_series else hi_val
-        attr_native_old_value = self._attr_native_value
-        self._attr_native_value = avg
-        self._attr_available = True
-
-        return attr_native_old_value != self._attr_native_value
+        
+        return self._slave_update_from_aggregator(entity_type=self.HNX_NAME_POSTFIX, entity_id=self._sensors.heat_index)
 
 class CurrentTemperatureSensor(BaseSensor):
     _attr_device_class = SensorDeviceClass.TEMPERATURE

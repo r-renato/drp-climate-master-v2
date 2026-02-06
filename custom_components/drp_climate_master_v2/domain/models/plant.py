@@ -464,10 +464,10 @@ class PlantSnapshot:
                 if cb:
                     conf_band_air = (
                         f":: Opr. season: {cb.season} "
-                        f"Air set: {fnum(cb.speed)} "
-                        f"Air best: {fnum(cb.v_air_best)} "
-                        f"Air low: {fnum(cb.v_air_lo)} "
-                        f"Air High: {fnum(cb.v_air_hi)} "
+                        f"Air set: {fnum(cb.speed, 2)} "
+                        f"Air best: {fnum(cb.v_air_best, 2)} "
+                        f"Air low: {fnum(cb.v_air_lo, 2)} "
+                        f"Air High: {fnum(cb.v_air_hi, 2)} "
                     )
                     conf_band_pov = (
                         f":: t_op: {cb.t_op} °C "
@@ -543,9 +543,9 @@ class PlantSnapshot:
                 conf_band_air = (
                     f":: Opr. season: {cb.season} "
                     f"Air set: {fnum(cb.speed)} "
-                    f"Air best: {fnum(cb.v_air_best)} "
-                    f"Air low: {fnum(cb.v_air_lo)} "
-                    f"Air High: {fnum(cb.v_air_hi)} "
+                    f"Air best: {fnum(cb.v_air_best, 2)} "
+                    f"Air low: {fnum(cb.v_air_lo, 2)} "
+                    f"Air High: {fnum(cb.v_air_hi, 2)} "
                 )
                 conf_band_pov = (
                     f":: t_op: {cb.t_op} °C "

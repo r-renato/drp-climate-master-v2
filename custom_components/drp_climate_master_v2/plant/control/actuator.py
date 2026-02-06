@@ -8,12 +8,11 @@ from typing import Any, Optional
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from ..coordinator import ClimateCoordinator
+from custom_components.drp_climate_master_v2.plant.decision.zone.config import ControlConfig
+
+from ...controller.coordinator import ClimateCoordinator
 from ...domain.models.plant import PlantSnapshot
 from ...helpers.utils import slugify
-
-from .config import ControlConfig
-from .contracts import ControlPlan
 
 _LOGGER = logging.getLogger(__name__)
 

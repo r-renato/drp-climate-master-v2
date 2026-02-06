@@ -548,10 +548,12 @@ class PlantDecisionPlanner:
         if snapshot.supply_unit:
             su = snapshot.supply_unit
             s.debug.update({
-                "adj_supply_flow_c": as_float(getattr(getattr(su, "adj_supply_flow", None), "value", None)),
-                "adj_return_flow_c": as_float(getattr(getattr(su, "adj_return_flow", None), "value", None)),
-                "direct_supply_flow_c": as_float(getattr(getattr(su, "direct_supply_flow", None), "value", None)),
-                "direct_return_flow_c": as_float(getattr(getattr(su, "direct_return_flow", None), "value", None)),
+                "adj_supply_flow_c": as_float(getattr(su, "sensor_adjustable_temp_system_supply", None)),
+                "adj_return_flow_c": as_float(getattr(su, "sensor_adjustable_temp_system_return", None)),
+                "direct_supply_flow_c": as_float(getattr(su, "sensor_direct_temp_system_supply", None)),
+                "direct_return_flow_c": as_float(getattr(su, "sensor_direct_temp_system_return", None)),
+                "boiler_supply_flow_c": as_float(getattr(su, "sensor_boiler_temp_system_supply", None)),
+                "boiler_return_flow_c": as_float(getattr(su, "sensor_boiler_temp_system_return", None)),
             })
 
     def _fill_vmc_commands(self, dec: PlantDecision, snapshot: PlantSnapshot, demand: PlantDemandSignals) -> None:
@@ -578,11 +580,15 @@ class PlantDecisionPlanner:
         if snapshot.vmc:
             vmc = snapshot.vmc
             v.debug.update({
-                "device_power": getattr(vmc, "device_power", None),
-                "req_water": getattr(vmc, "req_water", None),
-                "req_heating": getattr(vmc, "req_heating", None),
-                "req_cooling": getattr(vmc, "req_cooling", None),
-                "req_dehumidif": getattr(vmc, "req_dehumidif", None),
-                "ambient_t_c": as_float(getattr(getattr(vmc, "sensor_ambient_t", None), "value", None)),
-                "ambient_rh_pct": as_float(getattr(getattr(vmc, "sensor_ambient_rh", None), "value", None)),
+                "device_power": getattr(vmc, "power_on", None),
+                "req_water": getattr(vmc, "request_water", None),
+                "req_heating": getattr(vmc, "request_heating", None),
+                "req_cooling": getattr(vmc, "request_cooling", None),
+                "req_dehumidif": getattr(vmc, "request_dehumidification", None),
+                "ambient_t_c": as_float(getattr(vmc, "sensor_t_ambient", None)),
+                "ambient_rh_pct": as_float(getattr(vmc, "sensor_h_ambient", None)),
+                "water_t_c": as_float(getattr(vmc, "sensor_t_water", None)),
+                "outdoor_t_c": as_float(getattr(vmc, "sensor_t_outdoor", None)),
+                "alarm_dew_point": getattr(vmc, "alarm_dew_point", None),
+                "alarm_general": getattr(vmc, "alarm_alarm", None),
             })

@@ -8,32 +8,72 @@ from .policy_layer import PolicyDecision
 
 from ...domain.models.season import OperativeSeason
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class ComfortBandResult:
-    """Result of comfort band computation for a room/zone."""
+    """
+    Output della computazione della *comfort band* per una specifica stanza/zona.
+
+    Questa struttura rappresenta:
+    - Il contesto di calcolo (zona, stagione operativa, velocità aria impostata/stimata).
+    - La fascia di velocità dell'aria "ammissibile" e un valore preferibile.
+    - La banda di temperatura operativa (T_op) ritenuta confortevole per il contesto.
+    - La valutazione del punto corrente (T_op attuale, PMV/PPD, esito OK).
+    - Metadati diagnostici utili per audit/debug della policy (PMV target/ampiezza, met/clo effettivi).
+
+    Note:
+        - `t_op_min`/`t_op_max` definiscono la banda di comfort per la zona.
+        - Se `t_op` è None significa che il punto corrente non è disponibile (es. sensori mancanti).
+        - `ok` è tipicamente True se `t_op` rientra nella banda e/o se PMV è entro soglia.
+    """
 
     room: str
+    """Slug/nome della stanza o zona a cui si riferisce il calcolo (es. 'kitchen', 'living')."""
+
     season: OperativeSeason
+    """Stagione operativa (es. WINTER/SUMMER/SHOULDER) usata per scegliere i parametri di comfort."""
+
     speed: int
+    """Livello/step di ventilazione o velocità aria (indice discreto) usato per determinare v_air e limiti."""
 
     v_air_best: float
+    """Velocità aria [m/s] ritenuta ottimale/target per il contesto (es. per minimizzare scostamento PMV)."""
+
     v_air_lo: float
+    """Limite inferiore della velocità aria [m/s] ammessa nella banda (vincoli comfort o policy)."""
+
     v_air_hi: float
+    """Limite superiore della velocità aria [m/s] ammessa nella banda (vincoli comfort o policy)."""
 
     t_op_min: float
+    """Limite inferiore della temperatura operativa [°C] considerata confortevole per il contesto."""
+
     t_op_max: float
+    """Limite superiore della temperatura operativa [°C] considerata confortevole per il contesto."""
 
-    # current point evaluation
     t_op: Optional[float] = None
-    pmv: Optional[float] = None
-    ppd: Optional[float] = None
-    ok: Optional[bool] = None
+    """Temperatura operativa corrente [°C] della zona (se disponibile)."""
 
-    # policy diagnostics (optional but very useful)
+    pmv: Optional[float] = None
+    """PMV corrente (Predicted Mean Vote) calcolato sul punto corrente (se disponibile)."""
+
+    ppd: Optional[float] = None
+    """PPD corrente (Predicted Percentage Dissatisfied) calcolato sul punto corrente (se disponibile)."""
+
+    ok: Optional[bool] = None
+    """Esito della verifica comfort sul punto corrente (True/False) o None se valutazione non eseguibile."""
+
     pmv_center: Optional[float] = None
+    """Valore target/centrale di PMV usato per definire la banda (es. 0.0 o leggermente negativo in inverno)."""
+
     pmv_band: Optional[float] = None
+    """Semi-ampiezza ammessa attorno a `pmv_center` (es. 0.5 significa PMV in [center-0.5, center+0.5])."""
+
     met_used: Optional[float] = None
+    """Valore MET effettivamente usato nel calcolo PMV/PPD (attività metabolica), tipicamente ~1.0-1.3."""
+
     clo_used: Optional[float] = None
+    """Valore CLO effettivamente usato nel calcolo PMV/PPD (isolamento vestiario), tipicamente ~0.5-1.2."""
+
 
 
 class ComfortBandCalculator:

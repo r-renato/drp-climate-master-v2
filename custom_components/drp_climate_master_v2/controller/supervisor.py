@@ -75,6 +75,7 @@ from ..plant.decision.planner import PlantDecisionPlanner
 
 from ..const import DOMAIN
 from ..helpers.logger import log_debug, log_exception, log_info
+from ..helpers.diagnostics.dashboard import build_dashboard, render_dashboard_text
 from ..helpers.scheduler import IntervalGatedSchedulerBase
 
 from ..domain.enums import HVACOperatingProfile
@@ -305,6 +306,9 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                             reason="tick",
                         )
                         log_debug(_LOGGER, "PlantDecision %s", self._last_plant_decision)
+                        
+                        dash = build_dashboard(snap, self._last_zones_decision, self._last_plant_decision)
+                        log_debug(_LOGGER, "\n%s", render_dashboard_text(dash))
                         # self._last_plant_decision = await self._plant_engine.async_run_once(
                         #     snapshot=snap,
                         #     reason="tick",
