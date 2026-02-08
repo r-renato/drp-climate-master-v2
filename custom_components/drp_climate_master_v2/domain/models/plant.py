@@ -484,11 +484,11 @@ class PlantSnapshot:
                         f"clo_used: {fnum(cb.clo_used)} "
                     )
                     lines += [
-                        f"  {pad("confort band Air", width=18, align="right")} "
+                        f"  {pad('confort band Air', width=18, align='right')} "
                         f"{conf_band_air}",
-                        f"  {pad("Pov", width=18, align="right")} "
+                        f"  {pad('Pov', width=18, align='right')} "
                         f"{conf_band_pov}",
-                        f"  {pad("diagnostic", width=18, align="right")} "
+                        f"  {pad('diagnostic', width=18, align='right')} "
                         f"{conf_band_diagnostic}"
                     ]
 
@@ -532,7 +532,7 @@ class PlantSnapshot:
             )
 
             lines += [
-                f"  {pad("Indoor means", width=16)}   "
+                f"  {pad('Indoor means', width=16)}   "
                 f"{pad(sensors, width=44)}   -   "
                 f"[Flow:{fnum(z.flow_t)} °C Ret:{fnum(z.return_t)} °C] "
                 f"Valve:{fav(z.radiant_valve, 0)} "
@@ -562,11 +562,11 @@ class PlantSnapshot:
                     f"clo_used: {fnum(cb.clo_used)} "
                 )
                 lines += [
-                    f"  {pad("confort band Air", width=18, align="right")} "
+                    f"  {pad('confort band Air', width=18, align='right')} "
                     f"{conf_band_air}",
-                    f"  {pad("Pov", width=18, align="right")} "
+                    f"  {pad('Pov', width=18, align='right')} "
                     f"{conf_band_pov}",
-                    f"  {pad("diagnostic", width=18, align="right")} "
+                    f"  {pad('diagnostic', width=18, align='right')} "
                     f"{conf_band_diagnostic}"
                 ]
 
@@ -681,7 +681,6 @@ class PlantSnapshot:
         lines += [f"------------------------------------------------------------------"]
 
         return "\n".join(lines)
-
 
 
 

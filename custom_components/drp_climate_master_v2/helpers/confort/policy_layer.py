@@ -584,6 +584,7 @@ class PolicyDecision:
     v_air_best_scale: float = 1.0
     v_air_hi_scale: float = 1.0
     v_air_lo_override: Optional[float] = None
+    draft_robustness: Optional[float] = None
 
     # Optional compliance flags (None = not evaluated)
     heating_allowed: Optional[bool] = None
@@ -728,6 +729,16 @@ class ComfortPolicyLayer:
         # 4) v_air scaling (draft calibration)
         v_best_s, v_hi_s, v_lo_override = self._v_air_policy(ctx, vmc_speed, reasons)
 
+        # Draft robustness (optional): used by ComfortBandCalculator to blend v_best/v_hi
+        draft_alpha: Optional[float] = None
+        is_living: Optional[bool] = self._is_living(ctx.room) if ctx.room is not None else None
+        if is_living is not None:
+            draft_alpha = 0.55 if is_living else 0.35
+            if ctx.mode == HVACOperatingProfile.SLEEP:
+                draft_alpha = min(1.0, draft_alpha + 0.10)
+            if (vmc_speed >= 4) and (not is_living):
+                draft_alpha = max(0.0, draft_alpha - 0.05)
+
         # 5) optional compliance gating
         heating_allowed, cooling_allowed = self._compliance(ctx, reasons)
 
@@ -740,6 +751,7 @@ class ComfortPolicyLayer:
             v_air_best_scale=float(v_best_s),
             v_air_hi_scale=float(v_hi_s),
             v_air_lo_override=v_lo_override,
+            draft_robustness=draft_alpha,
             heating_allowed=heating_allowed,
             cooling_allowed=cooling_allowed,
             reasons=tuple(reasons),

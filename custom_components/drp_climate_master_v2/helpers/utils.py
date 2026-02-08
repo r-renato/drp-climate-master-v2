@@ -24,7 +24,9 @@ def _first_number_token(text: str) -> str | None:
     m = _NUM_RE.search(text)
     return m.group(0) if m else None
 
-def _clamp[T: (int|float)](value: T, min_value: T | None, max_value: T | None) -> T:
+TNum = TypeVar("TNum", int, float)
+
+def _clamp(value: TNum, min_value: TNum | None, max_value: TNum | None) -> TNum:
     if min_value is not None and value < min_value:
         value = min_value
     if max_value is not None and value > max_value:
@@ -516,5 +518,4 @@ def pad(
         left = missing // 2
         right = missing - left
         return make_pad(left) + s + make_pad(right)
-
 

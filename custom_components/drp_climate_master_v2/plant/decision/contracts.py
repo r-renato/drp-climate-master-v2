@@ -171,28 +171,28 @@ class PlantDemandSignals:
         default=0.0,
         metadata={"doc": "tbd"},
     )
-    heat_override: bool = field(
-        default=False,
+    heat_override: Optional[bool] = field(
+        default=None,
         metadata={"doc": "tbd"},
     )
-    heat_quorum_ok: bool = field(
-        default=False,
+    heat_quorum_ok: Optional[bool] = field(
+        default=None,
         metadata={"doc": "tbd"},
     )
-    heat_mean_ok: bool = field(
-        default=False,
+    heat_mean_ok: Optional[bool] = field(
+        default=None,
         metadata={"doc": "tbd"},
     )
-    cool_override: bool = field(
-        default=False,
+    cool_override: Optional[bool] = field(
+        default=None,
         metadata={"doc": "tbd"},
     )
-    cool_quorum_ok: bool = field(
-        default=False,
+    cool_quorum_ok: Optional[bool] = field(
+        default=None,
         metadata={"doc": "tbd"},
     )
-    cool_mean_ok: bool = field(
-        default=False,
+    cool_mean_ok: Optional[bool] = field(
+        default=None,
         metadata={"doc": "tbd"},
     )
     any_heat: bool = field(
@@ -480,4 +480,3 @@ class PlantDecision:
         lines += [f"------------------------------------------------------------------"]
 
         return "\n".join(lines)
-

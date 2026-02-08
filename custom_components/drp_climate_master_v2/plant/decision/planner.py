@@ -281,7 +281,7 @@ class PlantDecisionPlanner:
         # --------------------
         hvac_mode_raw = getattr(snapshot, "climate_hvac_mode", None)
         hvac_mode_val = getattr(hvac_mode_raw, "value", hvac_mode_raw)
-        hvac_mode_s = str(hvac_mode_val).strip().lower() if hvac_mode_val is not None else "off"
+        hvac_mode_s = str(hvac_mode_val).strip().lower() if hvac_mode_val is not None else "auto"
 
         preset_raw = getattr(snapshot, "climate_preset_mode", None)
         profile = HVACOperatingProfile.from_value(preset_raw, default=HVACOperatingProfile.COMFORT) or HVACOperatingProfile.COMFORT
