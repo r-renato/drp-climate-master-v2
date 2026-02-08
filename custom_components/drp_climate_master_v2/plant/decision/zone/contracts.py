@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Mapping, Optional
+from collections.abc import MutableMapping
 
 
 @dataclass(slots=True)
@@ -30,7 +31,7 @@ class ZonesDecision:
     # Diagnostics
     reason: str = ""
     warnings: list[str] = field(default_factory=list)
-    meta: Mapping[str, Any] = field(default_factory=dict)
+    meta: MutableMapping[str, Any] = field(default_factory=dict)
 
     @property
     def any_heat_demand(self) -> bool:
@@ -141,5 +142,4 @@ class ZonesDecision:
 
         lines += [f"------------------------------------------------------------------"]
         return "\n".join(lines)
-
 

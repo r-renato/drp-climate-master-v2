@@ -45,7 +45,7 @@ from ..helpers.config_entries import (
     subscribe_entity_state_changes,
 )
 from ..helpers.logger import log_debug, log_info, log_warning
-from ..helpers.utils import slugify
+from ..helpers.utils import as_int, slugify
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -589,6 +589,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         season_state = self._season_state
         vmc_speed = self._entities_state.get(runtime_vmc.spare_setpoint) if runtime_vmc else None
+        vmc_air_speed = as_int(vmc_speed.state) if vmc_speed and vmc_speed.state is not None else None
 
         # log_debug(_LOGGER, "runtime_vmc.spare_setpoint %s", runtime_vmc.spare_setpoint if runtime_vmc else "***")
         # log_debug(_LOGGER, "self._entities_state.keys %s", self._entities_state.keys())
@@ -626,7 +627,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             return area_confort_band
 
-        if season_state and runtime_vmc and vmc_speed and self._climate_preset_mode:
+        if season_state and runtime_vmc and vmc_air_speed and self._climate_preset_mode:
 
             for area in self._runtime.climate.areas:
                 name = slugify(area.name)
@@ -665,12 +666,12 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 #     policy=decision,  # <-- QUI
                 # )
 
-                area_confort_band = _compute_area_confort_band(self, name, season_state.season, int(vmc_speed.state))
+                area_confort_band = _compute_area_confort_band(self, name, season_state.season, vmc_air_speed)
  
                 if area_confort_band:
                     result[name] = area_confort_band
 
-            area_confort_band = _compute_area_confort_band(self, "global", season_state.season, int(vmc_speed.state))
+            area_confort_band = _compute_area_confort_band(self, "global", season_state.season, vmc_air_speed)
             if area_confort_band:
                 result["global_indoor"] = area_confort_band
         else:

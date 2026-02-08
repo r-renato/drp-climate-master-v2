@@ -50,6 +50,12 @@ class ComfortBandResult:
     t_op_max: float
     """Limite superiore della temperatura operativa [°C] considerata confortevole per il contesto."""
 
+    v_air_draft: Optional[float] = None
+    """
+    Velocità aria [m/s] effettivamente usata per il calcolo del limite basso `t_op_min`.
+    Serve per evitare un bound troppo conservativo (correnti d'aria "worst-case" sempre attive).
+    """
+
     t_op: Optional[float] = None
     """Temperatura operativa corrente [°C] della zona (se disponibile)."""
 
@@ -256,6 +262,46 @@ class ComfortBandCalculator:
     def _clo_for_season(self, season: OperativeSeason) -> float:
         return self._clo_map.get(season, self._clo_map[OperativeSeason.SHOULDER])
 
+    def _default_draft_robustness(self, room: str, season: OperativeSeason) -> float:
+        """
+        Quanto essere conservativi sul bound basso (correnti d'aria).
+        0.0 = usa v_best (meno conservativo)
+        1.0 = usa v_hi (vecchio comportamento: più conservativo)
+
+        Default consigliato:
+          - living: più esposto a movimento aria / volumi -> un po' più robusto
+          - altre stanze: meno robusto (tipico residenziale radiante)
+        """
+        _ = season
+        r = self._norm_room(room)
+        is_living = (r == "living") or ("soggiorno" in r) or ("salotto" in r)
+        if is_living:
+            return 0.55
+        return 0.35
+
+    def _resolve_eval_temperatures(
+        self,
+        *,
+        t_op_current: Optional[float],
+        ta_current: Optional[float],
+        tr_current: Optional[float],
+    ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """
+        Ritorna (t_op_eval, ta_eval, tr_eval).
+        - t_op_eval: scalare usato per verificare in-band (se non fornito, stimato come (Ta+Tr)/2)
+        - ta_eval/tr_eval: usati per PMV/PPD corrente (se mancanti, fallback su t_op_eval)
+        """
+        if t_op_current is not None:
+            t_op_eval = float(t_op_current)
+        elif ta_current is not None and tr_current is not None:
+            t_op_eval = 0.5 * (float(ta_current) + float(tr_current))
+        else:
+            t_op_eval = None
+
+        ta_eval = float(ta_current) if ta_current is not None else t_op_eval
+        tr_eval = float(tr_current) if tr_current is not None else t_op_eval
+        return t_op_eval, ta_eval, tr_eval
+
     def _pmv_at_top(
         self,
         *,
@@ -384,12 +430,15 @@ class ComfortBandCalculator:
         season: OperativeSeason | str,
         rh_pct: float,
         t_op_current: Optional[float] = None,
+        ta_current: Optional[float] = None,
+        tr_current: Optional[float] = None,
         # policy-aware knobs (all optional)
         policy: Optional[PolicyDecision] = None,
         met_override: Optional[float] = None,
         clo_override: Optional[float] = None,
         pmv_center: Optional[float] = None,
         pmv_band: Optional[float] = None,
+        draft_robustness: Optional[float] = None,
     ) -> ComfortBandResult:
         """Return Cat-like comfort band over T_op plus current evaluation if provided.
 
@@ -418,17 +467,29 @@ class ComfortBandCalculator:
             v_air_lo_override=v_lo_ovr,
         )
 
+        # --- Draft robustness for lower bound (t_op_min) -------------------
+        # Old behavior: always v_hi (worst-case). This is often too conservative in residential/radiant.
+        # New behavior: blend between v_best and v_hi.
+        policy_alpha = getattr(policy, "draft_robustness", None) if policy else None
+        alpha = (
+            float(draft_robustness) if draft_robustness is not None
+            else float(policy_alpha) if policy_alpha is not None
+            else float(self._default_draft_robustness(str(room), season_value))
+        )
+        alpha = max(0.0, min(1.0, alpha))
+        v_draft = float(v_best) + alpha * (float(v_hi) - float(v_best))
+
         # target band around pmv_center
         pmv_lo = pmv_center_used - pmv_band_used
         pmv_hi = pmv_center_used + pmv_band_used
 
         # Robust band:
-        # - lower bound uses v_hi (draft worst-case)
+        # - lower bound uses v_draft (blended draft robustness)
         # - upper bound uses v_lo (still air worst-case)
         t_op_min = self._bisect_temperature_for_pmv(
             target_pmv=float(pmv_lo),
             rh_pct=float(rh_pct),
-            v_air=float(v_hi),
+            v_air=float(v_draft),
             season=season_value,
             met_override=met_used,
             clo_override=clo_used,
@@ -453,6 +514,7 @@ class ComfortBandCalculator:
             v_air_best=float(v_best),
             v_air_lo=float(v_lo),
             v_air_hi=float(v_hi),
+            v_air_draft=float(v_draft),
             t_op_min=float(t_op_min),
             t_op_max=float(t_op_max),
             t_op=None,
@@ -465,20 +527,26 @@ class ComfortBandCalculator:
             clo_used=float(clo_used),
         )
 
-        if t_op_current is not None:
+        t_op_eval, ta_eval, tr_eval = self._resolve_eval_temperatures(
+            t_op_current=t_op_current,
+            ta_current=ta_current,
+            tr_current=tr_current,
+        )
+
+        if t_op_eval is not None and ta_eval is not None and tr_eval is not None:
             pmv, ppd = self.pmv_ppd(
-                ta_c=float(t_op_current),
-                tr_c=float(t_op_current),
+                ta_c=float(ta_eval),
+                tr_c=float(tr_eval),
                 rh_pct=float(rh_pct),
                 v_air=float(v_best),
                 met=float(met_used),
                 clo=float(clo_used),
                 wme=float(self._wme),
             )
-            ok = (float(t_op_min) <= float(t_op_current) <= float(t_op_max))
+            ok = (float(t_op_min) <= float(t_op_eval) <= float(t_op_max))
             res = replace(
                 res,
-                t_op=float(t_op_current),
+                t_op=float(t_op_eval),
                 pmv=float(pmv),
                 ppd=float(ppd),
                 ok=bool(ok),

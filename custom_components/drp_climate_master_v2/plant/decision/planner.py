@@ -104,7 +104,7 @@ class PlantDecisionPlanner:
         dec.signals=demand
 
         # --- Determine regime (very first version)
-        mode = self._infer_mode(snapshot, demand)
+        mode = self._infer_mode(snapshot, demand, zones_decision)
         log_debug(_LOGGER, "Computed plant regime: %s", mode)
         dec.mode = mode
 
@@ -241,7 +241,7 @@ class PlantDecisionPlanner:
             vmc_req_water=vmc_req_water,            
         )
 
-    def _infer_mode(self, snapshot: PlantSnapshot, demand: PlantDemandSignals) -> PlantMode:
+    def _infer_mode(self, snapshot: PlantSnapshot, demand: PlantDemandSignals, zones_decision: Optional[ZonesDecision] = None) -> PlantMode:
         """Decide the high-level plant regime.
 
         Inputs
@@ -289,6 +289,11 @@ class PlantDecisionPlanner:
         # Expose to signals for observability (ends up in PlantDecision.signals)
         demand.user_hvac_mode = hvac_mode_s
         demand.user_profile = profile.value
+
+        zones_any_heat = bool(zones_decision.any_heat_demand) if zones_decision else False
+        zones_full_on_pct = zones_decision.meta.get('mpc_full_on_pct') if zones_decision else None
+        demand.zones_any_heat_demand = zones_any_heat
+        demand.zones_full_on_pct = zones_full_on_pct
 
         # Absolute override
         if hvac_mode_s == HVACMode.OFF.value:
@@ -341,7 +346,7 @@ class PlantDecisionPlanner:
             demand.cool_quorum_ok = cool_quorum_ok
             demand.cool_mean_ok = cool_mean_ok
 
-        any_heat = bool(heat_sensible) or vmc_req_heat
+        any_heat = bool(heat_sensible) or vmc_req_heat or bool(demand.zones_any_heat_demand)
         any_cool = bool(cool_sensible) or vmc_req_cool
 
         # Dehumidification may be needed even when there is no sensible surplus.

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Iterable, Optional
 
@@ -13,13 +13,34 @@ from ....helpers.sensor_aggregator import AggregatedValue
 from ....domain.models.plant import PlantSnapshot, ZoneSnapshot
 
 from .contracts import ZoneCommand, ZonesDecision
-from .config import ControlConfig
+from .config import ControlConfig, MpcConfig
 from .rc_model import RcZoneModel
 
 def _binary_sequences(n: int) -> Iterable[list[int]]:
     """Generate all binary sequences of length n (as lists of 0/1)."""
     for bits in itertools.product((0, 1), repeat=n):
         yield list(bits)
+
+def _violates_min_hold(seq: list[int], *, u_prev: int, hold_steps: int) -> bool:
+    if hold_steps <= 1:
+        return False
+    last = int(u_prev)
+    n = len(seq)
+    for i in range(n):
+        u = int(seq[i])
+        if u != last:
+            end = min(n, i + hold_steps)
+            for j in range(i, end):
+                if int(seq[j]) != u:
+                    return True
+            last = u
+        else:
+            last = u
+    return False
+
+def _band_with_slack(*, t_min: float, t_max: float, slack_c: float) -> tuple[float, float]:
+    s = max(0.0, float(slack_c or 0.0))
+    return float(t_min) - s, float(t_max) + s
 
 
 @dataclass(slots=True)
@@ -35,25 +56,87 @@ class ZoneDecisionPlanner:
     cfg: ControlConfig = field(default_factory=ControlConfig)
 
     def plan(self, *, snapshot: PlantSnapshot, reason: str) -> ZonesDecision:
-        mpc = self.cfg.mpc
+        mpc_base = self.cfg.mpc
+        plan = self._plan_once(snapshot=snapshot, reason=reason, mpc=mpc_base, meta_extra={"mpc_retry": False})
+
+        n = len(plan.zones)
+        if n == 0:
+            return plan
+
+        full_on = sum(1 for cmd in plan.zones.values() if (cmd.seq and int(sum(cmd.seq)) == len(cmd.seq)))
+        full_off = sum(1 for cmd in plan.zones.values() if (cmd.seq and int(sum(cmd.seq)) == 0))
+        full_on_pct = 100.0 * full_on / max(1, n)
+        full_off_pct = 100.0 * full_off / max(1, n)
+        plan.meta["mpc_full_on_pct"] = round(full_on_pct, 1)
+        plan.meta["mpc_full_off_pct"] = round(full_off_pct, 1)
+
+        all_in_band = True
+        for zn in plan.zones.keys():
+            z = (snapshot.indoor_zones or {}).get(zn)
+            ok = getattr(getattr(z, "confort_band", None), "ok", None) if z else None
+            if ok is not True:
+                all_in_band = False
+                break
+
+        if (
+            bool(getattr(mpc_base, "degenerate_retry_enabled", False))
+            and full_on_pct >= float(getattr(mpc_base, "degenerate_full_on_pct_thr", 1000.0))
+            and (not bool(getattr(mpc_base, "degenerate_retry_only_if_all_in_band", True)) or all_in_band)
+        ):
+            mpc_retry = replace(
+                mpc_base,
+                comfort_slack_c=float(getattr(mpc_base, "degenerate_retry_comfort_slack_c", mpc_base.comfort_slack_c)),
+                w_comfort=float(mpc_base.w_comfort) * float(getattr(mpc_base, "degenerate_retry_w_comfort_mult", 1.0)),
+                w_energy=float(mpc_base.w_energy) * float(getattr(mpc_base, "degenerate_retry_w_energy_mult", 1.0)),
+                w_switch=float(mpc_base.w_switch) * float(getattr(mpc_base, "degenerate_retry_w_switch_mult", 1.0)),
+            )
+            plan2 = self._plan_once(
+                snapshot=snapshot,
+                reason=reason,
+                mpc=mpc_retry,
+                meta_extra={
+                    "mpc_retry": True,
+                    "mpc_retry_reason": "degenerate_full_on",
+                    "mpc_full_on_pct_prev": round(full_on_pct, 1),
+                },
+            )
+            plan2.warnings.append("mpc_retry_degenerate_full_on")
+            return plan2
+
+        return plan
+
+    def _plan_once(self, *, snapshot: PlantSnapshot, reason: str, mpc: MpcConfig, meta_extra: dict[str, Any] | None = None) -> ZonesDecision:
         ts = snapshot.timestamp if isinstance(snapshot.timestamp, datetime) else dt_util.utcnow()
         # Enforce timezone-aware timestamp (best effort)
         if isinstance(ts, datetime) and ts.tzinfo is None:
             ts = ts.replace(tzinfo=dt_util.UTC)
+
+        meta: dict[str, Any] = {
+            "season": (
+                getattr(getattr(snapshot.season, "season", None), "value", None)
+                if snapshot.season else None
+            ),
+            "windows_closed": snapshot.windows_close_state,
+            "vacation": snapshot.presence_vacation,
+            "mpc": {
+                "dt_minutes": int(mpc.dt_minutes),
+                "horizon_steps": int(mpc.horizon_steps),
+                "w_comfort": float(mpc.w_comfort),
+                "w_energy": float(mpc.w_energy),
+                "w_switch": float(mpc.w_switch),
+                "comfort_slack_c": float(getattr(mpc, "comfort_slack_c", 0.0) or 0.0),
+                "min_switch_minutes": int(getattr(mpc, "min_switch_minutes", 0) or 0),
+            },
+        }
+        if meta_extra:
+            meta.update(meta_extra)
 
         plan = ZonesDecision(
             ts=ts,
             dt_minutes=mpc.dt_minutes,
             horizon_steps=mpc.horizon_steps,
             reason=reason,
-            meta={
-                "season": (
-                    getattr(getattr(snapshot.season, "season", None), "value", None)
-                    if snapshot.season else None
-                ),
-                "windows_closed": snapshot.windows_close_state,
-                "vacation": snapshot.presence_vacation,
-            },
+            meta=meta,
         )
 
         # Outdoor trajectory: first iteration uses a flat profile.
@@ -66,7 +149,7 @@ class ZoneDecisionPlanner:
         if t_out0_av is not None and (getattr(t_out0_av, "is_stale", False) or getattr(t_out0_av, "is_insufficient", False)):
             plan.warnings.append("outdoor_temperature_unreliable")
 
-        t_out_series: list[float] = [float(t_out0)] * mpc.horizon_steps
+        t_out_series: list[float] = [float(t_out0)] * int(mpc.horizon_steps)
 
         if not snapshot.indoor_zones:
             plan.warnings.append("missing_indoor_zones")
@@ -79,6 +162,7 @@ class ZoneDecisionPlanner:
                 t_out_series=t_out_series,
                 windows_closed=snapshot.windows_close_state,
                 reason=reason,
+                mpc=mpc,
             )
             if zd is not None:
                 plan.zones[zone_name] = zd
@@ -93,9 +177,8 @@ class ZoneDecisionPlanner:
         t_out_series: list[float],
         windows_closed: Optional[bool],
         reason: str,
+        mpc: MpcConfig,
     ) -> ZoneCommand | None:
-        mpc = self.cfg.mpc
-
         # We need a controlled variable: prefer operative temperature.
         t_meas = as_float(getattr(zone.t_op, "value", None))
         if t_meas is None:
@@ -149,7 +232,10 @@ class ZoneDecisionPlanner:
             )
 
         # Brute-force enumeration is fine at horizon<=12 (4096 combos).
+        min_hold_steps = int(math.ceil(float(mpc.min_switch_minutes) / max(1.0, float(mpc.dt_minutes))))
         for seq in _binary_sequences(mpc.horizon_steps):
+            if _violates_min_hold(seq, u_prev=u_prev, hold_steps=min_hold_steps):
+                continue
             temps = model.simulate(t0_c=t_meas, t_out_c=t_out_series, u=seq, dt_minutes=mpc.dt_minutes)
 
             # cost terms
@@ -158,13 +244,14 @@ class ZoneDecisionPlanner:
             c_switch = 0.0
 
             last_u = u_prev
+            t_min_eff, t_max_eff = _band_with_slack(t_min=t_min, t_max=t_max, slack_c=getattr(mpc, "comfort_slack_c", 0.0))
             for k, (t_k, u_k) in enumerate(zip(temps, seq)):
                 # Comfort penalty: squared distance outside the band
-                if t_k < t_min:
-                    d = t_min - t_k
+                if t_k < t_min_eff:
+                    d = t_min_eff - t_k
                     c_comfort += d * d
-                elif t_k > t_max:
-                    d = t_k - t_max
+                elif t_k > t_max_eff:
+                    d = t_k - t_max_eff
                     c_comfort += d * d
 
                 c_energy += float(u_k)
@@ -185,8 +272,11 @@ class ZoneDecisionPlanner:
                     "t_meas": t_meas,
                     "t_min": t_min,
                     "t_max": t_max,
+                    "t_min_eff": t_min_eff,
+                    "t_max_eff": t_max_eff,
                     "u_prev": u_prev,
                     "rc": {"tau_h": p.tau_h, "k_c_per_h": p.k_c_per_h},
+                    "min_switch": {"minutes": int(mpc.min_switch_minutes), "hold_steps": int(min_hold_steps)},
                     "terms": {
                         "comfort": c_comfort,
                         "energy": c_energy,

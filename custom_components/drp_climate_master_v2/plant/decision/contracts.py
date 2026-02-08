@@ -133,6 +133,15 @@ class PlantDemandSignals:
         metadata={"doc": "VMC richiede acqua/circolazione (pompa circuito diretto)."},
     )
 
+    zones_any_heat_demand: bool = field(
+        default=False,
+        metadata={"doc": "True se il planner zone (MPC) ha pianificato almeno una valvola ON per heating."},
+    )
+    zones_full_on_pct: Optional[float] = field(
+        default=None,
+        metadata={"doc": "Percentuale di zone FULL-ON (duty=1.0) nel piano MPC, se disponibile."},
+    )
+
     # --- Other ---
     user_hvac_mode: str = field(
         default="off",
@@ -403,6 +412,8 @@ class PlantDecision:
                 f"  VMC req cooling    :: {fbool(s.vmc_req_cooling, 'True', 'False')}",
                 f"  VMC req dehumidif  :: {fbool(s.vmc_req_dehumidif, 'True', 'False')}",
                 f"  VMC req water      :: {fbool(s.vmc_req_water, 'True', 'False')}",
+                f"  Zones MPC heat     :: {fbool(getattr(s, 'zones_any_heat_demand', False), 'True', 'False')}",
+                f"  Zones MPC full-on  :: {fnum(getattr(s, 'zones_full_on_pct', None), 1)} %",
                 # per-zone maps (compatte)
                 f"  Heat def by zone   :: {fdict_compact(s.heat_def_by_zone_c, nd=1)}",
                 f"  Cool sur by zone   :: {fdict_compact(s.cool_sur_by_zone_c, nd=1)}",
@@ -469,5 +480,4 @@ class PlantDecision:
         lines += [f"------------------------------------------------------------------"]
 
         return "\n".join(lines)
-
 
