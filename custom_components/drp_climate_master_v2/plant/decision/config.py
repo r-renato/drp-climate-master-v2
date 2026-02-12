@@ -98,6 +98,15 @@ class PlantPlannerConfig:
     cool_rad_supply_min_c: float = 16.0
     cool_rad_supply_max_c: float = 22.0
 
+    # --- MPC (ZonesPlan) integration knobs ---
+    zones_mpc_min_duty_ratio: float = 0.05
+    zones_mpc_full_off_pct: float = 0.0
+    zones_mpc_full_on_pct: float = 50.0
+
+    # Accept MPC heating as "preheat" only when close to lower bound.
+    # Uses min(T_meas - T_min) across zones.
+    zones_mpc_preheat_headroom_c: float = 0.4
+
     # ---- VMC (ventilazione/deumidifica; heating/cooling solo boost)
     # Nota: la VMC non deve "trascinare" la PDC salvo condizioni significativamente fuori comfort.
     vmc_mode_winter: str = "winter"
@@ -130,6 +139,7 @@ class PlantPlannerConfig:
 
     # Water request gating: la deumidifica non deve forzare acqua calda/fredda salvo impianti specifici.
     vmc_water_on_for_dehumid: bool = False
+    vmc_dehum_outdoor_dp_headroom_c: float = 0.2
 
     # Ventilation speed policy (0..5)
     vmc_speed_min: int = 0
@@ -142,3 +152,16 @@ class PlantPlannerConfig:
     vmc_speed_dp_boost_step3_c: float = 1.8
 
     vmc_recirculation: str = "off"
+
+    # ---- Vacation policy ------------------------------------------------
+    # In VACATION, the plant may go fully OFF (including VMC), unless there is
+    # a humidity/dew-point safety reason to keep ventilation/dehumidification on.
+    vacation_allows_vmc_off: bool = True
+
+    # Dew-point hysteresis used ONLY for VACATION safety gating.
+    # Wider than normal to reduce hunting while the home is empty.
+    vacation_ddp_on_c: float = 0.8
+
+    # If dew risk is detected in VACATION during summer/shoulder, allow DEHUM_ASSIST
+    # (PDC cooling for latent control). If False, fallback to VENT_ONLY.
+    vacation_allow_dehum_assist: bool = True

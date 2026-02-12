@@ -155,6 +155,16 @@ class PlantDemandSignals:
         metadata={"doc": "Mappa {zona: surplus cooling} in °C."},
     )
 
+    # --- Comfort headroom (diagnostic / MPC preheat gating) ---
+    heat_headroom_min_c: Optional[float] = field(
+        default=None,
+        metadata={"doc": "Minimo (T_meas - T_min) tra zone valide. Valori piccoli => vicino al limite basso. [°C]"},
+    )
+    cool_headroom_min_c: Optional[float] = field(
+        default=None,
+        metadata={"doc": "Minimo (T_max - T_meas) tra zone valide. Valori piccoli => vicino al limite alto. [°C]"},
+    )
+
     # --- Profile-aware multi-zone demand metrics ---
     heat_def_wmean_c: float = field(
         default=0.0,
@@ -186,6 +196,14 @@ class PlantDemandSignals:
         default=None,
         metadata={"doc": "Dew point massimo tra zone (worst-case anticondensa). [°C]"},
     )
+    outdoor_dp_c: Optional[float] = field(
+        default=None,
+        metadata={"doc": "Dew point esterno (best-effort) per valutare fattibilità deumidifica via sola ventilazione. [°C]"},
+    )
+    vmc_dehum_feasible: Optional[bool] = field(
+        default=None,
+        metadata={"doc": "True se la deumidifica richiesta è fisicamente fattibile con l'hardware/config."},
+    )
 
     # --- VMC requests ---
     vmc_req_heating: bool = field(
@@ -212,6 +230,10 @@ class PlantDemandSignals:
     zones_full_on_pct: Optional[float] = field(
         default=None,
         metadata={"doc": "Percentuale di zone FULL-ON (duty=1.0) nel piano MPC, se disponibile."},
+    )
+    zones_mpc_heat_preheat_ok: Optional[bool] = field(
+        default=None,
+        metadata={"doc": "True se la richiesta MPC di heating è accettata come preheat (headroom basso, ecc.)."},
     )
 
     # --- Other ---
@@ -457,6 +479,8 @@ class PlantDecision:
                 # demand worst-case
                 f"  Heat def max       :: {fnum(s.heat_def_max_c)} °C",
                 f"  Cool sur max       :: {fnum(s.cool_sur_max_c)} °C",
+                f"  Heat headroom min  :: {fnum(getattr(s, 'heat_headroom_min_c', None))} °C",
+                f"  Cool headroom min  :: {fnum(getattr(s, 'cool_headroom_min_c', None))} °C",
                 # demand means + quorum
                 f"  Heat def mean      :: {fnum(s.heat_def_wmean_c)} °C",
                 f"  Heat coverage      :: {fpct01(s.heat_cov, 0)} ({fmb(s.heat_metric_basis)})",
@@ -479,6 +503,8 @@ class PlantDecision:
                 f"  Cool sensible      :: {fbool(s.cool_sensible, 'True', 'False')}",
                 # dew point safety
                 f"  DP max             :: {fnum(s.dp_max_c)} °C",
+                f"  Outdoor DP         :: {fnum(getattr(s, 'outdoor_dp_c', None))} °C",
+                f"  VMC dehum feasible :: {fbool(getattr(s, 'vmc_dehum_feasible', None), 'True', 'False')}",
                 # VMC requests
                 f"  VMC req heating    :: {fbool(s.vmc_req_heating, 'True', 'False')}",
                 f"  VMC req cooling    :: {fbool(s.vmc_req_cooling, 'True', 'False')}",
@@ -486,6 +512,7 @@ class PlantDecision:
                 f"  VMC req water      :: {fbool(s.vmc_req_water, 'True', 'False')}",
                 f"  Zones MPC heat     :: {fbool(getattr(s, 'zones_any_heat_demand', False), 'True', 'False')}",
                 f"  Zones MPC full-on  :: {fnum(getattr(s, 'zones_full_on_pct', None), 1)} %",
+                f"  Zones MPC preheat  :: {fbool(getattr(s, 'zones_mpc_heat_preheat_ok', None), 'True', 'False')}",
                 # per-zone maps (compatte)
                 f"  Heat def by zone   :: {fdict_compact(s.heat_def_by_zone_c, nd=1)}",
                 f"  Cool sur by zone   :: {fdict_compact(s.cool_sur_by_zone_c, nd=1)}",

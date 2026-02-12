@@ -101,21 +101,37 @@ class PlantDecisionPlanner:
 
         # --- Extract indoor demand signals
         demand = self._compute_demands(snapshot)
-        log_debug(_LOGGER, "Computed plant demands: %s", demand)
-        dec.signals=demand
 
-        # --- Determine regime (very first version)
+        # --- Determine regime
         mode = self._infer_mode(snapshot, demand, zones_decision)
-        log_debug(_LOGGER, "Computed plant regime: %s", mode)
         dec.mode = mode
 
-        # _infer_mode may enrich 'demand' with user/preset/threshold debug; re-sync signals.
-        dec.signals=demand
+        # Diagnostics / warnings derived from enriched demand
+        if getattr(demand, "vmc_dehum_feasible", None) is False:
+            dec.warnings.append("vmc_dehum_unfeasible_outdoor_dp")
+        if demand.zones_any_heat_demand and getattr(demand, "zones_mpc_heat_preheat_ok", None) is False:
+            dec.warnings.append("zones_mpc_heat_ignored_headroom")
+
+        log_debug(_LOGGER, "Computed plant demands: %s", demand)
+        log_debug(_LOGGER, "Computed plant regime: %s", mode)
+        dec.signals = demand
+
+        # --- HARD dew-guard: if we intended COOLING but the required safe radiant supply
+        # cannot be achieved within configured bounds, degrade mode to avoid condensation risk.
+        # (We still allow DEHUM_ASSIST if latent demand exists.)
+        if dec.mode == PlantMode.COOLING and demand.dp_max_c is not None:
+            safe_required = float(demand.dp_max_c) + float(self.cfg.dp_margin_c) + float(self.cfg.delta_surface_water_c)
+            if safe_required > float(self.cfg.cool_rad_supply_max_c) + 1e-6:
+                dec.warnings.append("dew_guard_unachievable_switch_mode")
+                dec.mode = PlantMode.DEHUM_ASSIST if bool(demand.vmc_req_dehumidif) else PlantMode.VENT_ONLY
 
         # --- Build device commands for the chosen mode
         self._fill_pdc_commands(dec, snapshot, t_out, demand)
         self._fill_supply_commands(dec, snapshot, demand, zones_decision)
         self._fill_vmc_commands(dec, snapshot, demand)
+
+        # --- Coherence validation (PlantMode invariants)
+        dec.warnings.extend(self._validate_decision(dec))
 
         return dec
 
@@ -125,6 +141,8 @@ class PlantDecisionPlanner:
         cool_sur_max = 0.0
         heat_def_by_zone: Dict[str, float] = {}
         cool_sur_by_zone: Dict[str, float] = {}
+        heat_headroom_min_c: Optional[float] = None
+        cool_headroom_min_c: Optional[float] = None
 
         # Weighted/quorum metrics (profile-aware gating)
         heat_den_w = 0.0
@@ -151,6 +169,14 @@ class PlantDecisionPlanner:
             band = getattr(z, "confort_band", None)
             t_min = as_float(getattr(band, "t_op_min", None))
             t_max = as_float(getattr(band, "t_op_max", None))
+
+            # comfort headroom (MPC preheat gating)
+            if t_meas is not None and t_min is not None:
+                hh = float(t_meas) - float(t_min)
+                heat_headroom_min_c = hh if heat_headroom_min_c is None else min(heat_headroom_min_c, hh)
+            if t_meas is not None and t_max is not None:
+                ch = float(t_max) - float(t_meas)
+                cool_headroom_min_c = ch if cool_headroom_min_c is None else min(cool_headroom_min_c, ch)
 
             if t_meas is not None and t_min is not None:
                 d = max(0.0, float(t_min) - float(t_meas))
@@ -222,6 +248,18 @@ class PlantDecisionPlanner:
 
         # --- VMC: ventilazione/deumidifica come primario; heating/cooling solo boost ---
         vmc_dp_sp_c = self._compute_vmc_dp_setpoint_c(snapshot)
+
+        # Outdoor dew point (best effort): disable impossible dehumidification in ventilation-only mode
+        outdoor_dp_c = as_float(getattr(getattr(snapshot, "global_outdoor_dew_point", None), "value", None))
+        if outdoor_dp_c is None:
+            t_out = as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None))
+            rh_out = as_float(getattr(getattr(snapshot, "global_outdoor_humidity", None), "value", None))
+            if t_out is not None and rh_out is not None:
+                try:
+                    outdoor_dp_c = float(dew_point_celsius(t_out, rh_out))
+                except Exception:
+                    outdoor_dp_c = None
+
         vmc_need_dehum = self._vmc_need_dehumidification(dp_max, vmc_dp_sp_c)
         vmc_boost_heat = self._vmc_allow_heat_boost(
             snapshot,
@@ -238,7 +276,14 @@ class PlantDecisionPlanner:
 
         vmc_req_heat = bool(vmc_boost_heat)
         vmc_req_cool = bool(vmc_boost_cool)
-        vmc_req_dehum = bool(vmc_need_dehum or vmc_raw_req_dehum)
+        # Dehumidification feasibility (ventilation-only vs coil water)
+        vmc_dehum_feasible: Optional[bool] = None
+        if bool(self.cfg.vmc_water_on_for_dehumid):
+            vmc_dehum_feasible = True
+        elif outdoor_dp_c is not None:
+            headroom = float(getattr(self.cfg, "vmc_dehum_outdoor_dp_headroom_c", 0.0))
+            vmc_dehum_feasible = outdoor_dp_c <= (float(vmc_dp_sp_c) - headroom)
+        vmc_req_dehum = bool(vmc_need_dehum or vmc_raw_req_dehum) and (vmc_dehum_feasible is not False)
         vmc_req_water = (
             vmc_req_heat
             or vmc_req_cool
@@ -250,6 +295,10 @@ class PlantDecisionPlanner:
             cool_sur_max_c=cool_sur_max,
             heat_def_by_zone_c=heat_def_by_zone,
             cool_sur_by_zone_c=cool_sur_by_zone,
+            heat_headroom_min_c=heat_headroom_min_c,
+            cool_headroom_min_c=cool_headroom_min_c,
+            outdoor_dp_c=outdoor_dp_c,
+            vmc_dehum_feasible=vmc_dehum_feasible,
             # Profile-aware multi-zone demand metrics
             heat_def_wmean_c=float(heat_def_wmean),
             cool_sur_wmean_c=float(cool_sur_wmean),
@@ -369,7 +418,15 @@ class PlantDecisionPlanner:
             demand.cool_quorum_ok = cool_quorum_ok
             demand.cool_mean_ok = cool_mean_ok
 
-        any_heat = bool(heat_sensible) or vmc_req_heat or bool(demand.zones_any_heat_demand)
+        # MPC may schedule heating far from the band; accept it only as preheat close to T_min.
+        zones_preheat_ok = False
+        if zones_any_heat and getattr(demand, "heat_headroom_min_c", None) is not None:
+            zones_preheat_ok = demand.heat_headroom_min_c <= float(getattr(cfg, "zones_mpc_preheat_headroom_c", 0.4))
+        if profile in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
+            zones_preheat_ok = False
+        demand.zones_mpc_heat_preheat_ok = zones_preheat_ok
+
+        any_heat = bool(heat_sensible) or vmc_req_heat or (zones_any_heat and zones_preheat_ok)
         any_cool = bool(cool_sensible) or vmc_req_cool
 
         # Dehumidification may be needed even when there is no sensible surplus.
@@ -396,6 +453,28 @@ class PlantDecisionPlanner:
         else:
             operative = "shoulder"
         demand.operative_season = operative
+
+        # --------------------
+        # 3.a) VACATION override (may switch plant fully OFF, including VMC),
+        #      except when dew-point risk suggests keeping ventilation/dehumidification active.
+        # --------------------
+        if bool(snapshot.presence_vacation) and bool(cfg.vacation_allows_vmc_off):
+            dp_cur = as_float(demand.dp_max_c)
+            dp_sp = float(self._compute_vmc_dp_setpoint_c(snapshot))
+            ddp_vac = float(cfg.vacation_ddp_on_c)
+            dew_risk = (dp_cur is not None) and (float(dp_cur) > (dp_sp + ddp_vac))
+
+            if dew_risk:
+                # Winter: avoid active cooling; keep ventilation only.
+                if operative == "winter":
+                    return PlantMode.VENT_ONLY
+                # Summer/shoulder: allow latent assist if configured and dehumidification is requested.
+                if bool(cfg.vacation_allow_dehum_assist) and bool(demand.vmc_req_dehumidif):
+                    return PlantMode.DEHUM_ASSIST
+                return PlantMode.VENT_ONLY
+
+            # No dew risk: fully OFF (including VMC)
+            return PlantMode.OFF
 
         if operative == "winter":
             if any_heat:
@@ -553,8 +632,11 @@ class PlantDecisionPlanner:
         else:
             s.adj_pump_on = False
 
-        # Circuito diretto (VMC) se la VMC richiede acqua
-        s.direct_pump_on = bool(demand.vmc_req_water)
+        # Circuito diretto (VMC) se la VMC richiede acqua (solo quando il plant è attivo lato idronico)
+        if dec.mode in (PlantMode.HEATING, PlantMode.COOLING, PlantMode.DEHUM_ASSIST):
+            s.direct_pump_on = bool(demand.vmc_req_water)
+        else:
+            s.direct_pump_on = False
 
         # Target mandata radiante (solo come segnale/telemetria, non è ancora un attuatore diretto)
         dp_max = as_float(demand.dp_max_c)
@@ -565,8 +647,20 @@ class PlantDecisionPlanner:
                 s.rad_supply_target_c = float(_clamp(t, cfg.heat_rad_supply_min_c, cfg.heat_rad_supply_max_c))
         elif dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST):
             if dp_max is not None:
-                safe = float(dp_max) + cfg.dp_margin_c + cfg.delta_surface_water_c
-                s.rad_supply_target_c = float(_clamp(safe, cfg.cool_rad_supply_min_c, cfg.cool_rad_supply_max_c))
+                safe_required = float(dp_max) + float(cfg.dp_margin_c) + float(cfg.delta_surface_water_c)
+
+                # HARD guard: if required safe temp is above max allowed, do not run radiant cooling.
+                if safe_required > float(cfg.cool_rad_supply_max_c) + 1e-6:
+                    dec.warnings.append("dew_guard_unachievable_radiant_disabled")
+                    s.adj_pump_on = False
+                    s.rad_supply_target_c = None
+                    s.debug.update({
+                        "dew_guard_required_c": safe_required,
+                        "dew_guard_max_c": float(cfg.cool_rad_supply_max_c),
+                        "dew_guard_action": "disable_radiant",
+                    })
+                else:
+                    s.rad_supply_target_c = float(_clamp(safe_required, cfg.cool_rad_supply_min_c, cfg.cool_rad_supply_max_c))
             else:
                 dec.warnings.append("missing_dp_max_for_dew_guard")
 
@@ -594,6 +688,20 @@ class PlantDecisionPlanner:
         """
         cfg = self.cfg
         v = dec.vmc
+
+        # OFF means plant idle, including VMC (unless a different policy is implemented).
+        if dec.mode == PlantMode.OFF:
+            v.power = False
+            v.mode = "off"
+            v.air_speed = 0
+            v.setpoint_t_c = None
+            v.setpoint_rh_pct = None
+            v.setpoint_dp_c = None
+            v.setpoint_ddp_c = None
+            v.debug.update({
+                "reason": "plant_mode_off",
+            })
+            return
 
         if demand.operative_season == "winter":
             mode = cfg.vmc_mode_winter
@@ -754,3 +862,37 @@ class PlantDecisionPlanner:
             sp = max(sp, int(self.cfg.vmc_boost_min_air_speed))
 
         return int(_clamp(float(sp), float(self.cfg.vmc_speed_min), float(self.cfg.vmc_speed_max)))
+
+    # ---- Validation ------------------------------------------------------
+    def _validate_decision(self, dec: PlantDecision) -> list[str]:
+        """Best-effort coherence checks between PlantMode and compiled commands.
+
+        This prevents silent contradictions (e.g. OFF but VMC ON).
+        Returns warnings to be appended to PlantDecision.warnings.
+        """
+        w: list[str] = []
+
+        if dec.mode == PlantMode.OFF:
+            if bool(getattr(dec.pdc, "power", False)):
+                w.append("incoherent_off_pdc_power_true")
+            if bool(getattr(dec.supply, "adj_pump_on", False)) or bool(getattr(dec.supply, "direct_pump_on", False)):
+                w.append("incoherent_off_pumps_on")
+            if bool(getattr(dec.vmc, "power", False)):
+                w.append("incoherent_off_vmc_power_true")
+
+        if dec.mode == PlantMode.VENT_ONLY:
+            if bool(getattr(dec.pdc, "power", False)):
+                w.append("incoherent_vent_only_pdc_power_true")
+            # Pumps should generally be off in vent-only (unless architecture requires otherwise)
+            if bool(getattr(dec.supply, "adj_pump_on", False)) or bool(getattr(dec.supply, "direct_pump_on", False)):
+                w.append("incoherent_vent_only_pumps_on")
+
+        if dec.mode == PlantMode.HEATING:
+            if getattr(dec.pdc, "mode", None) not in (None, "heating"):
+                w.append("incoherent_heating_pdc_mode_not_heating")
+
+        if dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST):
+            if getattr(dec.pdc, "mode", None) not in (None, "cooling"):
+                w.append("incoherent_cooling_pdc_mode_not_cooling")
+
+        return w
