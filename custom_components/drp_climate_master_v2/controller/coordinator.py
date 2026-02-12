@@ -17,7 +17,7 @@ from homeassistant.components.climate.const import HVACMode
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
-from homeassistant.const import CONF_NAME, EVENT_HOMEASSISTANT_STARTED, PERCENTAGE
+from homeassistant.const import EntityCategory, CONF_NAME, EVENT_HOMEASSISTANT_STARTED, PERCENTAGE
 
 from ..domain.models.plant import PlantSnapshot
 
@@ -349,7 +349,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         temps: list[str] = []
         humis: list[str] = []
 
-        sensor_prefix = "Climate Zone"
+        sensor_prefix = "Climate"
 
         for area in getattr(self._runtime.climate, "areas", []) or []:
             # i tuoi AreaConfig potrebbero essere dataclass: manteniamo getattr flessibile
@@ -365,7 +365,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     {
                         "type": "TemperatureSensor",
                         "area": area.name,
-                        "name": f"{sensor_prefix} {area.name}",
+                        "name": f"{sensor_prefix} Zone {area.name}",
                         "sensors": SensorPair(
                             temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
                             humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
@@ -377,7 +377,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     {
                         "type": "HumiditySensor",
                         "area": area.name,
-                        "name": f"{sensor_prefix} {area.name}",
+                        "name": f"{sensor_prefix} Zone {area.name}",
                         "sensors": SensorPair(
                             temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
                             humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
@@ -389,7 +389,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     {
                         "type": "DewpointSensor",
                         "area": area.name,
-                        "name": f"{sensor_prefix} {area.name}",
+                        "name": f"{sensor_prefix} Zone {area.name}",
                         "sensors": SensorPair(
                             temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
                             humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
@@ -402,7 +402,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     {
                         "type": "HeatIndexSensor",
                         "area": area.name,
-                        "name": f"{sensor_prefix} {area.name}",
+                        "name": f"{sensor_prefix} Zone {area.name}",
                         "sensors": SensorPair(
                             temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
                             humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
@@ -416,7 +416,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     {
                         "type": "TemperatureSensor",
                         "area": area.name,
-                        "name": f"{sensor_prefix} {area.name}",
+                        "name": f"{sensor_prefix} Zone {area.name}",
                         "sensors": SensorPair(
                             temperature=FieldSuffix.OUTDOOR_TEMPERATURE(slugify(area.name)),
                             humidity=FieldSuffix.OUTDOOR_HUMIDITY(slugify(area.name)),
@@ -428,7 +428,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     {
                         "type": "HumiditySensor",
                         "area": area.name,
-                        "name": f"{sensor_prefix} {area.name}",
+                        "name": f"{sensor_prefix} Zone {area.name}",
                         "sensors": SensorPair(
                             temperature=FieldSuffix.OUTDOOR_TEMPERATURE(slugify(area.name)),
                             humidity=FieldSuffix.OUTDOOR_HUMIDITY(slugify(area.name)),
@@ -440,7 +440,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     {
                         "type": "DewpointSensor",
                         "area": area.name,
-                        "name": f"{sensor_prefix} {area.name}",
+                        "name": f"{sensor_prefix} Zone {area.name}",
                         "sensors": SensorPair(
                             temperature=FieldSuffix.OUTDOOR_TEMPERATURE(slugify(area.name)),
                             humidity=FieldSuffix.OUTDOOR_HUMIDITY(slugify(area.name)),
@@ -497,7 +497,13 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "unit": self._runtime.climate.unit_system.temperature,
             }
         )
-
+        defs.append(
+            {
+                "type": "SeasonSensor",
+                "name": f"{sensor_prefix} Season",
+                "category": EntityCategory.DIAGNOSTIC,
+            }
+        )
         log_debug(_LOGGER, "build_slave_sensor_defs: %d definitions", len(defs))
         return defs
 

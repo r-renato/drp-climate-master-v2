@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import NamedTuple, Final
+from typing import Literal, NamedTuple, Final
 from importlib.resources import files  # Python 3.9+
 
 import json
@@ -244,3 +244,8 @@ CONF_NOBODYSIN: Final[str] = "nobodysin"
 CONF_HUB_NAME = "hub_name"
 CONF_CLIMATE_NAME = "climate_name"
 CONF_CLIMATE_UNIQUE_ID = "climate_unique_id"
+
+
+TURN_ON = "turn_on"
+TURN_OFF = "turn_off"
+TURN = Literal[TURN_ON, TURN_OFF]

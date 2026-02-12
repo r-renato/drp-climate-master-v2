@@ -11,9 +11,80 @@ class MetricBasis(StrEnum):
     NONE = "none"
     
 class PlantMode(str, Enum):
-    """High-level plant operating mode (impianto).
+    """High-level operating mode of the *whole plant* (impianto).
 
-    Nota: volutamente disaccoppiato dagli enum dei singoli device.
+    This enum is an **output** of the plant decision algorithm (planner/supervisor),
+    and represents the *resulting global state* that the controller intends the
+    HVAC system to be in for the current control tick.
+
+    Design goals
+    ------------
+    - Provide a compact, stable set of plant-level states, intentionally decoupled
+      from vendor/device-specific enums (PDC, pumps, VMC).
+    - Make each state **semantically strong**: a PlantMode is not just a label,
+      it implies a set of expected actuator intents (invariants) and safety rules.
+    - Support deterministic conflict resolution (heat vs cool vs latent needs)
+      and enable later additions such as anti-flapping (min-runtime / hysteresis).
+
+    Recommended invariants (intent-level, device-agnostic)
+    ------------------------------------------------------
+    The following is the intended meaning of each mode. Concrete mappings to real
+    devices are performed by downstream layers (e.g., `_fill_*_commands` and/or
+    Supervisor), but **must not contradict** these invariants.
+
+    OFF
+      - Plant idle: no active thermal production and no functional circulation.
+      - VMC may be OFF as well (e.g., in VACATION), unless a safety/IAQ policy
+        requires minimum ventilation.
+      - Typical intent:
+          PDC power = OFF
+          Radiant/mixing pump(s) = OFF
+          Direct/VMC hydraulic pump(s) = OFF
+          VMC power = OFF (or minimum, by explicit policy)
+
+    HEATING
+      - Active sensible heating demand is present and allowed by season/user mode.
+      - Primary production is in heating; secondary circuits may run depending on
+        zone demand (valves/duty) and hydraulic architecture.
+      - Typical intent:
+          PDC mode = HEATING, power = ON
+          Radiant circuit = ON if at least one zone requires heat
+          VMC = neutral or heat-boost only if explicitly requested
+
+    COOLING
+      - Active sensible cooling demand is present and allowed by season/user mode.
+      - Must respect **dew-point/condensation safety** (hard guard).
+      - Typical intent:
+          PDC mode = COOLING, power = ON
+          Radiant circuit = ON if zones require cooling, with dew-guard supply target
+          VMC = neutral or cool-boost only if explicitly requested
+
+    DEHUM_ASSIST
+      - Latent (humidity/dew point) control is driving the plant operation.
+      - Commonly used to support dehumidification via VMC/coil or dedicated devices.
+      - Radiant sensible cooling may be disabled or limited depending on the
+        hydraulic layout and condensation risk.
+      - Typical intent:
+          PDC mode = COOLING, power = ON (to feed cold coil/dehumidifier)
+          Direct/VMC hydraulic circuit = ON if needed
+          Radiant circuit = optional / often OFF unless explicitly safe and required
+
+    VENT_ONLY
+      - Ventilation-only operation: no thermal production (no active heating/cooling).
+      - Used for IAQ maintenance, mild shoulder operation, or winter dehumidification
+        by air exchange when active cooling is not allowed.
+      - Typical intent:
+          PDC power = OFF
+          Hydronic pumps = OFF (unless architecture requires otherwise)
+          VMC power = ON (speed governed by IAQ/DP policy)
+
+    Notes
+    -----
+    - PlantMode should be interpreted together with user intent (HA HVACMode and
+      preset profile) and with safety constraints (dew point, window state, vacation).
+    - If VMC autonomy is desired (managed independently from hydronics), consider
+      introducing a separate `VmcMode` / `VentilationMode` state machine; otherwise
+      ensure `OFF` and `VENT_ONLY` explicitly control VMC power.
     """
 
     OFF = "off"
@@ -21,6 +92,7 @@ class PlantMode(str, Enum):
     COOLING = "cooling"
     DEHUM_ASSIST = "dehum_assist"
     VENT_ONLY = "vent_only"
+
 
 @dataclass(slots=True)
 class PlantDemandSignals:

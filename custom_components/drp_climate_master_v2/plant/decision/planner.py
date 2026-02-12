@@ -14,6 +14,7 @@ from .zone.contracts import ZonesDecision
 from ...helpers.logger import log_debug
 
 from ...helpers.utils import as_float
+from ...helpers.psychrometric import dew_point_celsius
 from ...domain.models.plant import PlantSnapshot
 from ...domain.enums import HVACOperatingProfile
 
@@ -190,10 +191,7 @@ class PlantDecisionPlanner:
                 dp_max = dp if dp_max is None else max(dp_max, dp)
 
         vmc = snapshot.vmc
-        vmc_req_heat = bool(getattr(vmc, "request_heating", False)) if vmc else False
-        vmc_req_cool = bool(getattr(vmc, "request_cooling", False)) if vmc else False
-        vmc_req_dehum = bool(getattr(vmc, "request_dehumidification", False)) if vmc else False
-        vmc_req_water = bool(getattr(vmc, "request_water", False)) if vmc else False
+        vmc_raw_req_dehum = bool(getattr(vmc, "request_dehumidification", False)) if vmc else False
 
         # Compute profile-aware metrics with safe fallbacks
         if heat_den_w > 0.0:
@@ -222,6 +220,31 @@ class PlantDecisionPlanner:
             cool_cov = 0.0
             cool_metric_basis = MetricBasis.NONE
 
+        # --- VMC: ventilazione/deumidifica come primario; heating/cooling solo boost ---
+        vmc_dp_sp_c = self._compute_vmc_dp_setpoint_c(snapshot)
+        vmc_need_dehum = self._vmc_need_dehumidification(dp_max, vmc_dp_sp_c)
+        vmc_boost_heat = self._vmc_allow_heat_boost(
+            snapshot,
+            float(heat_def_max),
+            float(heat_def_wmean),
+            float(heat_cov),
+        )
+        vmc_boost_cool = self._vmc_allow_cool_boost(
+            snapshot,
+            float(cool_sur_max),
+            float(cool_sur_wmean),
+            float(cool_cov),
+        )
+
+        vmc_req_heat = bool(vmc_boost_heat)
+        vmc_req_cool = bool(vmc_boost_cool)
+        vmc_req_dehum = bool(vmc_need_dehum or vmc_raw_req_dehum)
+        vmc_req_water = (
+            vmc_req_heat
+            or vmc_req_cool
+            or (vmc_req_dehum and bool(self.cfg.vmc_water_on_for_dehumid))
+        )
+
         return PlantDemandSignals(
             heat_def_max_c=heat_def_max,
             cool_sur_max_c=cool_sur_max,
@@ -238,7 +261,7 @@ class PlantDecisionPlanner:
             vmc_req_heating=vmc_req_heat,
             vmc_req_cooling=vmc_req_cool,
             vmc_req_dehumidif=vmc_req_dehum,
-            vmc_req_water=vmc_req_water,            
+            vmc_req_water=vmc_req_water,
         )
 
     def _infer_mode(self, snapshot: PlantSnapshot, demand: PlantDemandSignals, zones_decision: Optional[ZonesDecision] = None) -> PlantMode:
@@ -469,8 +492,8 @@ class PlantDecisionPlanner:
             self._last_heat_wot_c = float(target)
             self._last_heat_wot_ts = now
 
-            pdc.heat_wot_c = float(target)
-            pdc.heat_dt_c = float(cfg.heat_dt_c)
+            pdc.heat_wot_c = math.ceil(target)
+            pdc.heat_dt_c = math.ceil(cfg.heat_dt_c)
             pdc.debug.update({
                 "t_out_c": t_out,
                 "curve": "linear+profile+feedback",
@@ -488,8 +511,8 @@ class PlantDecisionPlanner:
             pdc.mode = "cooling"
             pdc.power = True
             # In questa fase usiamo un setpoint flat; in futuro: profilo + vincoli batteria VMC.
-            pdc.cool_wot_c = float(_clamp(cfg.cool_wot_default_c, cfg.cool_wot_min_c, cfg.cool_wot_max_c))
-            pdc.cool_dt_c = float(cfg.cool_dt_c)
+            pdc.cool_wot_c = math.ceil(_clamp(cfg.cool_wot_default_c, cfg.cool_wot_min_c, cfg.cool_wot_max_c))
+            pdc.cool_dt_c = math.ceil(cfg.cool_dt_c)
 
         elif dec.mode == PlantMode.VENT_ONLY:
             # Nota: in molte PDC conviene spegnere, salvo logiche anti-gelo/anti-stallo gestite nativamente.
@@ -562,29 +585,67 @@ class PlantDecisionPlanner:
             })
 
     def _fill_vmc_commands(self, dec: PlantDecision, snapshot: PlantSnapshot, demand: PlantDemandSignals) -> None:
+        """Populate VMC commands.
+
+        Rational:
+        - La VMC serve per ventilare e deumidificare (via DP setpoint).
+        - Il contributo termico (heating/cooling) è solo boost quando fuori comfort in modo significativo.
+        - Il setpoint T neutro evita di trascinare la PDC per inseguire 24°C in inverno.
+        """
         cfg = self.cfg
         v = dec.vmc
 
-        # In questa fase: non forziamo spegnimenti/accensioni aggressive, ma prepariamo setpoint suggeriti.
-        if dec.mode in (PlantMode.HEATING, PlantMode.VENT_ONLY):
-            v.power = True
-            v.mode = cfg.vmc_mode_winter
-        elif dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST):
-            v.power = True
-            v.mode = cfg.vmc_mode_summer
+        if demand.operative_season == "winter":
+            mode = cfg.vmc_mode_winter
+        elif demand.operative_season == "summer":
+            mode = cfg.vmc_mode_summer
         else:
-            v.power = None  # lascia a supervisor/policy
-            v.mode = None
+            mode = getattr(snapshot.vmc, "processing_mode", None) or cfg.vmc_mode_winter
 
-        v.setpoint_t_c = cfg.vmc_setpoint_t_c
-        v.setpoint_rh_pct = cfg.vmc_setpoint_rh_pct
-        v.setpoint_dp_c = cfg.vmc_setpoint_dp_c
-        v.setpoint_ddp_c = cfg.vmc_setpoint_ddp_c
+        t_ref_c = self._get_indoor_reference_temp_c(snapshot)
+        rh_target_pct = float(cfg.vmc_setpoint_rh_pct)
+
+        dp_sp_c = self._compute_vmc_dp_setpoint_c_from(t_ref_c, rh_target_pct)
+        ddp_sp_c = float(cfg.vmc_setpoint_ddp_c)
+
+        dp_current = demand.dp_max_c
+        boost_active = bool(demand.vmc_req_heating or demand.vmc_req_cooling or demand.vmc_req_dehumidif)
+
+        air_speed = self._compute_vmc_air_speed(
+            snapshot,
+            dp_current,
+            dp_sp_c,
+            boost_active,
+        )
+
+        if demand.vmc_req_heating:
+            t_sp = float(cfg.vmc_boost_setpoint_heat_c)
+        elif demand.vmc_req_cooling:
+            t_sp = float(cfg.vmc_boost_setpoint_cool_c)
+        else:
+            dead = float(cfg.vmc_temp_neutral_deadband_c)
+            if mode == cfg.vmc_mode_winter:
+                t_sp = t_ref_c - dead
+            elif mode == cfg.vmc_mode_summer:
+                t_sp = t_ref_c + dead
+            else:
+                t_sp = t_ref_c
+
+        t_sp = _clamp(float(t_sp), float(cfg.vmc_temp_min_c), float(cfg.vmc_temp_max_c))
+
+        v.power = True
+        v.mode = mode
+        v.setpoint_t_c = round(t_sp, 1)
+        v.setpoint_rh_pct = round(rh_target_pct, 0)
+        v.setpoint_dp_c = round(dp_sp_c, 1)
+        v.setpoint_ddp_c = round(ddp_sp_c, 1)
+        v.air_speed = int(air_speed)
 
         # Diagnostics: report current vmc state
         if snapshot.vmc:
             vmc = snapshot.vmc
             v.debug.update({
+                "recirculation": cfg.vmc_recirculation,
                 "device_power": getattr(vmc, "power_on", None),
                 "req_water": getattr(vmc, "request_water", None),
                 "req_heating": getattr(vmc, "request_heating", None),
@@ -597,3 +658,99 @@ class PlantDecisionPlanner:
                 "alarm_dew_point": getattr(vmc, "alarm_dew_point", None),
                 "alarm_general": getattr(vmc, "alarm_alarm", None),
             })
+
+    # ---- VMC helpers -----------------------------------------------------
+    def _get_indoor_reference_temp_c(self, snapshot: PlantSnapshot) -> float:
+        z = snapshot.global_indoor_zone
+        if z is not None:
+            for av in (getattr(z, "t_op", None), getattr(z, "temperature", None)):
+                v = as_float(getattr(av, "value", None))
+                if v is not None:
+                    return float(v)
+        return float(self.cfg.vmc_setpoint_t_c)
+
+    def _compute_vmc_dp_setpoint_c(self, snapshot: PlantSnapshot) -> float:
+        t_ref = self._get_indoor_reference_temp_c(snapshot)
+        return self._compute_vmc_dp_setpoint_c_from(t_ref, float(self.cfg.vmc_setpoint_rh_pct))
+
+    def _compute_vmc_dp_setpoint_c_from(self, t_c: float, rh_pct: float) -> float:
+        if bool(getattr(self.cfg, "vmc_dp_setpoint_from_psychrometrics", True)):
+            try:
+                dp = float(dew_point_celsius(t_c, rh_pct))
+            except Exception:
+                dp = float(self.cfg.vmc_setpoint_dp_c)
+        else:
+            dp = float(self.cfg.vmc_setpoint_dp_c)
+        return _clamp(dp, float(self.cfg.vmc_dp_sp_min_c), float(self.cfg.vmc_dp_sp_max_c))
+
+    def _vmc_need_dehumidification(self, dp_current_c: float | None, dp_setpoint_c: float) -> bool:
+        if dp_current_c is None:
+            return False
+        ddp = float(self.cfg.vmc_setpoint_ddp_c)
+        return float(dp_current_c) > (float(dp_setpoint_c) + ddp)
+
+    def _vmc_allow_heat_boost(
+        self,
+        snapshot: PlantSnapshot,
+        heat_def_max_c: float,
+        heat_def_wmean_c: float,
+        heat_cov: float,
+    ) -> bool:
+        if not bool(self.cfg.vmc_boost_enabled):
+            return False
+        if not bool(snapshot.windows_close_state):
+            return False
+        if bool(snapshot.presence_vacation):
+            return False
+        if heat_def_max_c >= float(self.cfg.vmc_boost_heat_def_max_thr_c):
+            return True
+        if heat_def_wmean_c >= float(self.cfg.vmc_boost_heat_def_wmean_thr_c) and heat_cov >= 0.6:
+            return True
+        return False
+
+    def _vmc_allow_cool_boost(
+        self,
+        snapshot: PlantSnapshot,
+        cool_sur_max_c: float,
+        cool_sur_wmean_c: float,
+        cool_cov: float,
+    ) -> bool:
+        if not bool(self.cfg.vmc_boost_enabled):
+            return False
+        if not bool(snapshot.windows_close_state):
+            return False
+        if bool(snapshot.presence_vacation):
+            return False
+        if cool_sur_max_c >= float(self.cfg.vmc_boost_cool_sur_max_thr_c):
+            return True
+        if cool_sur_wmean_c >= float(self.cfg.vmc_boost_cool_sur_wmean_thr_c) and cool_cov >= 0.6:
+            return True
+        return False
+
+    def _compute_vmc_air_speed(
+        self,
+        snapshot: PlantSnapshot,
+        dp_current_c: Optional[float],
+        dp_setpoint_c: float,
+        boost: bool,
+    ) -> int:
+        if not bool(snapshot.windows_close_state):
+            sp = int(self.cfg.vmc_speed_windows_open)
+        elif bool(snapshot.presence_vacation) or bool(snapshot.presence_nobodysin):
+            sp = int(self.cfg.vmc_speed_vacation)
+        else:
+            sp = int(self.cfg.vmc_speed_base)
+
+        if dp_current_c is not None:
+            delta = float(dp_current_c) - float(dp_setpoint_c)
+            if delta > float(self.cfg.vmc_speed_dp_boost_step1_c):
+                sp += 1
+            if delta > float(self.cfg.vmc_speed_dp_boost_step2_c):
+                sp += 1
+            if delta > float(self.cfg.vmc_speed_dp_boost_step3_c):
+                sp += 1
+
+        if boost:
+            sp = max(sp, int(self.cfg.vmc_boost_min_air_speed))
+
+        return int(_clamp(float(sp), float(self.cfg.vmc_speed_min), float(self.cfg.vmc_speed_max)))

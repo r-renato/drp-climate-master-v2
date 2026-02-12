@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Optional
 
 from ...domain.enums import HVACOperatingProfile
 
@@ -97,10 +98,47 @@ class PlantPlannerConfig:
     cool_rad_supply_min_c: float = 16.0
     cool_rad_supply_max_c: float = 22.0
 
-    # ---- VMC defaults (se vuoi guidarla dal planner)
+    # ---- VMC (ventilazione/deumidifica; heating/cooling solo boost)
+    # Nota: la VMC non deve "trascinare" la PDC salvo condizioni significativamente fuori comfort.
     vmc_mode_winter: str = "winter"
     vmc_mode_summer: str = "summer"
-    vmc_setpoint_t_c: float = 24.0
+
+    # Neutral temperature setpoint: in inverno leggermente sotto l'indoor per evitare richiesta heating,
+    # in estate leggermente sopra per evitare richiesta cooling (deadband).
+    vmc_setpoint_t_c: float = 20.0
+    vmc_temp_neutral_deadband_c: float = 0.3
+    vmc_temp_min_c: float = 16.0
+    vmc_temp_max_c: float = 28.0
+
+    # Boost thresholds: abilita heating/cooling VMC solo se davvero fuori comfort
+    vmc_boost_enabled: bool = True
+    vmc_boost_heat_def_max_thr_c: float = 1.5
+    vmc_boost_heat_def_wmean_thr_c: float = 1.0
+    vmc_boost_cool_sur_max_thr_c: float = 1.5
+    vmc_boost_cool_sur_wmean_thr_c: float = 1.0
+    vmc_boost_setpoint_heat_c: float = 22.0
+    vmc_boost_setpoint_cool_c: float = 24.0
+    vmc_boost_min_air_speed: int = 3
+
+    # Dehumidificazione via dew point setpoint
     vmc_setpoint_rh_pct: float = 51.0
-    vmc_setpoint_dp_c: float = 15.1
-    vmc_setpoint_ddp_c: float = 0.0
+    vmc_setpoint_dp_c: float = 12.0
+    vmc_setpoint_ddp_c: float = 0.3
+    vmc_dp_sp_min_c: float = 7.0
+    vmc_dp_sp_max_c: float = 15.0
+    vmc_dp_setpoint_from_psychrometrics: bool = True
+
+    # Water request gating: la deumidifica non deve forzare acqua calda/fredda salvo impianti specifici.
+    vmc_water_on_for_dehumid: bool = False
+
+    # Ventilation speed policy (0..5)
+    vmc_speed_min: int = 0
+    vmc_speed_max: int = 5
+    vmc_speed_base: int = 2
+    vmc_speed_vacation: int = 1
+    vmc_speed_windows_open: int = 0
+    vmc_speed_dp_boost_step1_c: float = 0.5
+    vmc_speed_dp_boost_step2_c: float = 1.2
+    vmc_speed_dp_boost_step3_c: float = 1.8
+
+    vmc_recirculation: str = "off"
