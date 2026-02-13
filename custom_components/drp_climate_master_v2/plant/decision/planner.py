@@ -712,6 +712,9 @@ class PlantDecisionPlanner:
 
         t_ref_c = self._get_indoor_reference_temp_c(snapshot)
         rh_target_pct = float(cfg.vmc_setpoint_rh_pct)
+        profile = HVACOperatingProfile.from_value(demand.user_profile)
+        if profile == HVACOperatingProfile.SLEEP and cfg.vmc_setpoint_rh_sleep_pct is not None:
+            rh_target_pct = float(cfg.vmc_setpoint_rh_sleep_pct)
 
         dp_sp_c = self._compute_vmc_dp_setpoint_c_from(t_ref_c, rh_target_pct)
         ddp_sp_c = float(cfg.vmc_setpoint_ddp_c)

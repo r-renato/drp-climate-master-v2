@@ -131,6 +131,8 @@ class PlantPlannerConfig:
 
     # Dehumidificazione via dew point setpoint
     vmc_setpoint_rh_pct: float = 51.0
+    # Optional: piu tolleranza in Sleep (evita over-ventilation notturna in inverno)
+    vmc_setpoint_rh_sleep_pct: float | None = 56.0
     vmc_setpoint_dp_c: float = 12.0
     vmc_setpoint_ddp_c: float = 0.3
     vmc_dp_sp_min_c: float = 7.0

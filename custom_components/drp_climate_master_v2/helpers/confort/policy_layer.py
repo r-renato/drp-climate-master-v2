@@ -634,7 +634,9 @@ MODE_PMV_DEFAULTS: Dict[HVACOperatingProfile, Dict[str, float]] = {
     # ECO/SLEEP: stricter band (narrower) -> less oscillation around comfort.
     # SLEEP: slightly cooler bias.
     HVACOperatingProfile.ECO: {"pmv_center": -0.10, "pmv_band": 0.35},
-    HVACOperatingProfile.SLEEP: {"pmv_center": -0.20, "pmv_band": 0.35},
+    # Sleep: vero "setback" (piu fresco) e tolleranza piu ampia.
+    # Nota: PMV per il sonno e una proxy; la usiamo per non scaldare troppo presto.
+    HVACOperatingProfile.SLEEP: {"pmv_center": -0.40, "pmv_band": 0.45},
 
     # AWAY/VACATION: not comfort; allow wide discomfort.
     HVACOperatingProfile.AWAY: {"pmv_center": -0.60, "pmv_band": 1.20},
@@ -735,7 +737,10 @@ class ComfortPolicyLayer:
         if is_living is not None:
             draft_alpha = 0.55 if is_living else 0.35
             if ctx.mode == HVACOperatingProfile.SLEEP:
-                draft_alpha = min(1.0, draft_alpha + 0.10)
+                # Di notte evitiamo di essere "draft conservative":
+                # altrimenti alza t_op_min e anticipa heating.
+                draft_alpha = max(0.05, draft_alpha - 0.10)
+                reasons.append("SLEEP_delta_draft=-0.10")
             if (vmc_speed >= 4) and (not is_living):
                 draft_alpha = max(0.0, draft_alpha - 0.05)
 
@@ -789,14 +794,17 @@ class ComfortPolicyLayer:
         # Mode adjustments
         # - sleep: blanket / duvet effect in winter
         if ctx.mode == HVACOperatingProfile.SLEEP and ctx.season == OperativeSeason.WINTER:
-            clo = min(1.60, clo + 0.20)
-            reasons.append(f"clo:sleep:+0.20 -> {clo:.2f}")
+            # Effetto "coperta/duvet" (isolamento maggiore rispetto all'awake)
+            clo += 0.45
+            reasons.append(f"clo:sleep:+0.45 -> {clo:.2f}")
 
         # - away: assume lighter (nobody cares), but keep bounded
         if ctx.mode in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION) and ctx.season == OperativeSeason.WINTER:
             clo = max(0.70, clo - 0.10)
             reasons.append(f"clo:away:-0.10 -> {clo:.2f}")
 
+        clo_cap = 2.0 if ctx.mode == HVACOperatingProfile.SLEEP else 1.6
+        clo = min(clo_cap, clo)
         return float(clo)
 
     def _pmv_targets(self, ctx: PolicyContext, reasons: list[str]) -> Tuple[float, float]:
@@ -832,8 +840,10 @@ class ComfortPolicyLayer:
 
         # Sleep mode: people more sensitive to draft (exposed skin) -> slightly higher v_hi
         if ctx.mode == HVACOperatingProfile.SLEEP and ctx.season == OperativeSeason.WINTER:
-            v_hi_s = max(v_hi_s, 1.05)
-            reasons.append("v_air_hi:sleep>=1.05")
+            # Riduciamo conservativismo sul draft in Sleep
+            # (porte chiuse / esposizione ridotta)
+            v_hi_s = min(v_hi_s, 1.00)
+            reasons.append("v_air_hi:sleep<=1.00")
 
         return float(v_best_s), float(v_hi_s), v_lo_override
 
