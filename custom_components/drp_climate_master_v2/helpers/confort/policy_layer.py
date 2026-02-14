@@ -795,15 +795,15 @@ class ComfortPolicyLayer:
         # - sleep: blanket / duvet effect in winter
         if ctx.mode == HVACOperatingProfile.SLEEP and ctx.season == OperativeSeason.WINTER:
             # Effetto "coperta/duvet" (isolamento maggiore rispetto all'awake)
-            clo += 0.45
-            reasons.append(f"clo:sleep:+0.45 -> {clo:.2f}")
+            clo += 0.95
+            reasons.append(f"clo:sleep:+0.95 -> {clo:.2f}")
 
         # - away: assume lighter (nobody cares), but keep bounded
         if ctx.mode in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION) and ctx.season == OperativeSeason.WINTER:
             clo = max(0.70, clo - 0.10)
             reasons.append(f"clo:away:-0.10 -> {clo:.2f}")
 
-        clo_cap = 2.0 if ctx.mode == HVACOperatingProfile.SLEEP else 1.6
+        clo_cap = 2.4 if ctx.mode == HVACOperatingProfile.SLEEP else 1.6
         clo = min(clo_cap, clo)
         return float(clo)
 

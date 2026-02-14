@@ -10,7 +10,7 @@ from homeassistant.const import CONF_NAME
 
 from ..const import (
     CONF_AREA,
-    CONF_APT_WINDOWS,
+    # CONF_APT_WINDOWS,
     CONF_CONFORT_ZONES,
     CONF_DP_MAX,
     CONF_DP_MIN,
@@ -22,7 +22,7 @@ from ..const import (
     CONF_LONGITUDE,
     CONF_NOBODYSIN,
     CONF_RADIANT,
-    CONF_STATE,
+    # CONF_STATE,
     CONF_SUPPLY_UNITS,
     CONF_TEMP_MAX,
     CONF_TEMP_MIN,
@@ -161,16 +161,16 @@ def validate_devices(dev: dict | None) -> Optional[str]:
 
     return None
 
-def validate_apt_windows(apt: dict | None) -> Optional[str]:
-    """Valida il blocco opzionale apt_windows."""
-    if apt in (None, {}):
-        return None
-    if not isinstance(apt, dict):
-        return "Il campo 'apt_windows' deve essere un oggetto."
-    state = apt.get(CONF_STATE)
-    if state is not None and not isinstance(state, str):
-        return "'apt_windows.state' deve essere una stringa."
-    return None
+# def validate_apt_windows(apt: dict | None) -> Optional[str]:
+#     """Valida il blocco opzionale apt_windows."""
+#     if apt in (None, {}):
+#         return None
+#     if not isinstance(apt, dict):
+#         return "Il campo 'apt_windows' deve essere un oggetto."
+#     state = apt.get(CONF_STATE)
+#     if state is not None and not isinstance(state, str):
+#         return "'apt_windows.state' deve essere una stringa."
+#     return None
 
 def validate_confort_zones(confort: dict | None) -> Optional[str]:
     """Valida il blocco opzionale confort_zones."""

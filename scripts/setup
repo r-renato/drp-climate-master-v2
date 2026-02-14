@@ -4,6 +4,7 @@ set -e
 
 cd "$(dirname "$0")/.."
 echo "Setting up environment in $(pwd)"
-python -m venv venv
+rm -rf venv.
+python3 -m venv venv
 source venv/bin/activate
-#python -m pip install --requirement requirements.dev.txt
+#python3 -m pip install --requirement requirements.dev.txt

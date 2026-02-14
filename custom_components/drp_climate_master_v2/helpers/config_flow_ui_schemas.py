@@ -21,7 +21,7 @@ from ..const import (
     CONF_HUB_NAME,
     CONF_CLIMATE_NAME,
     CONF_CLIMATE_UNIQUE_ID,
-    CONF_APT_WINDOWS,
+    # CONF_APT_WINDOWS,
     CONF_CONFORT_ZONES,
 )
 # Opzioni runtime
@@ -34,9 +34,9 @@ def schema_user() -> vol.Schema:
             vol.Required(CONF_HUB_NAME): str,
             vol.Required(CONF_CLIMATE_NAME): str,
             vol.Required(CONF_CLIMATE_UNIQUE_ID): str,
-            vol.Required(CONF_APT_WINDOWS): selector.EntitySelector(
-                selector.EntitySelectorConfig(domain="binary_sensor")
-            ),
+            # vol.Required(CONF_APT_WINDOWS): selector.EntitySelector(
+            #     selector.EntitySelectorConfig(domain="binary_sensor")
+            # ),
             vol.Required(CONF_WEATHER): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="weather")
             ),
@@ -87,7 +87,7 @@ def schema_advanced(
     return vol.Schema(
         {
             vol.Required(CONF_SCENARIOS, default=deepcopy(dict(scenarios))): selector.ObjectSelector(),
-            vol.Optional(CONF_APT_WINDOWS, default=deepcopy(dict(apt_windows))): selector.ObjectSelector(),
+            # vol.Optional(CONF_APT_WINDOWS, default=deepcopy(dict(apt_windows))): selector.ObjectSelector(),
             vol.Optional(CONF_CONFORT_ZONES, default=deepcopy(dict(confort_zones))): selector.ObjectSelector(),
             vol.Required(CONF_DEVICES, default=deepcopy(dict(extras))): selector.ObjectSelector(),
         }

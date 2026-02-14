@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from enum import Enum, StrEnum
+from enum import Enum
 from typing import Any, Dict, List, Optional
 
-class MetricBasis(StrEnum):
+class MetricBasis(str, Enum):
     WEIGHTED = "weighted"
     COUNT = "count"
     NONE = "none"
@@ -129,6 +129,13 @@ class PlantDemandSignals:
     --- SAFETY IGROMETRICA (anticondensa) ---
     - dp_max_c: massimo dew point tra zone [°C]. È un segnale di safety: “zona più a rischio condensa”.
       In cooling è tipicamente usato per fissare una mandata radiante minima sicura.
+    - dp_dehum_c: dew point “robusto” per controllo deumidifica [°C], tipicamente percentile delle zone
+      (es. p80), per evitare che un solo outlier faccia partire la deumidifica/ventilazione aggressiva.
+
+    --- DEBUG VMC (telemetria esplicativa) ---
+    - vmc_dp_sp_c: setpoint DP calcolato (da T_ref + RH_target o fallback config) [°C]
+    - vmc_dehum_on_thr_c: soglia ON per deumidifica (dp_sp + ddp) [°C]
+    - vmc_dehum_off_thr_c: soglia OFF per deumidifica (on_thr - hysteresis) [°C]
 
     --- RICHIESTE VMC (vincoli macchina) ---
     - vmc_req_heating/cooling/dehumidif/water: richieste della VMC verso il circuito idraulico/produzione.
@@ -195,6 +202,25 @@ class PlantDemandSignals:
     dp_max_c: Optional[float] = field(
         default=None,
         metadata={"doc": "Dew point massimo tra zone (worst-case anticondensa). [°C]"},
+    )
+    dp_dehum_c: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": "Dew point robusto (percentile) usato per controllo deumidifica/aria VMC. [°C]"
+        },
+    )
+    # --- VMC debug / transparency ---
+    vmc_dp_sp_c: Optional[float] = field(
+        default=None,
+        metadata={"doc": "Setpoint dew-point calcolato per la VMC (da psicrometria o fallback). [°C]"},
+    )
+    vmc_dehum_on_thr_c: Optional[float] = field(
+        default=None,
+        metadata={"doc": "Soglia ON deumidifica: dp_sp + ddp. [°C]"},
+    )
+    vmc_dehum_off_thr_c: Optional[float] = field(
+        default=None,
+        metadata={"doc": "Soglia OFF deumidifica: on_thr - hysteresis. [°C]"},
     )
     outdoor_dp_c: Optional[float] = field(
         default=None,
@@ -503,8 +529,13 @@ class PlantDecision:
                 f"  Cool sensible      :: {fbool(s.cool_sensible, 'True', 'False')}",
                 # dew point safety
                 f"  DP max             :: {fnum(s.dp_max_c)} °C",
+                f"  DP dehum           :: {fnum(getattr(s, 'dp_dehum_c', None))} °C",
                 f"  Outdoor DP         :: {fnum(getattr(s, 'outdoor_dp_c', None))} °C",
                 f"  VMC dehum feasible :: {fbool(getattr(s, 'vmc_dehum_feasible', None), 'True', 'False')}",
+                # VMC debug thresholds
+                f"  VMC DP sp          :: {fnum(getattr(s, 'vmc_dp_sp_c', None))} °C",
+                f"  VMC dehum ON thr   :: {fnum(getattr(s, 'vmc_dehum_on_thr_c', None))} °C",
+                f"  VMC dehum OFF thr  :: {fnum(getattr(s, 'vmc_dehum_off_thr_c', None))} °C",
                 # VMC requests
                 f"  VMC req heating    :: {fbool(s.vmc_req_heating, 'True', 'False')}",
                 f"  VMC req cooling    :: {fbool(s.vmc_req_cooling, 'True', 'False')}",

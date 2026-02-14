@@ -3,13 +3,11 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Mapping, Optional
 import logging
 
 from homeassistant.util import dt as dt_util
 from homeassistant.components.climate.const import HVACMode
-
-from .zone.contracts import ZonesDecision
 
 from ...helpers.logger import log_debug
 
@@ -18,13 +16,47 @@ from ...helpers.psychrometric import dew_point_celsius
 from ...domain.models.plant import PlantSnapshot
 from ...domain.enums import HVACOperatingProfile
 
+from .zone.contracts import ZonesDecision
+
 from .config import PlantPlannerConfig
 from .contracts import MetricBasis, PlantDecision, PlantDemandSignals, PlantMode
+from .signal_builder import DemandSignalsBuilder
 
 _LOGGER = logging.getLogger(__name__)
 
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
+
+def _percentile_sorted(xs: list[float], q: float) -> float | None:
+    """Percentile robusto senza numpy. xs deve essere NON vuota e già ordinata."""
+    if not xs:
+        return None
+    q = max(0.0, min(1.0, float(q)))
+    if len(xs) == 1:
+        return float(xs[0])
+    pos = q * (len(xs) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return float(xs[lo])
+    frac = pos - lo
+    return float(xs[lo] * (1.0 - frac) + xs[hi] * frac)
+
+def _percentile(values: list[float], q: float) -> Optional[float]:
+    """Return q-quantile (0..1) using linear interpolation on sorted values."""
+    if not values:
+        return None
+    q = float(_clamp(float(q), 0.0, 1.0))
+    xs = sorted(float(v) for v in values)
+    if len(xs) == 1:
+        return xs[0]
+    pos = q * (len(xs) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return xs[lo]
+    frac = pos - lo
+    return xs[lo] * (1.0 - frac) + xs[hi] * frac
 
 # Profile -> controller aggressiveness (kept aligned with ComfortPolicy defaults).
 # Used to scale ON thresholds (BOOST reacts earlier; AWAY/VACATION later).
@@ -75,10 +107,19 @@ class PlantDecisionPlanner:
     """
 
     cfg: PlantPlannerConfig = field(default_factory=PlantPlannerConfig)
+    _signals: DemandSignalsBuilder = field(init=False, repr=False)
 
     # --- minimal state for setpoint rate limiting (anti-hunting)
     _last_heat_wot_c: Optional[float] = field(default=None, init=False, repr=False)
     _last_heat_wot_ts: Optional[datetime] = field(default=None, init=False, repr=False)
+    _last_vmc_dehum_on: Optional[bool] = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        # Builder expects a Planner-like instance + zone weight function
+        self._signals = DemandSignalsBuilder(
+            self,
+            zone_weight_fn=_zone_weight,
+        )
 
     def plan(
         self,
@@ -100,7 +141,7 @@ class PlantDecisionPlanner:
             t_out = None
 
         # --- Extract indoor demand signals
-        demand = self._compute_demands(snapshot)
+        demand = self._signals.build(snapshot=snapshot)
 
         # --- Determine regime
         mode = self._infer_mode(snapshot, demand, zones_decision)
@@ -134,184 +175,6 @@ class PlantDecisionPlanner:
         dec.warnings.extend(self._validate_decision(dec))
 
         return dec
-
-    def _compute_demands(self, snapshot: PlantSnapshot) -> PlantDemandSignals:
-        """Compute high-level demand metrics from zones + VMC signals."""
-        heat_def_max = 0.0
-        cool_sur_max = 0.0
-        heat_def_by_zone: Dict[str, float] = {}
-        cool_sur_by_zone: Dict[str, float] = {}
-        heat_headroom_min_c: Optional[float] = None
-        cool_headroom_min_c: Optional[float] = None
-
-        # Weighted/quorum metrics (profile-aware gating)
-        heat_den_w = 0.0
-        heat_out_w = 0.0
-        heat_sum_wdef = 0.0
-        heat_den_n = 0
-        heat_out_n = 0
-        heat_sum_ndef = 0.0
-
-        cool_den_w = 0.0
-        cool_out_w = 0.0
-        cool_sum_wsur = 0.0
-        cool_den_n = 0
-        cool_out_n = 0
-        cool_sum_nsur = 0.0
-
-        dp_max = None
-
-        for zone_key, z in (snapshot.indoor_zones or {}).items():
-            t_meas = as_float(getattr(getattr(z, "t_op", None), "value", None))
-            if t_meas is None:
-                t_meas = as_float(getattr(getattr(z, "temperature", None), "value", None))
-
-            band = getattr(z, "confort_band", None)
-            t_min = as_float(getattr(band, "t_op_min", None))
-            t_max = as_float(getattr(band, "t_op_max", None))
-
-            # comfort headroom (MPC preheat gating)
-            if t_meas is not None and t_min is not None:
-                hh = float(t_meas) - float(t_min)
-                heat_headroom_min_c = hh if heat_headroom_min_c is None else min(heat_headroom_min_c, hh)
-            if t_meas is not None and t_max is not None:
-                ch = float(t_max) - float(t_meas)
-                cool_headroom_min_c = ch if cool_headroom_min_c is None else min(cool_headroom_min_c, ch)
-
-            if t_meas is not None and t_min is not None:
-                d = max(0.0, float(t_min) - float(t_meas))
-                heat_def_by_zone[zone_key] = d
-                heat_def_max = max(heat_def_max, d)
-
-                w = _zone_weight(z)
-                # Count-based always
-                heat_den_n += 1
-                heat_sum_ndef += d
-                if d > 0.0:
-                    heat_out_n += 1
-                # Weighted only if weight > 0
-                if w > 0.0:
-                    heat_den_w += w
-                    heat_sum_wdef += w * d
-                    if d > 0.0:
-                        heat_out_w += w
-
-            if t_meas is not None and t_max is not None:
-                d = max(0.0, float(t_meas) - float(t_max))
-                cool_sur_by_zone[zone_key] = d
-                cool_sur_max = max(cool_sur_max, d)
-
-                w = _zone_weight(z)
-                cool_den_n += 1
-                cool_sum_nsur += d
-                if d > 0.0:
-                    cool_out_n += 1
-                if w > 0.0:
-                    cool_den_w += w
-                    cool_sum_wsur += w * d
-                    if d > 0.0:
-                        cool_out_w += w
-
-            dp = as_float(getattr(getattr(z, "dew_point", None), "value", None))
-            if dp is not None:
-                dp_max = dp if dp_max is None else max(dp_max, dp)
-
-        vmc = snapshot.vmc
-        vmc_raw_req_dehum = bool(getattr(vmc, "request_dehumidification", False)) if vmc else False
-
-        # Compute profile-aware metrics with safe fallbacks
-        if heat_den_w > 0.0:
-            heat_def_wmean = heat_sum_wdef / heat_den_w
-            heat_cov = heat_out_w / heat_den_w
-            heat_metric_basis = MetricBasis.WEIGHTED
-        elif heat_den_n > 0:
-            heat_def_wmean = heat_sum_ndef / float(heat_den_n)
-            heat_cov = float(heat_out_n) / float(heat_den_n)
-            heat_metric_basis = MetricBasis.COUNT
-        else:
-            heat_def_wmean = 0.0
-            heat_cov = 0.0
-            heat_metric_basis = MetricBasis.NONE
-
-        if cool_den_w > 0.0:
-            cool_sur_wmean = cool_sum_wsur / cool_den_w
-            cool_cov = cool_out_w / cool_den_w
-            cool_metric_basis = MetricBasis.WEIGHTED
-        elif cool_den_n > 0:
-            cool_sur_wmean = cool_sum_nsur / float(cool_den_n)
-            cool_cov = float(cool_out_n) / float(cool_den_n)
-            cool_metric_basis = MetricBasis.COUNT
-        else:
-            cool_sur_wmean = 0.0
-            cool_cov = 0.0
-            cool_metric_basis = MetricBasis.NONE
-
-        # --- VMC: ventilazione/deumidifica come primario; heating/cooling solo boost ---
-        vmc_dp_sp_c = self._compute_vmc_dp_setpoint_c(snapshot)
-
-        # Outdoor dew point (best effort): disable impossible dehumidification in ventilation-only mode
-        outdoor_dp_c = as_float(getattr(getattr(snapshot, "global_outdoor_dew_point", None), "value", None))
-        if outdoor_dp_c is None:
-            t_out = as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None))
-            rh_out = as_float(getattr(getattr(snapshot, "global_outdoor_humidity", None), "value", None))
-            if t_out is not None and rh_out is not None:
-                try:
-                    outdoor_dp_c = float(dew_point_celsius(t_out, rh_out))
-                except Exception:
-                    outdoor_dp_c = None
-
-        vmc_need_dehum = self._vmc_need_dehumidification(dp_max, vmc_dp_sp_c)
-        vmc_boost_heat = self._vmc_allow_heat_boost(
-            snapshot,
-            float(heat_def_max),
-            float(heat_def_wmean),
-            float(heat_cov),
-        )
-        vmc_boost_cool = self._vmc_allow_cool_boost(
-            snapshot,
-            float(cool_sur_max),
-            float(cool_sur_wmean),
-            float(cool_cov),
-        )
-
-        vmc_req_heat = bool(vmc_boost_heat)
-        vmc_req_cool = bool(vmc_boost_cool)
-        # Dehumidification feasibility (ventilation-only vs coil water)
-        vmc_dehum_feasible: Optional[bool] = None
-        if bool(self.cfg.vmc_water_on_for_dehumid):
-            vmc_dehum_feasible = True
-        elif outdoor_dp_c is not None:
-            headroom = float(getattr(self.cfg, "vmc_dehum_outdoor_dp_headroom_c", 0.0))
-            vmc_dehum_feasible = outdoor_dp_c <= (float(vmc_dp_sp_c) - headroom)
-        vmc_req_dehum = bool(vmc_need_dehum or vmc_raw_req_dehum) and (vmc_dehum_feasible is not False)
-        vmc_req_water = (
-            vmc_req_heat
-            or vmc_req_cool
-            or (vmc_req_dehum and bool(self.cfg.vmc_water_on_for_dehumid))
-        )
-
-        return PlantDemandSignals(
-            heat_def_max_c=heat_def_max,
-            cool_sur_max_c=cool_sur_max,
-            heat_def_by_zone_c=heat_def_by_zone,
-            cool_sur_by_zone_c=cool_sur_by_zone,
-            heat_headroom_min_c=heat_headroom_min_c,
-            cool_headroom_min_c=cool_headroom_min_c,
-            outdoor_dp_c=outdoor_dp_c,
-            vmc_dehum_feasible=vmc_dehum_feasible,
-            # Profile-aware multi-zone demand metrics
-            heat_def_wmean_c=float(heat_def_wmean),
-            cool_sur_wmean_c=float(cool_sur_wmean),
-            heat_cov=float(heat_cov),
-            cool_cov=float(cool_cov),
-            heat_metric_basis=heat_metric_basis,
-            cool_metric_basis=cool_metric_basis,
-            dp_max_c=dp_max,
-            vmc_req_heating=vmc_req_heat,
-            vmc_req_cooling=vmc_req_cool,
-            vmc_req_dehumidif=vmc_req_dehum,
-            vmc_req_water=vmc_req_water,
-        )
 
     def _infer_mode(self, snapshot: PlantSnapshot, demand: PlantDemandSignals, zones_decision: Optional[ZonesDecision] = None) -> PlantMode:
         """Decide the high-level plant regime.
@@ -460,7 +323,7 @@ class PlantDecisionPlanner:
         # --------------------
         if bool(snapshot.presence_vacation) and bool(cfg.vacation_allows_vmc_off):
             dp_cur = as_float(demand.dp_max_c)
-            dp_sp = float(self._compute_vmc_dp_setpoint_c(snapshot))
+            dp_sp = float(demand.vmc_dp_sp_c) if getattr(demand, "vmc_dp_sp_c", None) is not None else float(self._compute_vmc_dp_setpoint_c(snapshot))
             ddp_vac = float(cfg.vacation_ddp_on_c)
             dew_risk = (dp_cur is not None) and (float(dp_cur) > (dp_sp + ddp_vac))
 
@@ -711,15 +574,13 @@ class PlantDecisionPlanner:
             mode = getattr(snapshot.vmc, "processing_mode", None) or cfg.vmc_mode_winter
 
         t_ref_c = self._get_indoor_reference_temp_c(snapshot)
-        rh_target_pct = float(cfg.vmc_setpoint_rh_pct)
-        profile = HVACOperatingProfile.from_value(demand.user_profile)
-        if profile == HVACOperatingProfile.SLEEP and cfg.vmc_setpoint_rh_sleep_pct is not None:
-            rh_target_pct = float(cfg.vmc_setpoint_rh_sleep_pct)
+        profile = HVACOperatingProfile.from_value(demand.user_profile, default=HVACOperatingProfile.COMFORT) or HVACOperatingProfile.COMFORT
+        rh_target_pct = float(self._resolve_vmc_rh_target_pct(demand.operative_season, profile))
 
-        dp_sp_c = self._compute_vmc_dp_setpoint_c_from(t_ref_c, rh_target_pct)
+        dp_sp_c = float(getattr(demand, "vmc_dp_sp_c", None) or self._compute_vmc_dp_setpoint_c_from(t_ref_c, rh_target_pct))
         ddp_sp_c = float(cfg.vmc_setpoint_ddp_c)
 
-        dp_current = demand.dp_max_c
+        dp_current = getattr(demand, "dp_dehum_c", None) or demand.dp_max_c
         boost_active = bool(demand.vmc_req_heating or demand.vmc_req_cooling or demand.vmc_req_dehumidif)
 
         air_speed = self._compute_vmc_air_speed(
@@ -782,7 +643,10 @@ class PlantDecisionPlanner:
 
     def _compute_vmc_dp_setpoint_c(self, snapshot: PlantSnapshot) -> float:
         t_ref = self._get_indoor_reference_temp_c(snapshot)
-        return self._compute_vmc_dp_setpoint_c_from(t_ref, float(self.cfg.vmc_setpoint_rh_pct))
+        operative = self._infer_operative_bucket(snapshot)
+        profile = HVACOperatingProfile.from_value(getattr(snapshot, "climate_preset_mode", None), default=HVACOperatingProfile.COMFORT) or HVACOperatingProfile.COMFORT
+        rh_target_pct = float(self._resolve_vmc_rh_target_pct(operative, profile))
+        return self._compute_vmc_dp_setpoint_c_from(t_ref, rh_target_pct)
 
     def _compute_vmc_dp_setpoint_c_from(self, t_c: float, rh_pct: float) -> float:
         if bool(getattr(self.cfg, "vmc_dp_setpoint_from_psychrometrics", True)):
@@ -794,11 +658,46 @@ class PlantDecisionPlanner:
             dp = float(self.cfg.vmc_setpoint_dp_c)
         return _clamp(dp, float(self.cfg.vmc_dp_sp_min_c), float(self.cfg.vmc_dp_sp_max_c))
 
-    def _vmc_need_dehumidification(self, dp_current_c: float | None, dp_setpoint_c: float) -> bool:
+    def _vmc_need_dehumidification(
+        self,
+        dp_current_c: float | None,
+        on_thr_c: float,
+        off_thr_c: float,
+    ) -> bool:
+        """Deumidifica con isteresi (anti-flapping) e memoria minimale."""
         if dp_current_c is None:
+            self._last_vmc_dehum_on = False
             return False
-        ddp = float(self.cfg.vmc_setpoint_ddp_c)
-        return float(dp_current_c) > (float(dp_setpoint_c) + ddp)
+        cur = float(dp_current_c)
+        prev = self._last_vmc_dehum_on
+        if prev is True:
+            keep = cur > float(off_thr_c)
+            self._last_vmc_dehum_on = bool(keep)
+            return bool(keep)
+        turn_on = cur > float(on_thr_c)
+        self._last_vmc_dehum_on = bool(turn_on)
+        return bool(turn_on)
+
+    def _infer_operative_bucket(self, snapshot: PlantSnapshot) -> str:
+        season = getattr(getattr(snapshot, "season", None), "season", None)
+        season_val = getattr(season, "value", None)
+        if season_val == "winter":
+            return "winter"
+        if season_val == "summer":
+            return "summer"
+        return "shoulder"
+
+    def _resolve_vmc_rh_target_pct(self, operative: Optional[str], profile: HVACOperatingProfile) -> float:
+        """Resolve RH target considering season + profile (Sleep override)."""
+        cfg = self.cfg
+        rh = float(cfg.vmc_setpoint_rh_pct)
+        if operative == "winter" and getattr(cfg, "vmc_setpoint_rh_winter_pct", None) is not None:
+            rh = float(cfg.vmc_setpoint_rh_winter_pct)
+        elif operative == "summer" and getattr(cfg, "vmc_setpoint_rh_summer_pct", None) is not None:
+            rh = float(cfg.vmc_setpoint_rh_summer_pct)
+        if profile == HVACOperatingProfile.SLEEP and cfg.vmc_setpoint_rh_sleep_pct is not None:
+            rh = float(cfg.vmc_setpoint_rh_sleep_pct)
+        return rh
 
     def _vmc_allow_heat_boost(
         self,

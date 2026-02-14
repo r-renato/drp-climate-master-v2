@@ -133,14 +133,25 @@ class PlantPlannerConfig:
     vmc_setpoint_rh_pct: float = 51.0
     # Optional: piu tolleranza in Sleep (evita over-ventilation notturna in inverno)
     vmc_setpoint_rh_sleep_pct: float | None = 56.0
+    # Optional seasonal RH targets. If set, they override vmc_setpoint_rh_pct
+    vmc_setpoint_rh_winter_pct: float | None = 55.0
+    vmc_setpoint_rh_summer_pct: float | None = 50.0
     vmc_setpoint_dp_c: float = 12.0
     vmc_setpoint_ddp_c: float = 0.3
+    # Isteresi (ΔDP) per evitare flapping: ON a (dp_sp + ddp), OFF a (dp_sp + ddp - hysteresis)
+    vmc_dehum_hysteresis_c: float = 0.2
+    # Percentile (0..1) used to derive a robust indoor DP for dehumidification control
+    # from zone dew points (1.0 = max, 0.5 = median)
+    vmc_dp_control_percentile: float = 0.8
     vmc_dp_sp_min_c: float = 7.0
     vmc_dp_sp_max_c: float = 15.0
     vmc_dp_setpoint_from_psychrometrics: bool = True
 
     # Water request gating: la deumidifica non deve forzare acqua calda/fredda salvo impianti specifici.
     vmc_water_on_for_dehumid: bool = False
+    # In "ventilation-only" (senza batteria acqua), la deumidifica è considerata fattibile solo se:
+    #   DP_outdoor <= DP_indoor_robust - headroom
+    # dove DP_indoor_robust è il percentile delle zone (vmc_dp_control_percentile).
     vmc_dehum_outdoor_dp_headroom_c: float = 0.2
 
     # Ventilation speed policy (0..5)

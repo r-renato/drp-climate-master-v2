@@ -22,9 +22,9 @@ from ..const import (
     CONF_UNITS,
     DEFAULT_TEMP_UNIT,
     DEFAULT_UNITS,
-    CONF_APT_WINDOWS,
+    # CONF_APT_WINDOWS,
     CONF_CONFORT_ZONES,
-    CONF_STATE,
+    # CONF_STATE,
     CONF_HOME_WINDOWS_STATE,
 )
 from ..domain.schema import BASE_CLIMATE_SCHEMA
@@ -34,7 +34,7 @@ from .config_flow import (
     validate_devices,
     validate_scenarios,
     validate_historical_data,
-    validate_apt_windows,
+    # validate_apt_windows,
     validate_confort_zones,
 )
 
@@ -60,7 +60,7 @@ def yaml_climate_to_entry_payload(hub_name: str, climate: Dict[str, Any]) -> Tup
     scenarios = normalized_climate.get(CONF_SCENARIOS, {})
     historical_data_cfg = normalized_climate.get(CONF_HISTORICAL_DATA, {})
     weather = normalized_climate.get(CONF_WEATHER)
-    apt_windows = normalized_climate.get(CONF_APT_WINDOWS)
+    # apt_windows = normalized_climate.get(CONF_APT_WINDOWS)
     confort_zones = normalized_climate.get(CONF_CONFORT_ZONES, {})
 
     # Parametri climatici (con default come nello schema)
@@ -68,16 +68,16 @@ def yaml_climate_to_entry_payload(hub_name: str, climate: Dict[str, Any]) -> Tup
     units = normalized_climate.get(CONF_UNITS, DEFAULT_UNITS)
 
     # Validazioni minime
-    if not apt_windows:
-        legacy_windows = normalized_climate.get(CONF_HOME_WINDOWS_STATE)
-        if legacy_windows:
-            apt_windows = {CONF_STATE: legacy_windows}
+    # if not apt_windows:
+    #     legacy_windows = normalized_climate.get(CONF_HOME_WINDOWS_STATE)
+    #     if legacy_windows:
+    #         apt_windows = {CONF_STATE: legacy_windows}
 
-    if not apt_windows:
-        raise ValueError("Manca 'apt_windows.state' (obbligatorio).")
+    # if not apt_windows:
+    #     raise ValueError("Manca 'apt_windows.state' (obbligatorio).")
 
-    if not isinstance(apt_windows, dict):
-        raise ValueError("Il blocco 'apt_windows' deve essere un oggetto.")
+    # if not isinstance(apt_windows, dict):
+    #     raise ValueError("Il blocco 'apt_windows' deve essere un oggetto.")
     if weather is None:
         raise ValueError("Manca 'weather' (obbligatorio).")
 
@@ -86,15 +86,15 @@ def yaml_climate_to_entry_payload(hub_name: str, climate: Dict[str, Any]) -> Tup
         (validate_devices, devices),
         (validate_scenarios, scenarios),
         (validate_historical_data, historical_data_cfg),
-        (validate_apt_windows, apt_windows),
+        # (validate_apt_windows, apt_windows),
         (validate_confort_zones, confort_zones),
     ):
         err = fn(payload)  # type: ignore[arg-type]
         if err:
             raise ValueError(err)
 
-    if not isinstance(apt_windows.get(CONF_STATE), str) or not apt_windows.get(CONF_STATE):
-        raise ValueError("Manca 'apt_windows.state' (obbligatorio).")
+    # if not isinstance(apt_windows.get(CONF_STATE), str) or not apt_windows.get(CONF_STATE):
+    #     raise ValueError("Manca 'apt_windows.state' (obbligatorio).")
 
     # Valida lo shape di weather e normalizza lat/lon
     weather_error, normalized_weather = normalize_weather_block(weather)
@@ -115,7 +115,7 @@ def yaml_climate_to_entry_payload(hub_name: str, climate: Dict[str, Any]) -> Tup
         CONF_DEVICES: deepcopy(devices),
         CONF_SCENARIOS: deepcopy(scenarios),
         CONF_HISTORICAL_DATA: deepcopy(historical_data_cfg),
-        CONF_APT_WINDOWS: deepcopy(apt_windows),
+        # CONF_APT_WINDOWS: deepcopy(apt_windows),
         CONF_CONFORT_ZONES: deepcopy(confort_zones),
         # runtime defaults
         OPT_UPDATE_INTERVAL_S: 30,

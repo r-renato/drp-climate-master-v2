@@ -258,7 +258,7 @@ class BaseSensor(
         self._area = area
         self._attr_name = name
         # unique_id stabile e safe
-        self._attr_unique_id: str = slugify(f"{entry.entry_id}_{unique_key}")
+        self._attr_unique_id: str | None  = slugify(f"{entry.entry_id}_{unique_key}")
 
         # Normalizzazione *generica* dell’unità:
         self._target_temp_unit: UnitOfTemperature | None = None
@@ -316,9 +316,9 @@ class BaseSensor(
         
         return round(value, self._attr_suggested_display_precision)
     
-    @property
-    def unique_id(self) -> str:
-        return self._attr_unique_id
+    # @property
+    # def unique_id(self) -> str:
+    #     return self._attr_unique_id
 
     @property
     def device_info(self) -> DeviceInfo:
