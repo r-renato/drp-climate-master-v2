@@ -1,8 +1,22 @@
 {
+  "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python",
+  "python.languageServer": "Pylance",
+  "python.analysis.languageServerMode": "light",
+  "python.analysis.indexing": false,
+  "python.analysis.diagnosticMode": "openFilesOnly",
   "python.analysis.typeCheckingMode": "basic",
-  "python.linting.enabled": true,
-  "ruff.lint.args": [
-    "--fix"
-  ],
-  "editor.formatOnSave": true
+  "python.analysis.autoImportCompletions": false,
+  "files.watcherExclude": {
+    "**/.git/**": true,
+    "**/__pycache__/**": true,
+    "**/.mypy_cache/**": true,
+    "**/.pytest_cache/**": true,
+    "**/.ruff_cache/**": true,
+    "**/.tox/**": true,
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/build/**": true,
+    "**/.venv/**": true,
+    "**/venv/**": true
+  }
 }

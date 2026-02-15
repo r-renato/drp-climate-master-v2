@@ -1,0 +1,31 @@
+{
+  "include": [
+    "custom_components/drp_climate_master_v2"
+  ],
+  "exclude": [
+    "**/.git/**",
+    "**/__pycache__/**",
+    "**/.mypy_cache/**",
+    "**/.pytest_cache/**",
+    "**/.ruff_cache/**",
+    "**/.tox/**",
+    "**/.eggs/**",
+    "**/build/**",
+    "**/dist/**",
+    "**/node_modules/**",
+    "**/.venv/**",
+    "**/venv/**",
+    "backup*/**",
+    "archive/**",
+    "aigen/**",
+    "config/.storage/**",
+    ".homeassistant/**"
+  ],
+  "extraPaths": [
+    "custom_components",
+    "custom_components/drp_climate_master_v2"
+  ],
+  "venvPath": ".",
+  "venv": "venv",
+  "typeCheckingMode": "basic",
+}
