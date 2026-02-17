@@ -263,6 +263,9 @@ class WeatherCoordinator(IntervalGatedSchedulerBase):
         #     self._schedule_season_detect("climate_update_no_refresh")
 
         # Debounced HVAC decider (prevents feedback loop storms)
+        if not self._coordinator.ready:
+            return 
+    
         self._schedule_decider()
 
     def _should_refresh_on_climate_update(self) -> bool:

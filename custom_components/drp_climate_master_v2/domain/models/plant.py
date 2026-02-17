@@ -7,6 +7,8 @@ import logging
 
 from homeassistant.components.climate.const import HVACMode
 
+from ...helpers.ha import EntityTimeInStateStats
+
 from ...domain.enums import HVACOperatingProfile
 from ...helpers.confort.confort_band import ComfortBandResult
 from ...helpers.sensor_aggregator import AggregatedValue
@@ -248,6 +250,10 @@ class VMCSnapshot:
     sensor_power_on_night: Optional[float] = None
     sensor_power_on_today: Optional[float] = None
 
+    minutes_power_on: Optional[float] = None
+    minutes_power_off: Optional[float] = None
+    spare_time_in_state_stats: Optional[EntityTimeInStateStats] = None
+
 @dataclass(slots=True)
 class SupplyUnitSnapshot:
     """
@@ -406,6 +412,38 @@ class PlantSnapshot:
 
         def ffaults(faults):
             return ", ".join(faults) if faults else "-"
+
+        def fmt_minutes_hm(minutes: Optional[float], *, nd_min: int = 0) -> str:
+            """Format a duration given in minutes as 'Hh Mm' (or 'Mm').
+
+            Examples:
+            - 15      -> '15m'
+            - 75      -> '1h 15m'
+            - 61.7    -> '1h 2m'       (default rounds to nearest minute)
+            - None    -> '-'
+            """
+            if minutes is None:
+                return "-"
+
+            try:
+                m = float(minutes)
+            except (TypeError, ValueError):
+                return "-"
+
+            if m < 0:
+                m = 0.0
+
+            # Round to requested precision in minutes, then convert to integer minutes for H/M split
+            if nd_min <= 0:
+                total_min_int = int(round(m))
+                h, mm = divmod(total_min_int, 60)
+                return f"{h}h {mm}m" if h else f"{mm}m"
+
+            # If you want decimals in minutes, keep them only in the minute part
+            h = int(m // 60)
+            mm = m - (h * 60)
+            mm_str = f"{mm:.{nd_min}f}".rstrip("0").rstrip(".")
+            return f"{h}h {mm_str}m" if h else f"{mm_str}m"
 
         # --- parti comuni/top-level ---
         ts = self.timestamp.isoformat()
@@ -673,9 +711,16 @@ class PlantSnapshot:
                 f"  Alarm Low Water T  :: {fbool(self.vmc.alarm_low_water_temp)}",
                 f"  Alarm High Water T :: {fbool(self.vmc.alarm_high_water_temp)}",
                 f"  Alarm General      :: {fbool(self.vmc.alarm_alarm)}",
-                f"  Uptime             :: {fnum(self.vmc.sensor_power_on_today,0)} min",
-                f"  Downtime           :: {fnum(self.vmc.sensor_power_on_night,0)} min",
+                f"  Uptime             :: {fnum(self.vmc.minutes_power_on,0)} min",
+                f"  Downtime           :: {fnum(self.vmc.minutes_power_off,0)} min",
             ]
+
+            if self.vmc.spare_time_in_state_stats:
+                stiss = [int(self.vmc.spare_time_in_state_stats.durations_s.get(i, 0.0)/60) for i in range(6)]
+                for i, spare in enumerate(stiss):
+                    lines += [
+                        f"  Uptime Spare set {i} :: {fmt_minutes_hm(spare)}",
+                    ]
         else:
             lines += [f"  -"]
         lines += [f"------------------------------------------------------------------"]

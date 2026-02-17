@@ -1,78 +1,16 @@
-"""Demand signals builder (clustered).
-
-Goal
-----
-Refactor the monolithic `_compute_demands()` into a dedicated class with focused methods
-that produce *clusters* of signals:
-
-1) Zone comfort cluster
-   - per-zone deficits/surplus vs comfort band
-   - headroom (preheat/pre-cool gating)
-   - weighted/count mean + coverage metrics
-
-2) Dew-point cluster
-   - dp_max (safety / diagnostics)
-   - dp_dehum (robust control DP, e.g. percentile)
-   - outdoor_dp best-effort
-
-3) VMC cluster
-   - DP setpoint + hysteresis thresholds
-   - feasibility (water coil vs ventilation-only)
-   - VMC requests (heat/cool/dehum/water)
-
-Integration
------------
-In your planner you typically do:
-
-    from .demand_signals_builder import DemandSignalsBuilder
-
-    builder = DemandSignalsBuilder(
-        planner=self,
-        zone_weight_fn=_zone_weight,  # keep your exact weighting logic
-    )
-    signals = builder.build(snapshot)
-
-This module is defensive:
-- it filters kwargs against the current PlantDemandSignals dataclass fields, so it
-  won't break if the dataclass schema differs between branches.
-"""
-
 from __future__ import annotations
 
-from dataclasses import dataclass, fields as dc_fields, is_dataclass
-from typing import Any, Callable, Dict, Optional, Protocol, List
+from dataclasses import fields as dc_fields, is_dataclass
+from typing import Any, Callable, Dict, List, Optional, Protocol
 
-# --- Project imports (keep these paths aligned with your repo structure) ---
-from .contracts import MetricBasis, PlantDemandSignals
-from ...domain.enums import HVACOperatingProfile
-from ...domain.models.plant import PlantSnapshot
+from ..contracts import MetricBasis, PlantDemandSignals
+from ....domain.enums import HVACOperatingProfile
+from ....domain.models.plant import PlantSnapshot
+from ....helpers.psychrometric import dew_point_celsius
+from ....helpers.utils import as_float
 
-from ...helpers.utils import as_float
-from ...helpers.psychrometric import dew_point_celsius
-
-def _percentile_sorted(values_sorted: List[float], p01: float) -> float:
-    """Percentile on a *sorted* list.
-
-    p01 in [0..1]. Uses linear interpolation between closest ranks.
-    """
-    if not values_sorted:
-        raise ValueError("empty values")
-    p = max(0.0, min(1.0, float(p01)))
-    if len(values_sorted) == 1:
-        return float(values_sorted[0])
-
-    # rank in [0..n-1]
-    n = len(values_sorted)
-    r = p * (n - 1)
-    lo = int(r)
-    hi = min(lo + 1, n - 1)
-    frac = r - lo
-    return float(values_sorted[lo]) * (1.0 - frac) + float(values_sorted[hi]) * frac
-
-
-# -------------------------
-# Planner dependency surface
-# -------------------------
+from .clusters import DewPointCluster, VmcCluster, ZoneComfortCluster, ZoneDemandMetrics
+from .stats import percentile_sorted
 
 
 class PlannerLike(Protocol):
@@ -110,99 +48,22 @@ class PlannerLike(Protocol):
     ) -> bool: ...
 
 
-# -------------------------
-# Signal clusters
-# -------------------------
-
-
-@dataclass(slots=True)
-class ZoneComfortCluster:
-    heat_def_max_c: float
-    cool_sur_max_c: float
-    heat_def_by_zone_c: Dict[str, float]
-    cool_sur_by_zone_c: Dict[str, float]
-
-    # headroom (used by MPC preheat gating)
-    heat_headroom_min_c: Optional[float]
-    cool_headroom_min_c: Optional[float]
-
-    # Weighted/count accumulators
-    heat_den_w: float
-    heat_out_w: float
-    heat_sum_wdef: float
-    heat_den_n: int
-    heat_out_n: int
-    heat_sum_ndef: float
-
-    cool_den_w: float
-    cool_out_w: float
-    cool_sum_wsur: float
-    cool_den_n: int
-    cool_out_n: int
-    cool_sum_nsur: float
-
-    # Dew-point raw values
-    dp_max_c: Optional[float]
-    dp_values: List[float]
-
-
-@dataclass(slots=True)
-class ZoneDemandMetrics:
-    heat_def_wmean_c: float
-    heat_cov: float
-    heat_metric_basis: MetricBasis
-
-    cool_sur_wmean_c: float
-    cool_cov: float
-    cool_metric_basis: MetricBasis
-
-
-@dataclass(slots=True)
-class DewPointCluster:
-    dp_max_c: Optional[float]
-    dp_dehum_c: Optional[float]
-    outdoor_dp_c: Optional[float]
-
-
-@dataclass(slots=True)
-class VmcCluster:
-    vmc_dp_sp_c: Optional[float]
-    vmc_dehum_on_thr_c: Optional[float]
-    vmc_dehum_off_thr_c: Optional[float]
-    vmc_dehum_feasible: Optional[bool]
-
-    vmc_req_heating: bool
-    vmc_req_cooling: bool
-    vmc_req_dehumidif: bool
-    vmc_req_water: bool
-
-
-# -------------------------
-# Builder
-# -------------------------
-
-
 class DemandSignalsBuilder:
-    """Compute PlantDemandSignals via dedicated cluster methods."""
+    """Compute PlantDemandSignals via clustered methods (zone comfort / DP / VMC)."""
 
     def __init__(
         self,
         planner: PlannerLike,
         *,
         zone_weight_fn: Callable[[Any], float],
-        percentile_sorted_fn: Callable[[List[float], float], float] = _percentile_sorted,
+        percentile_sorted_fn: Callable[[List[float], float], float] = percentile_sorted,
     ) -> None:
         self._planner = planner
         self.cfg = planner.cfg
         self._zone_weight_fn = zone_weight_fn
         self._percentile_sorted_fn = percentile_sorted_fn
 
-    # --------
-    # Public
-    # --------
-
-    def build(self, snapshot: PlantSnapshot) -> PlantDemandSignals:
-        """Full build: compute clusters, then assemble PlantDemandSignals."""
+    def build(self, *, snapshot: PlantSnapshot) -> PlantDemandSignals:
         zc = self._compute_zone_comfort_cluster(snapshot)
         zm = self._compute_zone_demand_metrics(zc)
         dp = self._compute_dew_point_cluster(snapshot, zc)
@@ -223,7 +84,7 @@ class DemandSignalsBuilder:
             cool_cov=zm.cool_cov,
             heat_metric_basis=zm.heat_metric_basis,
             cool_metric_basis=zm.cool_metric_basis,
-            # dew-point
+            # dew point
             dp_max_c=dp.dp_max_c,
             dp_dehum_c=dp.dp_dehum_c,
             outdoor_dp_c=dp.outdoor_dp_c,
@@ -252,7 +113,6 @@ class DemandSignalsBuilder:
         heat_headroom_min_c: Optional[float] = None
         cool_headroom_min_c: Optional[float] = None
 
-        # Weighted/quorum metrics
         heat_den_w = 0.0
         heat_out_w = 0.0
         heat_sum_wdef = 0.0
@@ -279,7 +139,7 @@ class DemandSignalsBuilder:
             t_min = as_float(getattr(band, "t_op_min", None))
             t_max = as_float(getattr(band, "t_op_max", None))
 
-            # comfort headroom (MPC preheat gating)
+            # headroom
             if t_meas is not None and t_min is not None:
                 hh = float(t_meas) - float(t_min)
                 heat_headroom_min_c = hh if heat_headroom_min_c is None else min(heat_headroom_min_c, hh)
@@ -295,13 +155,11 @@ class DemandSignalsBuilder:
 
                 w = float(self._zone_weight_fn(z) or 0.0)
 
-                # count-based always
                 heat_den_n += 1
                 heat_sum_ndef += d
                 if d > 0.0:
                     heat_out_n += 1
 
-                # weighted only if weight > 0
                 if w > 0.0:
                     heat_den_w += w
                     heat_sum_wdef += w * d
@@ -407,7 +265,7 @@ class DemandSignalsBuilder:
                 except Exception:
                     outdoor_dp_c = None
 
-        # Robust DP for dehumidification control: percentile of zone DPs
+        # Robust DP for dehumidification control
         dp_dehum_c: Optional[float] = None
         if zc.dp_values:
             xs = sorted(zc.dp_values)
@@ -436,7 +294,7 @@ class DemandSignalsBuilder:
         vmc = getattr(snapshot, "vmc", None)
         vmc_raw_req_dehum = bool(getattr(vmc, "request_dehumidification", False)) if vmc else False
 
-        # Compute dp_sp coherent with profile/season (used for thresholds and logs)
+        # dp_sp coherent with profile/season
         preset_raw = getattr(snapshot, "climate_preset_mode", None)
         profile = HVACOperatingProfile.from_value(preset_raw, default=HVACOperatingProfile.COMFORT) or HVACOperatingProfile.COMFORT
         operative = self._planner._infer_operative_bucket(snapshot)
@@ -494,19 +352,20 @@ class DemandSignalsBuilder:
         )
 
     # -----------------
-    # Assembly helpers
+    # Assembly helper
     # -----------------
 
     def _safe_signals_init(self, payload: Dict[str, Any]) -> PlantDemandSignals:
-        """Init PlantDemandSignals filtering kwargs to the current dataclass schema."""
         kwargs = dict(payload)
-
         try:
             if is_dataclass(PlantDemandSignals):
                 allowed = {f.name for f in dc_fields(PlantDemandSignals)}
                 kwargs = {k: v for k, v in kwargs.items() if k in allowed}
         except Exception:
-            # fallback: try full payload
             pass
 
         return PlantDemandSignals(**kwargs)  # type: ignore[arg-type]
+
+
+# Backward-compat alias
+PlantDemandSignalsBuilder = DemandSignalsBuilder

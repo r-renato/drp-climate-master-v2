@@ -96,275 +96,652 @@ class PlantMode(str, Enum):
 
 @dataclass(slots=True)
 class PlantDemandSignals:
-    """
-    Segnali aggregati di domanda (multi-zona) e richieste device, prodotti dal planner impianto.
+    """Aggregated demand signals for the plant planner (multi-zone + dew-point + VMC).
 
-    I nomi dei campi sono allineati alle chiavi attuali di PlantDecision.signals per:
-      - logging/telemetria consistenti
-      - retro-compatibilità con la struttura dict già usata nel planner
+    This dataclass is the **single observation layer** used by the plant-level decision:
+    it summarizes *what the house needs* (comfort) and *what the devices request/can do*
+    (VMC requests & feasibility), plus some **decision diagnostics** to explain why a
+    mode was chosen.
 
-    --- DOMANDA SENSIBILE (comfort band su T_op) ---
-    Definizioni per una singola zona z:
-      - heat_def_z = max(0, T_op_min(z) - T_meas(z))   [°C]
-      - cool_sur_z = max(0, T_meas(z) - T_op_max(z))   [°C]
-    dove T_meas è tipicamente T_op di zona (fallback: temperatura aria).
+    Design principles
+    -----------------
+    - **Clustered signals**: fields are logically grouped (zone comfort, dew-point,
+      VMC, user intent, MPC) even if stored flat for logging and backward compatibility.
+    - **Deterministic semantics**: each field has a clear unit, range and meaning.
+    - **Observability-first**: most “extra” fields exist to make `_infer_mode()`
+      explainable in logs and to speed up commissioning/tuning.
 
-    *heat_def_*: misura “quanto manca” per rientrare nella banda di comfort lato heating.
-    *cool_sur_*: misura “quanto eccede” per rientrare nella banda di comfort lato cooling.
+    Cluster A - Zone comfort (sensible demand)
+    ----------------------------------------
+    For each zone *z*:
+      - heat_def_z = max(0, T_min(z) - T_meas(z))   [°C]
+      - cool_sur_z = max(0, T_meas(z) - T_max(z))   [°C]
 
-    - *_max: worst-case (massimo su tutte le zone). Utile per COMFORT/BOOST e come override safety/comfort.
-    - *_by_zone: mappa dettagliata per diagnosi/telemetria.
-    - *_wmean: media (preferibilmente pesata per area/importanza zona) dei deficit/surplus.
-      Se i pesi non sono disponibili o tutti zero, degrada a media “count-based”.
-    - *_cov: coverage (0..1), cioè frazione di “casa” fuori banda:
-        - in weighted: somma pesi delle zone con deficit/surplus > 0 diviso somma pesi zone valide
-        - in count: numero zone con deficit/surplus > 0 diviso numero zone valide
-      Serve a evitare avvii PDC per una sola zona appena fuori banda in profili ECO/SLEEP/AWAY/VACATION.
+    where T_meas is typically operative temp (T_op), fallback to air temperature.
+    Aggregations:
+      - *_max      : worst-case zone (safety/comfort override)
+      - *_by_zone  : per-zone map (diagnostics)
+      - *_wmean    : weighted mean (by zone weight) or count-based fallback
+      - *_cov      : coverage of zones/weights out of band (0..1)
+      - *_metric_basis : tells whether coverage/mean are WEIGHTED, COUNT or NONE
 
-    - *_metric_basis: indica come sono state calcolate coverage e wmean:
-        "weighted" = usati pesi di zona
-        "count"    = fallback a conteggio zone (pesi non disponibili/utili)
-        "none"     = nessuna zona valida per calcolo
+    Cluster B - Dew-point (safety + latent control)
+    ----------------------------------------------
+    - dp_max_c   : worst-case indoor dew point (condensation risk indicator)
+    - dp_dehum_c : robust indoor dew point for latent control (e.g. percentile)
+    - outdoor_dp_c : best-effort outdoor dew point (feasibility for ventilation-only dehumid)
 
-    --- SAFETY IGROMETRICA (anticondensa) ---
-    - dp_max_c: massimo dew point tra zone [°C]. È un segnale di safety: “zona più a rischio condensa”.
-      In cooling è tipicamente usato per fissare una mandata radiante minima sicura.
-    - dp_dehum_c: dew point “robusto” per controllo deumidifica [°C], tipicamente percentile delle zone
-      (es. p80), per evitare che un solo outlier faccia partire la deumidifica/ventilazione aggressiva.
+    Cluster C - VMC (requests + thresholds)
+    --------------------------------------
+    - vmc_dp_sp_c / vmc_dehum_on_thr_c / vmc_dehum_off_thr_c : explain DP hysteresis control
+    - vmc_dehum_feasible : whether dehumidification can work (coil vs ventilation-only constraints)
+    - vmc_req_* : what VMC is asking from hydronics/plant (heat/cool/dehum/water)
 
-    --- DEBUG VMC (telemetria esplicativa) ---
-    - vmc_dp_sp_c: setpoint DP calcolato (da T_ref + RH_target o fallback config) [°C]
-    - vmc_dehum_on_thr_c: soglia ON per deumidifica (dp_sp + ddp) [°C]
-    - vmc_dehum_off_thr_c: soglia OFF per deumidifica (on_thr - hysteresis) [°C]
+    Cluster D - User intent & decision diagnostics (filled by `_infer_mode()`)
+    -------------------------------------------------------------------------
+    - user_hvac_mode / user_profile / user_forced_off : HA intent mapping
+    - ctrl_aggr, *_on_thr_c, quorum_cov_req : thresholds after profile scaling
+    - *_override, *_quorum_ok, *_mean_ok : internal gating booleans (mostly for ECO/SLEEP/AWAY/VACATION)
+    - any_heat/any_cool/any_dehum, heat_sensible/cool_sensible : final flags consumed by regime logic
+    - runtime_season / operative_season : season mapping used for gating/conflict resolution
 
-    --- RICHIESTE VMC (vincoli macchina) ---
-    - vmc_req_heating/cooling/dehumidif/water: richieste della VMC verso il circuito idraulico/produzione.
-      Possono forzare o influenzare il regime impianto (es. DEHUM_ASSIST).
+    Cluster E - MPC/ZonesPlan hints (optional)
+    -----------------------------------------
+    - zones_any_heat_demand, zones_full_on_pct, zones_mpc_heat_preheat_ok :
+      allow integrating a zone-level MPC plan without making it silently override comfort logic.
     """
 
     # --- Worst-case (max across zones) ---
     heat_def_max_c: float = field(
         default=0.0,
-        metadata={"doc": "Massimo deficit heating tra zone: max(0, T_min - T_meas). [°C]"},
+        metadata={
+            "doc": "Worst-case sensible heating deficit across zones.",
+            "unit": "°C",
+            "range": "[0..+inf)",
+            "formula": "max_z max(0, T_min(z) - T_meas(z))",
+            "source": "DemandSignalsBuilder.ZoneComfortCluster",
+        },
     )
     cool_sur_max_c: float = field(
         default=0.0,
-        metadata={"doc": "Massimo surplus cooling tra zone: max(0, T_meas - T_max). [°C]"},
+        metadata={
+            "doc": "Worst-case sensible cooling surplus across zones.",
+            "unit": "°C",
+            "range": "[0..+inf)",
+            "formula": "max_z max(0, T_meas(z) - T_max(z))",
+            "source": "DemandSignalsBuilder.ZoneComfortCluster",
+        },
     )
 
     # --- Per-zone maps ---
     heat_def_by_zone_c: Dict[str, float] = field(
         default_factory=dict,
-        metadata={"doc": "Mappa {zona: deficit heating} in °C."},
+        metadata={
+            "doc": "Per-zone sensible heating deficit map.",
+            "unit": "°C",
+            "range": "values in [0..+inf)",
+            "formula": "max(0, T_min(z) - T_meas(z))",
+            "source": "DemandSignalsBuilder.ZoneComfortCluster",
+        },
     )
     cool_sur_by_zone_c: Dict[str, float] = field(
         default_factory=dict,
-        metadata={"doc": "Mappa {zona: surplus cooling} in °C."},
+        metadata={
+            "doc": "Per-zone sensible cooling surplus map.",
+            "unit": "°C",
+            "range": "values in [0..+inf)",
+            "formula": "max(0, T_meas(z) - T_max(z))",
+            "source": "DemandSignalsBuilder.ZoneComfortCluster",
+        },
     )
 
     # --- Comfort headroom (diagnostic / MPC preheat gating) ---
     heat_headroom_min_c: Optional[float] = field(
         default=None,
-        metadata={"doc": "Minimo (T_meas - T_min) tra zone valide. Valori piccoli => vicino al limite basso. [°C]"},
+        metadata={
+            "doc": "Minimum heating headroom across zones: how close the house is to lower comfort bound.",
+            "unit": "°C",
+            "range": "(-inf..+inf)",
+            "formula": "min_z (T_meas(z) - T_min(z))",
+            "source": "DemandSignalsBuilder.ZoneComfortCluster",
+            "note": "Small/negative values mean at least one zone is near/below the lower bound (preheat gating).",
+        },
     )
     cool_headroom_min_c: Optional[float] = field(
         default=None,
-        metadata={"doc": "Minimo (T_max - T_meas) tra zone valide. Valori piccoli => vicino al limite alto. [°C]"},
+        metadata={
+            "doc": "Minimum cooling headroom across zones: how close the house is to upper comfort bound.",
+            "unit": "°C",
+            "range": "(-inf..+inf)",
+            "formula": "min_z (T_max(z) - T_meas(z))",
+            "source": "DemandSignalsBuilder.ZoneComfortCluster",
+            "note": "Small/negative values mean at least one zone is near/above the upper bound (precool gating).",
+        },
     )
 
     # --- Profile-aware multi-zone demand metrics ---
     heat_def_wmean_c: float = field(
         default=0.0,
-        metadata={"doc": "Media (pesata o count-based) dei deficit heating tra zone. [°C]"},
+        metadata={
+            "doc": "Mean sensible heating deficit across zones (weighted if weights available).",
+            "unit": "°C",
+            "range": "[0..+inf)",
+            "source": "DemandSignalsBuilder.ZoneDemandMetrics",
+        },
     )
     cool_sur_wmean_c: float = field(
         default=0.0,
-        metadata={"doc": "Media (pesata o count-based) dei surplus cooling tra zone. [°C]"},
+        metadata={
+            "doc": "Mean sensible cooling surplus across zones (weighted if weights available).",
+            "unit": "°C",
+            "range": "[0..+inf)",
+            "source": "DemandSignalsBuilder.ZoneDemandMetrics",
+        },
     )
     heat_cov: float = field(
         default=0.0,
-        metadata={"doc": "Coverage heating (0..1): quota di zone/area con deficit>0."},
+        metadata={
+            "doc": "Heating coverage (0..1): fraction of zones/weights with heat_def > 0.",
+            "unit": "1",
+            "range": "[0..1]",
+            "source": "DemandSignalsBuilder.ZoneDemandMetrics",
+        },
     )
     cool_cov: float = field(
         default=0.0,
-        metadata={"doc": "Coverage cooling (0..1): quota di zone/area con surplus>0."},
+        metadata={
+            "doc": "Cooling coverage (0..1): fraction of zones/weights with cool_sur > 0.",
+            "unit": "1",
+            "range": "[0..1]",
+            "source": "DemandSignalsBuilder.ZoneDemandMetrics",
+        },
     )
     heat_metric_basis: MetricBasis = field(
         default=MetricBasis.NONE,
-        metadata={"doc": 'Metodo usato per heat_cov/heat_def_wmean: "weighted"|"count"|"none".'},
+        metadata={
+            "doc": "Basis used to compute heat_cov and heat_def_wmean_c.",
+            "unit": "-",
+            "values": ["weighted", "count", "none"],
+            "source": "DemandSignalsBuilder.ZoneDemandMetrics",
+        },
     )
     cool_metric_basis: MetricBasis = field(
         default=MetricBasis.NONE,
-        metadata={"doc": 'Metodo usato per cool_cov/cool_sur_wmean: "weighted"|"count"|"none".'},
+        metadata={
+            "doc": "Basis used to compute cool_cov and cool_sur_wmean_c.",
+            "unit": "-",
+            "values": ["weighted", "count", "none"],
+            "source": "DemandSignalsBuilder.ZoneDemandMetrics",
+        },
     )
 
     # --- Dew point safety ---
     dp_max_c: Optional[float] = field(
         default=None,
-        metadata={"doc": "Dew point massimo tra zone (worst-case anticondensa). [°C]"},
+        metadata={
+            "doc": "Worst-case indoor dew point across zones (condensation risk indicator).",
+            "unit": "°C",
+            "range": "(-50..+50) typical",
+            "source": "DemandSignalsBuilder.DewPointCluster",
+        },
     )
     dp_dehum_c: Optional[float] = field(
         default=None,
         metadata={
-            "doc": "Dew point robusto (percentile) usato per controllo deumidifica/aria VMC. [°C]"
+            "doc": "Robust indoor dew point for latent control (e.g., percentile of zone DPs).",
+            "unit": "°C",
+            "range": "(-50..+50) typical",
+            "source": "DemandSignalsBuilder.DewPointCluster",
         },
     )
     # --- VMC debug / transparency ---
     vmc_dp_sp_c: Optional[float] = field(
         default=None,
-        metadata={"doc": "Setpoint dew-point calcolato per la VMC (da psicrometria o fallback). [°C]"},
+        metadata={
+            "doc": "Computed VMC dew-point setpoint (from psychrometrics or config fallback).",
+            "unit": "°C",
+            "source": "DemandSignalsBuilder.VmcCluster",
+        },
     )
     vmc_dehum_on_thr_c: Optional[float] = field(
         default=None,
-        metadata={"doc": "Soglia ON deumidifica: dp_sp + ddp. [°C]"},
+        metadata={
+            "doc": "Dehumidification ON threshold (dew-point): dp_sp + ddp.",
+            "unit": "°C",
+            "source": "DemandSignalsBuilder.VmcCluster",
+        },
     )
     vmc_dehum_off_thr_c: Optional[float] = field(
         default=None,
-        metadata={"doc": "Soglia OFF deumidifica: on_thr - hysteresis. [°C]"},
+        metadata={
+            "doc": "Dehumidification OFF threshold (dew-point): on_thr - hysteresis.",
+            "unit": "°C",
+            "source": "DemandSignalsBuilder.VmcCluster",
+        },
     )
     outdoor_dp_c: Optional[float] = field(
         default=None,
-        metadata={"doc": "Dew point esterno (best-effort) per valutare fattibilità deumidifica via sola ventilazione. [°C]"},
+        metadata={
+            "doc": "Best-effort outdoor dew point used to assess ventilation-only dehumid feasibility.",
+            "unit": "°C",
+            "source": "DemandSignalsBuilder.DewPointCluster",
+        },
     )
     vmc_dehum_feasible: Optional[bool] = field(
         default=None,
-        metadata={"doc": "True se la deumidifica richiesta è fisicamente fattibile con l'hardware/config."},
+        metadata={
+            "doc": "Whether dehumidification is feasible given configuration/hardware constraints.",
+            "unit": "bool",
+            "values": ["True", "False", "None(unknown)"],
+            "source": "DemandSignalsBuilder.VmcCluster",
+        },
     )
 
     # --- VMC requests ---
     vmc_req_heating: bool = field(
         default=False,
-        metadata={"doc": "VMC richiede heating (acqua calda / batteria)."},
+        metadata={
+            "doc": "VMC requests heating (hot water coil / thermal assist).",
+            "unit": "bool",
+            "source": "DemandSignalsBuilder.VmcCluster",
+        },
     )
     vmc_req_cooling: bool = field(
         default=False,
-        metadata={"doc": "VMC richiede cooling (acqua fredda / batteria)."},
+        metadata={
+            "doc": "VMC requests cooling (chilled water coil / thermal assist).",
+            "unit": "bool",
+            "source": "DemandSignalsBuilder.VmcCluster",
+        },
     )
     vmc_req_dehumidif: bool = field(
         default=False,
-        metadata={"doc": "VMC richiede deumidificazione (latente)."},
+        metadata={
+            "doc": "VMC requests dehumidification (latent control).",
+            "unit": "bool",
+            "source": "DemandSignalsBuilder.VmcCluster",
+        },
     )
     vmc_req_water: bool = field(
         default=False,
-        metadata={"doc": "VMC richiede acqua/circolazione (pompa circuito diretto)."},
+        metadata={
+            "doc": "VMC requires hydronic water circulation (direct pump ON).",
+            "unit": "bool",
+            "source": "DemandSignalsBuilder.VmcCluster",
+        },
     )
 
     zones_any_heat_demand: bool = field(
         default=False,
-        metadata={"doc": "True se il planner zone (MPC) ha pianificato almeno una valvola ON per heating."},
+        metadata={
+            "doc": "True if the zone planner (MPC/ZonesPlan) scheduled at least one valve ON for heating.",
+            "unit": "bool",
+            "source": "ZonesDecision",
+        },
     )
     zones_full_on_pct: Optional[float] = field(
         default=None,
-        metadata={"doc": "Percentuale di zone FULL-ON (duty=1.0) nel piano MPC, se disponibile."},
+        metadata={
+            "doc": "Percentage of zones in FULL-ON state (duty=1.0) in MPC plan, if available.",
+            "unit": "%",
+            "range": "[0..100]",
+            "source": "ZonesDecision.meta",
+        },
     )
     zones_mpc_heat_preheat_ok: Optional[bool] = field(
         default=None,
-        metadata={"doc": "True se la richiesta MPC di heating è accettata come preheat (headroom basso, ecc.)."},
+        metadata={
+            "doc": "True if MPC heating is accepted as 'preheat' (only when close to the lower bound).",
+            "unit": "bool",
+            "values": ["True", "False", "None(not evaluated)"],
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
 
     # --- Other ---
     user_hvac_mode: str = field(
         default="off",
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "User HVAC mode as seen by the HA Climate entity (normalized string, e.g. 'off'/'auto').",
+            "unit": "-",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     user_profile: str = field(
         default="off",
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "User preset/profile (HVACOperatingProfile.value), stored as a string for logs.",
+            "unit": "-",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     user_forced_off: bool = field(
         default=False,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "True when the user explicitly forces HVAC OFF (absolute override).",
+            "unit": "bool",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     ctrl_aggr: float = field(
         default=0.0,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Control aggressiveness factor derived from profile (BOOST > 1, AWAY/VACATION < 1).",
+            "unit": "1",
+            "range": "(0..+inf)",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     heat_on_thr_c: float = field(
         default=0.0,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Effective heating ON threshold after profile scaling.",
+            "unit": "°C",
+            "range": "[0..+inf)",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     cool_on_thr_c: float = field(
         default=0.0,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Effective cooling ON threshold after profile scaling.",
+            "unit": "°C",
+            "range": "[0..+inf)",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     quorum_cov_req: float = field(
         default=0.0,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Required coverage (0..1) for energy-saving profiles (ECO/SLEEP/AWAY/VACATION).",
+            "unit": "1",
+            "range": "[0..1]",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     heat_override: Optional[bool] = field(
         default=None,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Heating override triggered by large worst-case deficit (bypasses quorum).",
+            "unit": "bool",
+            "values": ["True", "False", "None(not applicable)"],
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     heat_quorum_ok: Optional[bool] = field(
         default=None,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Heating quorum check: heat_cov >= quorum_cov_req (energy-saving profiles).",
+            "unit": "bool",
+            "values": ["True", "False", "None(not applicable)"],
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     heat_mean_ok: Optional[bool] = field(
         default=None,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Heating mean check: heat_def_wmean >= heat_on_thr * mean_factor (energy-saving profiles).",
+            "unit": "bool",
+            "values": ["True", "False", "None(not applicable)"],
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     cool_override: Optional[bool] = field(
         default=None,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Cooling override triggered by large worst-case surplus (bypasses quorum).",
+            "unit": "bool",
+            "values": ["True", "False", "None(not applicable)"],
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     cool_quorum_ok: Optional[bool] = field(
         default=None,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Cooling quorum check: cool_cov >= quorum_cov_req (energy-saving profiles).",
+            "unit": "bool",
+            "values": ["True", "False", "None(not applicable)"],
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     cool_mean_ok: Optional[bool] = field(
         default=None,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Cooling mean check: cool_sur_wmean >= cool_on_thr * mean_factor (energy-saving profiles).",
+            "unit": "bool",
+            "values": ["True", "False", "None(not applicable)"],
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     any_heat: bool = field(
         default=False,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Final aggregated flag: any heating reason exists (sensible, VMC, or MPC-preheat).",
+            "unit": "bool",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     any_cool: bool = field(
         default=False,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Final aggregated flag: any cooling reason exists (sensible or VMC).",
+            "unit": "bool",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     any_dehum: bool = field(
         default=False,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Final aggregated flag: any dehumidification reason exists (latent control).",
+            "unit": "bool",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     heat_sensible: bool = field(
         default=False,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "True if sensible heating demand is considered significant under current profile.",
+            "unit": "bool",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     cool_sensible: bool = field(
         default=False,
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "True if sensible cooling demand is considered significant under current profile.",
+            "unit": "bool",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     runtime_season: str = field(
         default="--",
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Runtime season raw value coming from snapshot (e.g. 'winter', 'summer', ...).",
+            "unit": "-",
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
     operative_season: str = field(
         default="--",
-        metadata={"doc": "tbd"},
+        metadata={
+            "doc": "Operative bucket derived from runtime season (winter/summer/shoulder) used for gating.",
+            "unit": "-",
+            "values": ["winter", "summer", "shoulder", "--"],
+            "source": "PlantDecisionPlanner._infer_mode",
+        },
     )
 
-    # def as_signals(self) -> Dict[str, Any]:
-    #     """
-    #     Restituisce un dict con le stesse chiavi già usate dal planner (compatibilità logging/telemetria).
-    #     """
-    #     return {
-    #         "heat_def_max_c": float(self.heat_def_max_c),
-    #         "cool_sur_max_c": float(self.cool_sur_max_c),
-    #         "heat_def_by_zone_c": dict(self.heat_def_by_zone_c),
-    #         "cool_sur_by_zone_c": dict(self.cool_sur_by_zone_c),
-    #         "heat_def_wmean_c": float(self.heat_def_wmean_c),
-    #         "cool_sur_wmean_c": float(self.cool_sur_wmean_c),
-    #         "heat_cov": float(self.heat_cov),
-    #         "cool_cov": float(self.cool_cov),
-    #         "heat_metric_basis": self.heat_metric_basis,
-    #         "cool_metric_basis": self.cool_metric_basis,
-    #         "dp_max_c": self.dp_max_c,
-    #         "vmc_req_heating": bool(self.vmc_req_heating),
-    #         "vmc_req_cooling": bool(self.vmc_req_cooling),
-    #         "vmc_req_dehumidif": bool(self.vmc_req_dehumidif),
-    #         "vmc_req_water": bool(self.vmc_req_water),
-    #     }
+    def __str__(self) -> str:
+        # --- helper di formattazione compatti e robusti (coerenti con PlantDecision.__str__) ---
+        def fnum(x, nd=1):
+            if x is None:
+                return "-"
+            try:
+                return f"{float(x):.{nd}f}"
+            except (TypeError, ValueError):
+                return str(x)
+
+        def fpct01(x, nd=0):
+            # x in [0..1] -> percentuale
+            if x is None:
+                return "-"
+            try:
+                return f"{(float(x) * 100):.{nd}f}%"
+            except (TypeError, ValueError):
+                return str(x)
+
+        def fbool(b, on="True", off="False"):
+            return on if b is True else (off if b is False else "-")
+
+        def fstr(s):
+            return s if s else "-"
+
+        def fmb(x: MetricBasis | None):
+            return x.value if x is not None else "-"
+
+        def fdict_compact(d: Dict[str, float] | None, nd=1, max_items=8):
+            """
+            dict compatto tipo: zona1=0.5, zona2=1.2, ...
+            taglia dopo max_items per non esplodere i log.
+            """
+            if not d:
+                return "-"
+            items = sorted(d.items(), key=lambda kv: kv[0])
+            more = ""
+            if len(items) > max_items:
+                items = items[:max_items]
+                more = f" (+{len(d) - max_items})"
+            s = ", ".join(f"{k}={fnum(v, nd)}" for k, v in items)
+            return s + more
+
+        def fdoc(field_name: str) -> str | None:
+            f = getattr(self, "__dataclass_fields__", {}).get(field_name)
+            if not f:
+                return None
+            d = f.metadata.get("doc")
+            return d if d else None
+
+        def emit(lines: list[str], label: str, field_name: str, value: str) -> None:
+            # riga valore
+            lines.append(f"  {label:<18} :: {value}")
+            # riga doc sotto (se presente)
+            d = fdoc(field_name)
+            if d is not None:
+                lines.append(f"                     :: {d}")
+
+        # NB: primo header "finto" per compatibilità con PlantDecision.__str__ che fa splitlines()[1:]
+        lines: list[str] = ["PlantDemandSignals", "------------------------------------------------------------------", "Signals"]
+
+        # -------------------------
+        # Cluster: User intent
+        # -------------------------
+        lines += ["User intent"]
+        emit(lines, "User HVAC mode", "user_hvac_mode", fstr(self.user_hvac_mode))
+        emit(lines, "User profile", "user_profile", fstr(self.user_profile))
+        emit(lines, "User forced off", "user_forced_off", fbool(self.user_forced_off, "True", "False"))
+        emit(lines, "Ctrl aggress", "ctrl_aggr", fnum(self.ctrl_aggr, 2))
+
+        # -------------------------
+        # Cluster: Season
+        # -------------------------
+        lines += ["Season"]
+        emit(lines, "Runtime season", "runtime_season", fstr(self.runtime_season))
+        emit(lines, "Operative season", "operative_season", fstr(self.operative_season))
+
+        # -------------------------
+        # Cluster: Sensible demand (worst-case + headroom)
+        # -------------------------
+        lines += ["Demand (sensible)"]
+        emit(lines, "Heat def max", "heat_def_max_c", f"{fnum(self.heat_def_max_c)} °C")
+        emit(lines, "Cool sur max", "cool_sur_max_c", f"{fnum(self.cool_sur_max_c)} °C")
+        emit(lines, "Heat headroom min", "heat_headroom_min_c", f"{fnum(self.heat_headroom_min_c)} °C")
+        emit(lines, "Cool headroom min", "cool_headroom_min_c", f"{fnum(self.cool_headroom_min_c)} °C")
+
+        # -------------------------
+        # Cluster: Multi-zone metrics (mean/coverage)
+        # -------------------------
+        lines += ["Demand metrics"]
+        emit(lines, "Heat def mean", "heat_def_wmean_c", f"{fnum(self.heat_def_wmean_c)} °C")
+        emit(
+            lines,
+            "Heat coverage",
+            "heat_cov",
+            f"{fpct01(self.heat_cov, 0)} ({fmb(self.heat_metric_basis)})",
+        )
+        emit(lines, "Heat on thr", "heat_on_thr_c", f"{fnum(self.heat_on_thr_c)} °C")
+        emit(lines, "Cool sur mean", "cool_sur_wmean_c", f"{fnum(self.cool_sur_wmean_c)} °C")
+        emit(
+            lines,
+            "Cool coverage",
+            "cool_cov",
+            f"{fpct01(self.cool_cov, 0)} ({fmb(self.cool_metric_basis)})",
+        )
+        emit(lines, "Cool on thr", "cool_on_thr_c", f"{fnum(self.cool_on_thr_c)} °C")
+
+        # -------------------------
+        # Cluster: Gating / quorum (ECO/SLEEP/AWAY/VACATION)
+        # -------------------------
+        lines += ["Gating"]
+        emit(lines, "Quorum cov req", "quorum_cov_req", fpct01(self.quorum_cov_req, 0))
+        emit(lines, "Heat override", "heat_override", fbool(self.heat_override, "True", "False"))
+        emit(lines, "Heat quorum ok", "heat_quorum_ok", fbool(self.heat_quorum_ok, "True", "False"))
+        emit(lines, "Heat mean ok", "heat_mean_ok", fbool(self.heat_mean_ok, "True", "False"))
+        emit(lines, "Cool override", "cool_override", fbool(self.cool_override, "True", "False"))
+        emit(lines, "Cool quorum ok", "cool_quorum_ok", fbool(self.cool_quorum_ok, "True", "False"))
+        emit(lines, "Cool mean ok", "cool_mean_ok", fbool(self.cool_mean_ok, "True", "False"))
+
+        # -------------------------
+        # Cluster: Dew point / latent
+        # -------------------------
+        lines += ["Dew point"]
+        emit(lines, "DP max", "dp_max_c", f"{fnum(self.dp_max_c)} °C")
+        emit(lines, "DP dehum", "dp_dehum_c", f"{fnum(self.dp_dehum_c)} °C")
+        emit(lines, "Outdoor DP", "outdoor_dp_c", f"{fnum(self.outdoor_dp_c)} °C")
+        emit(lines, "Dehum feasible", "vmc_dehum_feasible", fbool(self.vmc_dehum_feasible, "True", "False"))
+
+        # -------------------------
+        # Cluster: VMC thresholds (debug/trasparenza)
+        # -------------------------
+        lines += ["VMC thresholds"]
+        emit(lines, "VMC DP sp", "vmc_dp_sp_c", f"{fnum(self.vmc_dp_sp_c)} °C")
+        emit(lines, "VMC dehum ON", "vmc_dehum_on_thr_c", f"{fnum(self.vmc_dehum_on_thr_c)} °C")
+        emit(lines, "VMC dehum OFF", "vmc_dehum_off_thr_c", f"{fnum(self.vmc_dehum_off_thr_c)} °C")
+
+        # -------------------------
+        # Cluster: VMC requests
+        # -------------------------
+        lines += ["VMC requests"]
+        emit(lines, "VMC req heating", "vmc_req_heating", fbool(self.vmc_req_heating, "True", "False"))
+        emit(lines, "VMC req cooling", "vmc_req_cooling", fbool(self.vmc_req_cooling, "True", "False"))
+        emit(lines, "VMC req dehumidif", "vmc_req_dehumidif", fbool(self.vmc_req_dehumidif, "True", "False"))
+        emit(lines, "VMC req water", "vmc_req_water", fbool(self.vmc_req_water, "True", "False"))
+
+        # -------------------------
+        # Cluster: MPC / ZonesPlan hints
+        # -------------------------
+        lines += ["MPC hints"]
+        emit(lines, "Zones MPC heat", "zones_any_heat_demand", fbool(self.zones_any_heat_demand, "True", "False"))
+        emit(lines, "Zones MPC full-on", "zones_full_on_pct", f"{fnum(self.zones_full_on_pct, 1)} %")
+        emit(lines, "Zones MPC preheat", "zones_mpc_heat_preheat_ok", fbool(self.zones_mpc_heat_preheat_ok, "True", "False"))
+
+        # -------------------------
+        # Cluster: Final flags
+        # -------------------------
+        lines += ["Flags"]
+        emit(lines, "Any heat", "any_heat", fbool(self.any_heat, "True", "False"))
+        emit(lines, "Any cool", "any_cool", fbool(self.any_cool, "True", "False"))
+        emit(lines, "Any dehum", "any_dehum", fbool(self.any_dehum, "True", "False"))
+        emit(lines, "Heat sensible", "heat_sensible", fbool(self.heat_sensible, "True", "False"))
+        emit(lines, "Cool sensible", "cool_sensible", fbool(self.cool_sensible, "True", "False"))
+
+        # -------------------------
+        # Cluster: Per-zone maps (compatte)
+        # -------------------------
+        lines += ["By zone"]
+        emit(lines, "Heat def by zone", "heat_def_by_zone_c", fdict_compact(self.heat_def_by_zone_c, nd=1))
+        emit(lines, "Cool sur by zone", "cool_sur_by_zone_c", fdict_compact(self.cool_sur_by_zone_c, nd=1))
+
+        return "\n".join(lines)
 
 @dataclass(slots=True)
 class PdcCommand:
@@ -415,7 +792,7 @@ class VmcCommand:
     setpoint_t_c: Optional[float] = None
     setpoint_rh_pct: Optional[float] = None
     setpoint_dp_c: Optional[float] = None
-    setpoint_ddp_c: Optional[float] = None
+    setpoint_ddp_c: Optional[int] = None
 
     debug: Dict[str, Any] = field(default_factory=dict)
 
@@ -492,62 +869,63 @@ class PlantDecision:
         # --- signals (formattati "a mano", non dump generico) ---
         s = self.signals
         if s is not None:
-            lines += [
-                f"------------------------------------------------------------------",
-                f"Signals",
-                # user
-                f"  User HVAC mode     :: {fstr(s.user_hvac_mode)}",
-                f"  User profile       :: {fstr(s.user_profile)}",
-                f"  User forced off    :: {fbool(s.user_forced_off, 'True', 'False')}",
-                # season / runtime
-                f"  Runtime season     :: {fstr(s.runtime_season)}",
-                f"  Operative season   :: {fstr(s.operative_season)}",
-                # demand worst-case
-                f"  Heat def max       :: {fnum(s.heat_def_max_c)} °C",
-                f"  Cool sur max       :: {fnum(s.cool_sur_max_c)} °C",
-                f"  Heat headroom min  :: {fnum(getattr(s, 'heat_headroom_min_c', None))} °C",
-                f"  Cool headroom min  :: {fnum(getattr(s, 'cool_headroom_min_c', None))} °C",
-                # demand means + quorum
-                f"  Heat def mean      :: {fnum(s.heat_def_wmean_c)} °C",
-                f"  Heat coverage      :: {fpct01(s.heat_cov, 0)} ({fmb(s.heat_metric_basis)})",
-                f"  Heat on thr        :: {fnum(s.heat_on_thr_c)} °C",
-                f"  Heat quorum req    :: {fpct01(s.quorum_cov_req, 0)}",
-                f"  Heat override      :: {fbool(s.heat_override, 'True', 'False')}",
-                f"  Heat quorum ok     :: {fbool(s.heat_quorum_ok, 'True', 'False')}",
-                f"  Heat mean ok       :: {fbool(s.heat_mean_ok, 'True', 'False')}",
-                f"  Cool sur mean      :: {fnum(s.cool_sur_wmean_c)} °C",
-                f"  Cool coverage      :: {fpct01(s.cool_cov, 0)} ({fmb(s.cool_metric_basis)})",
-                f"  Cool on thr        :: {fnum(s.cool_on_thr_c)} °C",
-                f"  Cool override      :: {fbool(s.cool_override, 'True', 'False')}",
-                f"  Cool quorum ok     :: {fbool(s.cool_quorum_ok, 'True', 'False')}",
-                f"  Cool mean ok       :: {fbool(s.cool_mean_ok, 'True', 'False')}",
-                # any / sensible
-                f"  Any heat           :: {fbool(s.any_heat, 'True', 'False')}",
-                f"  Any cool           :: {fbool(s.any_cool, 'True', 'False')}",
-                f"  Any dehum          :: {fbool(s.any_dehum, 'True', 'False')}",
-                f"  Heat sensible      :: {fbool(s.heat_sensible, 'True', 'False')}",
-                f"  Cool sensible      :: {fbool(s.cool_sensible, 'True', 'False')}",
-                # dew point safety
-                f"  DP max             :: {fnum(s.dp_max_c)} °C",
-                f"  DP dehum           :: {fnum(getattr(s, 'dp_dehum_c', None))} °C",
-                f"  Outdoor DP         :: {fnum(getattr(s, 'outdoor_dp_c', None))} °C",
-                f"  VMC dehum feasible :: {fbool(getattr(s, 'vmc_dehum_feasible', None), 'True', 'False')}",
-                # VMC debug thresholds
-                f"  VMC DP sp          :: {fnum(getattr(s, 'vmc_dp_sp_c', None))} °C",
-                f"  VMC dehum ON thr   :: {fnum(getattr(s, 'vmc_dehum_on_thr_c', None))} °C",
-                f"  VMC dehum OFF thr  :: {fnum(getattr(s, 'vmc_dehum_off_thr_c', None))} °C",
-                # VMC requests
-                f"  VMC req heating    :: {fbool(s.vmc_req_heating, 'True', 'False')}",
-                f"  VMC req cooling    :: {fbool(s.vmc_req_cooling, 'True', 'False')}",
-                f"  VMC req dehumidif  :: {fbool(s.vmc_req_dehumidif, 'True', 'False')}",
-                f"  VMC req water      :: {fbool(s.vmc_req_water, 'True', 'False')}",
-                f"  Zones MPC heat     :: {fbool(getattr(s, 'zones_any_heat_demand', False), 'True', 'False')}",
-                f"  Zones MPC full-on  :: {fnum(getattr(s, 'zones_full_on_pct', None), 1)} %",
-                f"  Zones MPC preheat  :: {fbool(getattr(s, 'zones_mpc_heat_preheat_ok', None), 'True', 'False')}",
-                # per-zone maps (compatte)
-                f"  Heat def by zone   :: {fdict_compact(s.heat_def_by_zone_c, nd=1)}",
-                f"  Cool sur by zone   :: {fdict_compact(s.cool_sur_by_zone_c, nd=1)}",
-            ]
+            lines += s.__str__().splitlines()[1:]  # skip header line
+            # lines += [
+            #     f"------------------------------------------------------------------",
+            #     f"Signals",
+            #     # user
+            #     f"  User HVAC mode     :: {fstr(s.user_hvac_mode)}",
+            #     f"  User profile       :: {fstr(s.user_profile)}",
+            #     f"  User forced off    :: {fbool(s.user_forced_off, 'True', 'False')}",
+            #     # season / runtime
+            #     f"  Runtime season     :: {fstr(s.runtime_season)}",
+            #     f"  Operative season   :: {fstr(s.operative_season)}",
+            #     # demand worst-case
+            #     f"  Heat def max       :: {fnum(s.heat_def_max_c)} °C",
+            #     f"  Cool sur max       :: {fnum(s.cool_sur_max_c)} °C",
+            #     f"  Heat headroom min  :: {fnum(getattr(s, 'heat_headroom_min_c', None))} °C",
+            #     f"  Cool headroom min  :: {fnum(getattr(s, 'cool_headroom_min_c', None))} °C",
+            #     # demand means + quorum
+            #     f"  Heat def mean      :: {fnum(s.heat_def_wmean_c)} °C",
+            #     f"  Heat coverage      :: {fpct01(s.heat_cov, 0)} ({fmb(s.heat_metric_basis)})",
+            #     f"  Heat on thr        :: {fnum(s.heat_on_thr_c)} °C",
+            #     f"  Heat quorum req    :: {fpct01(s.quorum_cov_req, 0)}",
+            #     f"  Heat override      :: {fbool(s.heat_override, 'True', 'False')}",
+            #     f"  Heat quorum ok     :: {fbool(s.heat_quorum_ok, 'True', 'False')}",
+            #     f"  Heat mean ok       :: {fbool(s.heat_mean_ok, 'True', 'False')}",
+            #     f"  Cool sur mean      :: {fnum(s.cool_sur_wmean_c)} °C",
+            #     f"  Cool coverage      :: {fpct01(s.cool_cov, 0)} ({fmb(s.cool_metric_basis)})",
+            #     f"  Cool on thr        :: {fnum(s.cool_on_thr_c)} °C",
+            #     f"  Cool override      :: {fbool(s.cool_override, 'True', 'False')}",
+            #     f"  Cool quorum ok     :: {fbool(s.cool_quorum_ok, 'True', 'False')}",
+            #     f"  Cool mean ok       :: {fbool(s.cool_mean_ok, 'True', 'False')}",
+            #     # any / sensible
+            #     f"  Any heat           :: {fbool(s.any_heat, 'True', 'False')}",
+            #     f"  Any cool           :: {fbool(s.any_cool, 'True', 'False')}",
+            #     f"  Any dehum          :: {fbool(s.any_dehum, 'True', 'False')}",
+            #     f"  Heat sensible      :: {fbool(s.heat_sensible, 'True', 'False')}",
+            #     f"  Cool sensible      :: {fbool(s.cool_sensible, 'True', 'False')}",
+            #     # dew point safety
+            #     f"  DP max             :: {fnum(s.dp_max_c)} °C",
+            #     f"  DP dehum           :: {fnum(getattr(s, 'dp_dehum_c', None))} °C",
+            #     f"  Outdoor DP         :: {fnum(getattr(s, 'outdoor_dp_c', None))} °C",
+            #     f"  VMC dehum feasible :: {fbool(getattr(s, 'vmc_dehum_feasible', None), 'True', 'False')}",
+            #     # VMC debug thresholds
+            #     f"  VMC DP sp          :: {fnum(getattr(s, 'vmc_dp_sp_c', None))} °C",
+            #     f"  VMC dehum ON thr   :: {fnum(getattr(s, 'vmc_dehum_on_thr_c', None))} °C",
+            #     f"  VMC dehum OFF thr  :: {fnum(getattr(s, 'vmc_dehum_off_thr_c', None))} °C",
+            #     # VMC requests
+            #     f"  VMC req heating    :: {fbool(s.vmc_req_heating, 'True', 'False')}",
+            #     f"  VMC req cooling    :: {fbool(s.vmc_req_cooling, 'True', 'False')}",
+            #     f"  VMC req dehumidif  :: {fbool(s.vmc_req_dehumidif, 'True', 'False')}",
+            #     f"  VMC req water      :: {fbool(s.vmc_req_water, 'True', 'False')}",
+            #     f"  Zones MPC heat     :: {fbool(getattr(s, 'zones_any_heat_demand', False), 'True', 'False')}",
+            #     f"  Zones MPC full-on  :: {fnum(getattr(s, 'zones_full_on_pct', None), 1)} %",
+            #     f"  Zones MPC preheat  :: {fbool(getattr(s, 'zones_mpc_heat_preheat_ok', None), 'True', 'False')}",
+            #     # per-zone maps (compatte)
+            #     f"  Heat def by zone   :: {fdict_compact(s.heat_def_by_zone_c, nd=1)}",
+            #     f"  Cool sur by zone   :: {fdict_compact(s.cool_sur_by_zone_c, nd=1)}",
+            # ]
 
         # --- warnings ---
         if self.warnings:

@@ -5,12 +5,15 @@ pandas==2.2.3
 simple-pid
 influxdb-client==1.24.0
 holidays
-# business-time
-flake8
+#
 pylint
-pytest
-pytest-cov
-pytest-homeassistant-custom-component
-ruff
-black
-mypy
+# pyright
+# business-time
+# flake8
+# pylint
+# pytest
+# pytest-cov
+# pytest-homeassistant-custom-component
+# ruff
+# black
+# mypy

@@ -22,7 +22,7 @@ from homeassistant.const import EntityCategory, CONF_NAME, EVENT_HOMEASSISTANT_S
 from ..domain.models.plant import PlantSnapshot
 
 from ..domain.enums import HVACOperatingProfile
-from ..helpers.plant import take_plant_snapshot
+from ..helpers.plant.plant_state import async_take_plant_snapshot
 from ..helpers.timeutils import now_utc
 
 from ..helpers.confort.policy_layer import ComfortPolicyLayer, PolicyContext, PolicyDecision, build_policy_layer
@@ -33,13 +33,13 @@ from ..helpers.confort.confort_band import ComfortBandCalculator, ComfortBandRes
 from ..domain.influx import InfluxConfig
 # from ..strategies.plant_regime_pipeline import InfluxSeriesReader, PlantEntities, PlantRegimePipeline, RegimeConfig, RegimeSearchResult, daily_local_mean
 
-from ..helpers.config_sensors import GLOBAL, FieldSuffix, build_sensor_mapping
+from ..helpers.builders.config_aggregate_sensors import GLOBAL, FieldSuffix, build_sensor_mapping
 
 from ..helpers.sensor_aggregator import SensorAggregator
 
 from ..const import CONF_CEILING, CONF_INDOOR, CONF_RADIANT, DOMAIN, ENTITIES_OBSERVED_TS, ENTITIES_STATE, NAME_AREA_HOME, SEASON_STATE
 from ..domain.models.runtime_schema import AreaConfig, RuntimeConfig, SensorPair, WeatherConfig
-from ..helpers.config_entries import (
+from ..helpers.builders.config_entries import (
     build_runtime_config,
     collect_entity_ids_for_state_changes,
     subscribe_entity_state_changes,
@@ -143,6 +143,10 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ----------------- Shared store helpers ----------------- #
 
     @property
+    def ready(self) -> bool:
+        return self._init_complete
+
+    @property
     def entry_id(self) -> str:
         return self._entry.entry_id
 
@@ -178,27 +182,6 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @property
     def _entities_observed_ts(self) -> dict[str, datetime]:
         return self._entry_store.setdefault(ENTITIES_OBSERVED_TS, {})
-
-    # @property
-    # def _store_entities_state(self) -> dict[str, State]:
-    #     """Mappa entity_id -> State.
-
-    #     Idempotente anche se hass.data viene ricreato (riusa il reference store iniziale).
-    #     """
-    #     # domain_store = self._hass.data.setdefault(DOMAIN, {})
-    #     # entry_store = domain_store.setdefault(self._entry.entry_id, {})
-    #     # return entry_store.setdefault(ENTITIES_STATE, self._entities_state_store)
-    #     return self._entry_store.setdefault(ENTITIES_STATE, self._entities_state_store)
-
-    # @property
-    # def _season_state(self) -> SeasonState | None:
-    #     season_state = self._entry_store.get(SEASON_STATE)
-        
-    #     if not isinstance(season_state, SeasonState):
-    #         log_warning(_LOGGER, "No valid SeasonState in store for regime config test")
-    #         return None
-
-    #     return season_state
 
     def _setup_unique_ids_event(self) -> asyncio.Event:
         store = self._entry_store
@@ -340,173 +323,6 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         log_info(_LOGGER, "RuntimeConfig completion done (changed=%s)", changed)
 
-    # ----------------- Slave sensors factory ----------------- #
-
-    def build_slave_sensor_defs(self) -> list[dict[str, Any]]:
-        """Ritorna le definizioni per le entity "slave" (dewpoint, heat-index, ecc.)."""
-        defs: list[dict[str, Any]] = []
-
-        temps: list[str] = []
-        humis: list[str] = []
-
-        sensor_prefix = "Climate"
-
-        for area in getattr(self._runtime.climate, "areas", []) or []:
-            # i tuoi AreaConfig potrebbero essere dataclass: manteniamo getattr flessibile
-            if getattr(area, CONF_INDOOR, False) and getattr(area, CONF_RADIANT, False) and getattr(area, CONF_CEILING, False):
-                sensors = getattr(area, "sensors", None)
-                if not sensors:
-                    continue
-
-                temps.append(sensors.temperature)
-                humis.append(sensors.humidity)
-
-                defs.append(
-                    {
-                        "type": "TemperatureSensor",
-                        "area": area.name,
-                        "name": f"{sensor_prefix} Zone {area.name}",
-                        "sensors": SensorPair(
-                            temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
-                            humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
-                        ),
-                        "unit": self._runtime.climate.unit_system.temperature,
-                    }
-                )
-                defs.append(
-                    {
-                        "type": "HumiditySensor",
-                        "area": area.name,
-                        "name": f"{sensor_prefix} Zone {area.name}",
-                        "sensors": SensorPair(
-                            temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
-                            humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
-                        ),
-                        "unit": PERCENTAGE,
-                    }
-                )
-                defs.append(
-                    {
-                        "type": "DewpointSensor",
-                        "area": area.name,
-                        "name": f"{sensor_prefix} Zone {area.name}",
-                        "sensors": SensorPair(
-                            temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
-                            humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
-                            dew_point=FieldSuffix.INDOOR_DEW_POINT(slugify(area.name)),
-                        ),
-                        "unit": self._runtime.climate.unit_system.temperature,
-                    }
-                )
-                defs.append(
-                    {
-                        "type": "HeatIndexSensor",
-                        "area": area.name,
-                        "name": f"{sensor_prefix} Zone {area.name}",
-                        "sensors": SensorPair(
-                            temperature=FieldSuffix.INDOOR_TEMPERATURE(slugify(area.name)),
-                            humidity=FieldSuffix.INDOOR_HUMIDITY(slugify(area.name)),
-                            heat_index=FieldSuffix.INDOOR_HEAT_INDEX(slugify(area.name)),
-                        ),
-                        "unit": self._runtime.climate.unit_system.temperature,
-                    }
-                )
-            elif getattr(area, CONF_INDOOR, False) is False and getattr(area, CONF_RADIANT, False) is False:
-                defs.append(
-                    {
-                        "type": "TemperatureSensor",
-                        "area": area.name,
-                        "name": f"{sensor_prefix} Zone {area.name}",
-                        "sensors": SensorPair(
-                            temperature=FieldSuffix.OUTDOOR_TEMPERATURE(slugify(area.name)),
-                            humidity=FieldSuffix.OUTDOOR_HUMIDITY(slugify(area.name)),
-                        ),
-                        "unit": self._runtime.climate.unit_system.temperature,
-                    }
-                )
-                defs.append(
-                    {
-                        "type": "HumiditySensor",
-                        "area": area.name,
-                        "name": f"{sensor_prefix} Zone {area.name}",
-                        "sensors": SensorPair(
-                            temperature=FieldSuffix.OUTDOOR_TEMPERATURE(slugify(area.name)),
-                            humidity=FieldSuffix.OUTDOOR_HUMIDITY(slugify(area.name)),
-                        ),
-                        "unit": PERCENTAGE,
-                    }
-                )
-                defs.append(
-                    {
-                        "type": "DewpointSensor",
-                        "area": area.name,
-                        "name": f"{sensor_prefix} Zone {area.name}",
-                        "sensors": SensorPair(
-                            temperature=FieldSuffix.OUTDOOR_TEMPERATURE(slugify(area.name)),
-                            humidity=FieldSuffix.OUTDOOR_HUMIDITY(slugify(area.name)),
-                            dew_point=FieldSuffix.OUTDOOR_DEW_POINT(slugify(area.name)),
-                        ),
-                        "unit": self._runtime.climate.unit_system.temperature,
-                    }
-                )
-
-
-        defs.append(
-            {
-                "type": "TemperatureSensor",
-                "name": f"{sensor_prefix} {NAME_AREA_HOME}",
-                "sensors": SensorPair(
-                    temperature=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),
-                    humidity=FieldSuffix.INDOOR_HUMIDITY(GLOBAL),
-                ),
-                "unit": self._runtime.climate.unit_system.temperature,
-            }
-        )
-        defs.append(
-            {
-                "type": "HumiditySensor",
-                "name": f"{sensor_prefix} {NAME_AREA_HOME}",
-                "sensors": SensorPair(
-                    temperature=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),
-                    humidity=FieldSuffix.INDOOR_HUMIDITY(GLOBAL),
-                ),
-                "unit": PERCENTAGE,
-            }
-        )
-        defs.append(
-            {
-                "type": "DewpointSensor",
-                "name": f"{sensor_prefix} {NAME_AREA_HOME}",
-                "sensors": SensorPair(
-                    temperature=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),
-                    humidity=FieldSuffix.INDOOR_HUMIDITY(GLOBAL),
-                    dew_point=FieldSuffix.INDOOR_DEW_POINT(GLOBAL),
-                ),
-                "unit": self._runtime.climate.unit_system.temperature,
-            }
-        )
-        defs.append(
-            {
-                "type": "HeatIndexSensor",
-                "name": f"{sensor_prefix} {NAME_AREA_HOME}",
-                "sensors": SensorPair(
-                    temperature=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),
-                    humidity=FieldSuffix.INDOOR_HUMIDITY(GLOBAL),
-                    heat_index=FieldSuffix.INDOOR_HEAT_INDEX(GLOBAL),
-                ),
-                "unit": self._runtime.climate.unit_system.temperature,
-            }
-        )
-        defs.append(
-            {
-                "type": "SeasonSensor",
-                "name": f"{sensor_prefix} Season",
-                "category": EntityCategory.DIAGNOSTIC,
-            }
-        )
-        log_debug(_LOGGER, "build_slave_sensor_defs: %d definitions", len(defs))
-        return defs
-
     # ---------------------- Event handling -------------------------- #
 
     @callback
@@ -627,13 +443,13 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 policy=decision,  # <-- QUI
             )
 
-            log_debug(_LOGGER, "[comfort_policy] ctrl_aggressiveness=%.2f", decision.ctrl_aggressiveness)
-            log_debug(_LOGGER, "%s", area_policy_ctx)
-            log_debug(_LOGGER, "%s", area_confort_band)
+            # log_debug(_LOGGER, "[comfort_policy] ctrl_aggressiveness=%.2f", decision.ctrl_aggressiveness)
+            # log_debug(_LOGGER, "%s", area_policy_ctx)
+            # log_debug(_LOGGER, "%s", area_confort_band)
 
             return area_confort_band
 
-        if season_state and runtime_vmc and vmc_air_speed and self._climate_preset_mode:
+        if season_state and runtime_vmc and vmc_air_speed is not None and self._climate_preset_mode:
 
             for area in self._runtime.climate.areas:
                 name = slugify(area.name)
@@ -818,7 +634,8 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._sensor_aggregator.async_update()
 
             if self._season_state and self._climate_hvac_mode and self._climate_preset_mode:
-                self._plant_snapshot = take_plant_snapshot(
+                self._plant_snapshot = await async_take_plant_snapshot(
+                    hass=self._hass,
                     timestamp=now_utc(),
                     runtime_config=self._runtime,
                     season=self._season_state,
@@ -853,8 +670,8 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             #     log_debug(_LOGGER, "%s", kitchen_cb)
             # await self._test_regime_config()
 
-            log_debug(_LOGGER, "%s", self._sensor_aggregator.latest_all())
-            log_debug(_LOGGER, "_plant_snapshot=%s", self._plant_snapshot)
+            # log_debug(_LOGGER, "%s", self._sensor_aggregator.latest_all())
+            # log_debug(_LOGGER, "_plant_snapshot=%s", self._plant_snapshot)
             
             # TODO: costruire snapshot reale (PlantSnapshot ecc.)
             # Esempio minimale: esporta solo timestamp e numero entity osservate

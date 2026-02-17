@@ -24,13 +24,16 @@ def _first_number_token(text: str) -> str | None:
     m = _NUM_RE.search(text)
     return m.group(0) if m else None
 
-TNum = TypeVar("TNum", int, float)
+Tn = TypeVar("Tn", int, float)
 
-def _clamp(value: TNum, min_value: TNum | None, max_value: TNum | None) -> TNum:
-    if min_value is not None and value < min_value:
-        value = min_value
-    if max_value is not None and value > max_value:
-        value = max_value
+def clamp(value: Tn, lo: Tn | None = None, hi: Tn | None = None) -> Tn:
+    if lo is not None and hi is not None and lo > hi:
+        raise ValueError(f"Invalid bounds: lo ({lo}) > hi ({hi})")
+
+    if lo is not None and value < lo:
+        return lo
+    if hi is not None and value > hi:
+        return hi
     return value
 
 def as_bool(
@@ -171,7 +174,7 @@ def as_float(
             raise
         return default
 
-    return _clamp(x, min_value, max_value)
+    return clamp(x, min_value, max_value)
 
 def as_int(
     v: Any,
@@ -221,7 +224,7 @@ def as_int(
                 raise ValueError(f"Unknown rounding mode: {rounding}")
             x = int(round(xf))
 
-    x = _clamp(x, min_value, max_value)
+    x = clamp(x, min_value, max_value)
     return x
 
 def as_list(value: Any) -> list[Any]:

@@ -67,6 +67,7 @@ from homeassistant.components.climate.const import HVACAction, HVACMode
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import HomeAssistant, Event, callback
 
+from ..plant.control.actuator import PlantActuator
 from ..plant.decision.zone.contracts import ZonesDecision
 from ..plant.decision.zone.planner import ZoneDecisionPlanner
 
@@ -111,9 +112,8 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
         hass: HomeAssistant,
         coordinator: ClimateCoordinator,
         *,
-        decision_interval: timedelta = timedelta(minutes=3),
+        decision_interval: timedelta = timedelta(minutes=5),
     ) -> None:
-        # ✅ IMPORTANTISSIMO: inizializza prima la base (evita Pylint E0203 e assicura init completo)
         super().__init__(
             hass,
             store_key=f"{DOMAIN}.supervisor.{coordinator.entry_id}",
@@ -133,8 +133,9 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
             hvac_action=HVACAction.IDLE,
         )
 
-        self._plant_decision_planner: PlantDecisionPlanner = PlantDecisionPlanner()
         self._zones_decision_planner: ZoneDecisionPlanner = ZoneDecisionPlanner()
+        self._plant_decision_planner: PlantDecisionPlanner = PlantDecisionPlanner()
+        self._plant_actuator = PlantActuator(hass=self._hass, runtime_cfg=coordinator.runtime_config)
         
         # self._engine = ControlEngine(hass=hass, coordinator=coordinator)
         # self._plant_engine = PlantControlEngine(
@@ -197,7 +198,7 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
         """Boot hook: start supervisor and arm scheduler only after HA STARTED."""
         self._hass.async_create_task(self.async_start(), name=f"drp_supervisor_start:{self._instance_id}")
 
-    async def async_start(self) -> None:
+    async def async_start(self, *, run_immediately: bool = True) -> None:
         """Start supervisor.
 
         - subscribe coordinator listener
@@ -239,6 +240,10 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
 
     def _on_coordinator_update(self) -> None:
         """Called when ClimateCoordinator publishes an update (every ~5 minutes)."""
+
+        if not self._coordinator.ready:
+            return
+        
         self._request_run(reason="coordinator")
 
     def _request_run(self, *, reason: str) -> None:
@@ -280,6 +285,10 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
         - This method is called by `_async_on_due()` (gated scheduler).
         - It can also be called directly (e.g., future services) if needed.
         """
+
+        if not self._coordinator.ready:
+            return 
+        
         plan = None
         if self._stop_event.is_set():
             return
@@ -295,20 +304,25 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                 snap = self._coordinator.plant_snapshot
                 if snap is not None:
                     try:
+                        log_debug(_LOGGER, "PlantSnapshot %s", snap)
                         self._last_zones_decision = self._zones_decision_planner.plan(
                             snapshot=snap,
                             reason="tick",
                         )
                         log_debug(_LOGGER, "ZonesDecision %s", self._last_zones_decision)
+
                         self._last_plant_decision = self._plant_decision_planner.plan(
                             snapshot=snap,
                             zones_decision=self._last_zones_decision,
                             reason="tick",
                         )
                         log_debug(_LOGGER, "PlantDecision %s", self._last_plant_decision)
-                        
-                        dash = build_dashboard(snap, self._last_zones_decision, self._last_plant_decision)
-                        log_debug(_LOGGER, "\n%s", render_dashboard_text(dash))
+
+
+                        await self._plant_actuator.async_apply(decision=self._last_plant_decision)
+
+                        # dash = build_dashboard(snap, self._last_zones_decision, self._last_plant_decision)
+                        # log_debug(_LOGGER, "\n%s", render_dashboard_text(dash))
                         # self._last_plant_decision = await self._plant_engine.async_run_once(
                         #     snapshot=snap,
                         #     reason="tick",

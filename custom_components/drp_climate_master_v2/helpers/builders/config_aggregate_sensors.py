@@ -4,14 +4,14 @@ from datetime import timedelta
 from enum import StrEnum
 from typing import List
 
-from .utils import slugify
+from ..utils import slugify
 
-from ..domain.models.runtime_schema import (
+from ...domain.models.runtime_schema import (
     AreaConfig, 
     ClimateConfig, 
     SupplyUnitsConfig
 )
-from .sensor_aggregator import (
+from ..sensor_aggregator import (
     AggregationMethod,
     ComputeFn,
     CrossOutlierMethod,

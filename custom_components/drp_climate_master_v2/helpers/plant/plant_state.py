@@ -5,23 +5,24 @@ from typing import List, Optional
 from datetime import datetime
 
 from homeassistant.components.climate.const import HVACMode
+from homeassistant.core import HomeAssistant, State
 
-from ..domain.enums import HVACOperatingProfile
-from .confort.confort_band import ComfortBandResult
-from .sensor_aggregator import AggregatedValue, SensorAggregator
+from ...domain.enums import HVACOperatingProfile
+from ..confort.confort_band import ComfortBandResult
+from ..sensor_aggregator import AggregatedValue, SensorAggregator
 
-from .logger import log_debug, log_exception, log_warning
+from ..logger import log_debug, log_exception, log_warning
 
-from .ha import get_entity_value
+from ..ha import get_entity_value, async_time_in_states
 
-from ..domain.models.plant import (
+from ...domain.models.plant import (
     PDCSnapshot,
     PlantSnapshot,
     SupplyUnitSnapshot,
     VMCSnapshot,
     ZoneSnapshot,
 )
-from ..domain.models.runtime_schema import (
+from ...domain.models.runtime_schema import (
     AreaConfig,
     RadiantConfig,
     RuntimeConfig,
@@ -30,12 +31,13 @@ from ..domain.models.runtime_schema import (
     SupplyUnitsConfig,
     VMCConfig,
 )
-from ..domain.models.season import SeasonState
-from .utils import as_bool, as_float, as_int, make_class, slugify
+from ...domain.models.season import SeasonState
+from ..utils import as_bool, as_float, as_int, make_class, slugify
 
 _LOGGER = logging.getLogger(__name__)
 
-def take_plant_snapshot(
+async def async_take_plant_snapshot(
+    hass: HomeAssistant,
     runtime_config: RuntimeConfig,
     season: SeasonState,
     sensor_aggr: SensorAggregator,
@@ -158,19 +160,22 @@ def take_plant_snapshot(
 
         try:
             power_state = entities_state.get(radiant.power) if radiant.power else None
-            last_changed = (
-                getattr(power_state, "last_changed", None)
-                or getattr(power_state, "last_updated", None)
-                if power_state
-                else None
-            )
-            power_on = as_bool(get_entity_value(entities_state, radiant.power)) or False
+
+            power_on = False
+            last_changed = None
+
+            if power_state is not None:
+                # Se hai già lo State, evita un secondo lookup con get_entity_value
+                power_on = as_bool(power_state.state) or False
+
+                # Preferisci last_changed, fallback last_updated
+                last_changed = power_state.last_changed or power_state.last_updated
+
             minutes_power_on = None
             minutes_power_off = None
+
             if last_changed is not None:
-                minutes = (ts - last_changed).total_seconds() / 60.0
-                if minutes < 0:
-                    minutes = 0.0
+                minutes = max(0.0, (ts - last_changed).total_seconds() / 60.0)
                 if power_on:
                     minutes_power_on = minutes
                 else:
@@ -206,16 +211,56 @@ def take_plant_snapshot(
             log_exception(_LOGGER, "Unexpected error creating PDCSnapshot %s", ex)
             return None
 
-    def _build_vmc_snapshot(
+    async def _async_build_vmc_snapshot(
             runtime_config: RuntimeConfig, 
             ts: datetime
         ) -> VMCSnapshot | None:
+
+        def _key_vmc_level(st: State) -> Optional[int]:
+            if st.state in ("unknown", "unavailable", None):
+                return None
+            try:
+                v = int(float(st.state))
+            except (TypeError, ValueError):
+                return None
+            return v if 0 <= v <= 5 else None
 
         vmc: VMCConfig | None = runtime_config.climate.devices.vmc
         if vmc is None:
             return None
 
         try:
+            power_state = entities_state.get(vmc.power) if vmc.power else None
+
+            power_on = False
+            last_changed = None
+
+            if power_state is not None:
+                # Se hai già lo State, evita un secondo lookup con get_entity_value
+                power_on = as_bool(power_state.state) or False
+
+                # Preferisci last_changed, fallback last_updated
+                last_changed = power_state.last_changed or power_state.last_updated
+
+            minutes_power_on = None
+            minutes_power_off = None
+
+            if last_changed is not None:
+                minutes = max(0.0, (ts - last_changed).total_seconds() / 60.0)
+                if power_on:
+                    minutes_power_on = minutes
+                else:
+                    minutes_power_off = minutes
+
+            spare_time_in_state_stats = await async_time_in_states(
+                hass,
+                vmc.spare_setpoint,
+                ts,                 # UTC aware
+                window="last_24h",
+                key_fn=_key_vmc_level,
+                include_unknown=False,
+            )
+            
             vmc_snapshot: VMCSnapshot = make_class(
                 VMCSnapshot,
                 timestamp=ts,
@@ -246,6 +291,10 @@ def take_plant_snapshot(
                 sensor_t_outdoor=as_float(get_entity_value(entities_state, vmc.sensors.t_outdoor)),
                 sensor_power_on_night=None,
                 sensor_power_on_today=None,
+
+                minutes_power_on=minutes_power_on,
+                minutes_power_off=minutes_power_off,
+                spare_time_in_state_stats=spare_time_in_state_stats,
                 
                 alarm_high_pressure=as_bool(get_entity_value(entities_state, vmc.alarms.high_pressure)) or False,
                 alarm_dew_point=as_bool(get_entity_value(entities_state, vmc.alarms.dew_point)) or False,
@@ -301,7 +350,7 @@ def take_plant_snapshot(
         outdoor_zones_snapshot = _build_outdoor_zones_snapshot(runtime_config, timestamp, sensor_aggr)
 
         pdc = _build_pdc_snapshot(runtime_config, timestamp)
-        vmc = _build_vmc_snapshot(runtime_config, timestamp)
+        vmc = await _async_build_vmc_snapshot(runtime_config, timestamp)
         supply_unit: SupplyUnitSnapshot | None = _build_supply_unit_snapshot(runtime_config, timestamp)
 
         runtime_windows=runtime_config.climate.windows

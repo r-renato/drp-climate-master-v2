@@ -15,15 +15,12 @@
     "**/node_modules/**",
     "**/.venv/**",
     "**/venv/**",
-    "backup*/**",
-    "archive/**",
-    "aigen/**",
-    "config/.storage/**",
-    ".homeassistant/**"
-  ],
-  "extraPaths": [
-    "custom_components",
-    "custom_components/drp_climate_master_v2"
+    "**/aigen/**",
+    "**/archive/**",
+    "**/backup/**",
+    "**/backup1/**",
+    "**/backup20251012org/**",
+    "**/backup20260123/**",
   ],
   "venvPath": ".",
   "venv": "venv",

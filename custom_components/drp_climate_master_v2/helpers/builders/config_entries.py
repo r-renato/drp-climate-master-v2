@@ -15,10 +15,10 @@ from homeassistant.const import (
     CONF_SENSORS,
 )
 
-from ..helpers.logger import log_debug, log_info
+from ..logger import log_debug, log_info
 
-from ..helpers.utils import as_int
-from ..domain.models.runtime_schema import (
+from ..utils import as_int
+from ...domain.models.runtime_schema import (
     AreaConfig,
     ClimateConfig,
     CompressorManagementConfig,
@@ -45,7 +45,7 @@ from ..domain.models.runtime_schema import (
     VMCSensorsConfig,
     WeatherConfig
 )
-from ..const import (
+from ...const import (
     CONF_ADJUSTABLE_SUPPLY_UNIT,
     CONF_ALARMS,
     CONF_AREA,

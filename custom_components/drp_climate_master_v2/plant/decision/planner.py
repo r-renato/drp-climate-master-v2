@@ -11,7 +11,7 @@ from homeassistant.components.climate.const import HVACMode
 
 from ...helpers.logger import log_debug
 
-from ...helpers.utils import as_float
+from ...helpers.utils import as_float, clamp
 from ...helpers.psychrometric import dew_point_celsius
 from ...domain.models.plant import PlantSnapshot
 from ...domain.enums import HVACOperatingProfile
@@ -20,12 +20,10 @@ from .zone.contracts import ZonesDecision
 
 from .config import PlantPlannerConfig
 from .contracts import MetricBasis, PlantDecision, PlantDemandSignals, PlantMode
-from .signal_builder import DemandSignalsBuilder
+from .signals.builder import DemandSignalsBuilder
 
 _LOGGER = logging.getLogger(__name__)
 
-def _clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
 
 def _percentile_sorted(xs: list[float], q: float) -> float | None:
     """Percentile robusto senza numpy. xs deve essere NON vuota e già ordinata."""
@@ -46,7 +44,7 @@ def _percentile(values: list[float], q: float) -> Optional[float]:
     """Return q-quantile (0..1) using linear interpolation on sorted values."""
     if not values:
         return None
-    q = float(_clamp(float(q), 0.0, 1.0))
+    q = float(clamp(float(q), 0.0, 1.0))
     xs = sorted(float(v) for v in values)
     if len(xs) == 1:
         return xs[0]
@@ -408,14 +406,14 @@ class PlantDecisionPlanner:
             heat_def_wmean = float(demand.heat_def_wmean_c)
 
             fb = float(cfg.heat_feedback_gain_c_per_c) * heat_def_wmean
-            fb = _clamp(fb, -float(cfg.heat_feedback_max_down_c), float(cfg.heat_feedback_max_up_c))
+            fb = clamp(fb, -float(cfg.heat_feedback_max_down_c), float(cfg.heat_feedback_max_up_c))
 
             kick = 0.0
             if heat_def_max >= float(cfg.heat_kick_on_max_def_c):
                 kick = float(cfg.heat_kick_extra_c)
 
             target = curve + prof_offset + fb + kick
-            target = _clamp(target, cfg.heat_wot_min_c, cfg.heat_wot_max_c)
+            target = clamp(target, cfg.heat_wot_min_c, cfg.heat_wot_max_c)
 
             # --- 4) deadband + rate-limit (anti-hunting, stateful)
             now = dec.ts
@@ -429,7 +427,7 @@ class PlantDecisionPlanner:
                 if abs(float(target) - float(prev)) < float(cfg.heat_wot_deadband_c):
                     target = float(prev)
                 else:
-                    target = _clamp(float(target), float(prev) - max_step, float(prev) + max_step)
+                    target = clamp(float(target), float(prev) - max_step, float(prev) + max_step)
 
             self._last_heat_wot_c = float(target)
             self._last_heat_wot_ts = now
@@ -453,7 +451,7 @@ class PlantDecisionPlanner:
             pdc.mode = "cooling"
             pdc.power = True
             # In questa fase usiamo un setpoint flat; in futuro: profilo + vincoli batteria VMC.
-            pdc.cool_wot_c = math.ceil(_clamp(cfg.cool_wot_default_c, cfg.cool_wot_min_c, cfg.cool_wot_max_c))
+            pdc.cool_wot_c = math.ceil(clamp(cfg.cool_wot_default_c, cfg.cool_wot_min_c, cfg.cool_wot_max_c))
             pdc.cool_dt_c = math.ceil(cfg.cool_dt_c)
 
         elif dec.mode == PlantMode.VENT_ONLY:
@@ -507,7 +505,7 @@ class PlantDecisionPlanner:
             # Deriva un target radiante da PDC heating setpoint (offset mixing)
             if dec.pdc.heat_wot_c is not None:
                 t = dec.pdc.heat_wot_c - cfg.heat_rad_supply_offset_c
-                s.rad_supply_target_c = float(_clamp(t, cfg.heat_rad_supply_min_c, cfg.heat_rad_supply_max_c))
+                s.rad_supply_target_c = float(clamp(t, cfg.heat_rad_supply_min_c, cfg.heat_rad_supply_max_c))
         elif dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST):
             if dp_max is not None:
                 safe_required = float(dp_max) + float(cfg.dp_margin_c) + float(cfg.delta_surface_water_c)
@@ -523,7 +521,7 @@ class PlantDecisionPlanner:
                         "dew_guard_action": "disable_radiant",
                     })
                 else:
-                    s.rad_supply_target_c = float(_clamp(safe_required, cfg.cool_rad_supply_min_c, cfg.cool_rad_supply_max_c))
+                    s.rad_supply_target_c = float(clamp(safe_required, cfg.cool_rad_supply_min_c, cfg.cool_rad_supply_max_c))
             else:
                 dec.warnings.append("missing_dp_max_for_dew_guard")
 
@@ -603,14 +601,14 @@ class PlantDecisionPlanner:
             else:
                 t_sp = t_ref_c
 
-        t_sp = _clamp(float(t_sp), float(cfg.vmc_temp_min_c), float(cfg.vmc_temp_max_c))
+        t_sp = clamp(float(t_sp), float(cfg.vmc_temp_min_c), float(cfg.vmc_temp_max_c))
 
         v.power = True
         v.mode = mode
         v.setpoint_t_c = round(t_sp, 1)
         v.setpoint_rh_pct = round(rh_target_pct, 0)
         v.setpoint_dp_c = round(dp_sp_c, 1)
-        v.setpoint_ddp_c = round(ddp_sp_c, 1)
+        v.setpoint_ddp_c = int(round(ddp_sp_c, 0))
         v.air_speed = int(air_speed)
 
         # Diagnostics: report current vmc state
@@ -656,7 +654,7 @@ class PlantDecisionPlanner:
                 dp = float(self.cfg.vmc_setpoint_dp_c)
         else:
             dp = float(self.cfg.vmc_setpoint_dp_c)
-        return _clamp(dp, float(self.cfg.vmc_dp_sp_min_c), float(self.cfg.vmc_dp_sp_max_c))
+        return clamp(dp, float(self.cfg.vmc_dp_sp_min_c), float(self.cfg.vmc_dp_sp_max_c))
 
     def _vmc_need_dehumidification(
         self,
@@ -763,7 +761,7 @@ class PlantDecisionPlanner:
         if boost:
             sp = max(sp, int(self.cfg.vmc_boost_min_air_speed))
 
-        return int(_clamp(float(sp), float(self.cfg.vmc_speed_min), float(self.cfg.vmc_speed_max)))
+        return int(clamp(float(sp), float(self.cfg.vmc_speed_min), float(self.cfg.vmc_speed_max)))
 
     # ---- Validation ------------------------------------------------------
     def _validate_decision(self, dec: PlantDecision) -> list[str]:

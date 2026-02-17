@@ -704,21 +704,132 @@ Per ogni zona z:
 
 
 
+| Priorità | Condizione                                                                                                                         | Output `PlantMode` | Note                                                             |
+| -------: | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------ | ---------------------------------------------------------------- |
+|        1 | **UOFF = True**                                                                                                                    | **OFF**            | Override assoluto dell’utente (HA HVACMode.OFF)                  |
+|        2 | **VAC_POL = True** AND **DEW_RISK = False**                                                                                        | **OFF**            | Vacanza: spegne tutto (anche VMC) se non c’è rischio igrometrico |
+|        3 | **VAC_POL = True** AND **DEW_RISK = True** AND **OP = winter**                                                                     | **VENT_ONLY**      | In inverno evita cooling attivo anche se umidità alta            |
+|        4 | **VAC_POL = True** AND **DEW_RISK = True** AND **OP ∈ {summer, shoulder}** AND `cfg.vacation_allow_dehum_assist` AND **ANY_DEHUM** | **DEHUM_ASSIST**   | Consente assistenza latente                                      |
+|        5 | **VAC_POL = True** AND **DEW_RISK = True** (altrimenti)                                                                            | **VENT_ONLY**      | Fallback                                                         |
+
+Tabella 2 — Regole stagionali (dopo gli override)
+OP = winter
+| ANY_HEAT | ANY_COOL_OR_DEHUM | P_AWAYVAC | Output        | Note                                                           |
+| -------: | ----------------: | --------: | ------------- | -------------------------------------------------------------- |
+|        1 |                 * |         * | **HEATING**   | Priorità al riscaldamento                                      |
+|        0 |                 1 |         * | **VENT_ONLY** | Inverno: niente cooling/dehum assist attivo, solo ventilazione |
+|        0 |                 0 |         1 | **OFF**       | Idle + profilo risparmio forte                                 |
+|        0 |                 0 |         0 | **VENT_ONLY** | Idle ma mantiene ventilazione                                  |
+OP = summer
+| ANY_COOL_OR_DEHUM | ANY_DEHUM | ANY_HEAT | P_AWAYVAC | Output           | Note                            |
+| ----------------: | --------: | -------: | --------: | ---------------- | ------------------------------- |
+|                 1 |         1 |        * |         * | **DEHUM_ASSIST** | Se serve latente → dehum assist |
+|                 1 |         0 |        * |         * | **COOLING**      | Cooling sensibile               |
+|                 0 |         * |        1 |         * | **VENT_ONLY**    | Estate: evita heating attivo    |
+|                 0 |         * |        0 |         1 | **OFF**          | Idle + profilo AWAY/VAC         |
+|                 0 |         * |        0 |         0 | **VENT_ONLY**    | Idle ma ventila                 |
+OP = shoulder (spring/autumn/unknown)
+| ANY_HEAT | ANY_COOL_OR_DEHUM | (conflitto) dettagli                             | Output                         |
+| -------: | ----------------: | ------------------------------------------------ | ------------------------------ |
+|        1 |                 0 | –                                                | **HEATING**                    |
+|        0 |                 1 | **ANY_DEHUM=1** → DEHUM_ASSIST else COOLING      | **DEHUM_ASSIST** / **COOLING** |
+|        1 |                 1 | **LATENT_PRIO=1**                                | **DEHUM_ASSIST**               |
+|        1 |                 1 | LATENT_PRIO=0 AND **HEAT_DOM=1**                 | **HEATING**                    |
+|        1 |                 1 | LATENT_PRIO=0 AND **HEAT_DOM=0** AND ANY_DEHUM=1 | **DEHUM_ASSIST**               |
+|        1 |                 1 | LATENT_PRIO=0 AND **HEAT_DOM=0** AND ANY_DEHUM=0 | **COOLING**                    |
+|        0 |                 0 | –                                                | **OFF**                        |
 
 
 
 
 
 
+```mermaid
+stateDiagram-v2
+  [*] --> OFF: FORCED_OFF
 
+  %% VACATION branch (dominante quando attivo)
+  [*] --> OFF: VAC_BRANCH & !DEW_RISK
+  [*] --> VENT_ONLY: VAC_BRANCH & DEW_RISK & OPERATIVE=winter
+  [*] --> DEHUM_ASSIST: VAC_BRANCH & DEW_RISK & OPERATIVE!=winter & vacation_allow_dehum_assist & D
+  [*] --> VENT_ONLY: VAC_BRANCH & DEW_RISK & (altri casi)
 
+  %% WINTER (quando NON VAC_BRANCH e NON FORCED_OFF)
+  [*] --> HEATING: OPERATIVE=winter & H
+  [*] --> VENT_ONLY: OPERATIVE=winter & !H & C
+  [*] --> OFF: OPERATIVE=winter & !H & !C & PROFILE_IDLE_OFF
+  [*] --> VENT_ONLY: OPERATIVE=winter & !H & !C & !PROFILE_IDLE_OFF
 
+  %% SUMMER
+  [*] --> DEHUM_ASSIST: OPERATIVE=summer & C & D
+  [*] --> COOLING: OPERATIVE=summer & C & !D
+  [*] --> VENT_ONLY: OPERATIVE=summer & !C & H
+  [*] --> OFF: OPERATIVE=summer & !C & !H & PROFILE_IDLE_OFF
+  [*] --> VENT_ONLY: OPERATIVE=summer & !C & !H & !PROFILE_IDLE_OFF
 
+  %% SHOULDER
+  [*] --> HEATING: OPERATIVE=shoulder & H & !C
+  [*] --> DEHUM_ASSIST: OPERATIVE=shoulder & C & !H & D
+  [*] --> COOLING: OPERATIVE=shoulder & C & !H & !D
+  [*] --> DEHUM_ASSIST: OPERATIVE=shoulder & H & C & D & (cool_sur>=0.1)
+  [*] --> HEATING: OPERATIVE=shoulder & H & C & (heat_def>=cool_sur) & !(D & cool_sur>=0.1)
+  [*] --> DEHUM_ASSIST: OPERATIVE=shoulder & H & C & (heat_def<cool_sur) & D & !(cool_sur>=0.1 & D)
+  [*] --> COOLING: OPERATIVE=shoulder & H & C & (heat_def<cool_sur) & !D & !(D & cool_sur>=0.1)
+  [*] --> OFF: OPERATIVE=shoulder & !H & !C
+```
+```mermaid
+stateDiagram-v2
+    [*] --> D0
 
+    state D0 <<choice>>
+    D0 --> OFF: UOFF
+    D0 --> Dvac: !UOFF
 
+    state Dvac <<choice>>
+    Dvac --> OFF: VAC_POL && !DEW_RISK
+    Dvac --> VENT_ONLY: VAC_POL && DEW_RISK && OP=="winter"
+    Dvac --> DEHUM_ASSIST: VAC_POL && DEW_RISK && OP!="winter" && vacation_allow_dehum_assist && ANY_DEHUM
+    Dvac --> VENT_ONLY: VAC_POL && DEW_RISK && (OP!="winter") && (!vacation_allow_dehum_assist || !ANY_DEHUM)
+    Dvac --> Dseason: !VAC_POL
+
+    state Dseason <<choice>>
+    Dseason --> Dw: OP=="winter"
+    Dseason --> Ds: OP=="summer"
+    Dseason --> Dsh: OP=="shoulder"
+
+    state Dw <<choice>>
+    Dw --> HEATING: ANY_HEAT
+    Dw --> VENT_ONLY: !ANY_HEAT && ANY_COOL_OR_DEHUM
+    Dw --> OFF: IDLE && P_AWAYVAC
+    Dw --> VENT_ONLY: IDLE && !P_AWAYVAC
+
+    state Ds <<choice>>
+    Ds --> DEHUM_ASSIST: ANY_COOL_OR_DEHUM && ANY_DEHUM
+    Ds --> COOLING: ANY_COOL_OR_DEHUM && !ANY_DEHUM
+    Ds --> VENT_ONLY: !ANY_COOL_OR_DEHUM && ANY_HEAT
+    Ds --> OFF: IDLE && P_AWAYVAC
+    Ds --> VENT_ONLY: IDLE && !P_AWAYVAC
+
+    state Dsh <<choice>>
+    Dsh --> HEATING: ANY_HEAT && !ANY_COOL_OR_DEHUM
+    Dsh --> DEHUM_ASSIST: ANY_COOL_OR_DEHUM && !ANY_HEAT && ANY_DEHUM
+    Dsh --> COOLING: ANY_COOL_OR_DEHUM && !ANY_HEAT && !ANY_DEHUM
+
+    Dsh --> DEHUM_ASSIST: ANY_HEAT && ANY_COOL_OR_DEHUM && LATENT_PRIO
+    Dsh --> HEATING: ANY_HEAT && ANY_COOL_OR_DEHUM && !LATENT_PRIO && HEAT_DOM
+    Dsh --> DEHUM_ASSIST: ANY_HEAT && ANY_COOL_OR_DEHUM && !LATENT_PRIO && !HEAT_DOM && ANY_DEHUM
+    Dsh --> COOLING: ANY_HEAT && ANY_COOL_OR_DEHUM && !LATENT_PRIO && !HEAT_DOM && !ANY_DEHUM
+
+    Dsh --> OFF: IDLE
+
+```
 
 
 
 TBD
 ---
+
+
+
+
 
