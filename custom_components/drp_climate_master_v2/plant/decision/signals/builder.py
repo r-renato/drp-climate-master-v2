@@ -269,7 +269,7 @@ class DemandSignalsBuilder:
         dp_dehum_c: Optional[float] = None
         if zc.dp_values:
             xs = sorted(zc.dp_values)
-            p = float(getattr(self.cfg, "vmc_dp_control_percentile", 1.0))
+            p = float(getattr(self.cfg.vmc.dehum, "dp_control_percentile", 1.0))
             try:
                 dp_dehum_c = float(self._percentile_sorted_fn(xs, p))
             except Exception:
@@ -303,17 +303,17 @@ class DemandSignalsBuilder:
         rh_target_pct = float(self._planner._resolve_vmc_rh_target_pct(operative, profile))
         vmc_dp_sp_c = float(self._planner._compute_vmc_dp_setpoint_c_from(t_ref_c, rh_target_pct))
 
-        ddp = float(getattr(self.cfg, "vmc_setpoint_ddp_c", 0.0))
-        hyst = float(getattr(self.cfg, "vmc_dehum_hysteresis_c", 0.0))
+        ddp = float(getattr(self.cfg.vmc.dehum, "setpoint_ddp_c", 0.0))
+        hyst = float(getattr(self.cfg.vmc.dehum, "hysteresis_c", 0.0))
         vmc_dehum_on_thr_c = float(vmc_dp_sp_c) + ddp
         vmc_dehum_off_thr_c = float(vmc_dehum_on_thr_c) - max(0.0, hyst)
 
         # Feasibility
         vmc_dehum_feasible: Optional[bool] = None
-        if bool(getattr(self.cfg, "vmc_water_on_for_dehumid", False)):
+        if bool(getattr(self.cfg.vmc.dehum, "water_on_for_dehumid", False)):
             vmc_dehum_feasible = True
         elif dp.outdoor_dp_c is not None and dp.dp_dehum_c is not None:
-            headroom = float(getattr(self.cfg, "vmc_dehum_outdoor_dp_headroom_c", 0.0))
+            headroom = float(getattr(self.cfg.vmc.dehum, "outdoor_dp_headroom_c", 0.0))
             vmc_dehum_feasible = float(dp.outdoor_dp_c) <= (float(dp.dp_dehum_c) - headroom)
 
         vmc_need_dehum = self._planner._vmc_need_dehumidification(dp.dp_dehum_c, vmc_dehum_on_thr_c, vmc_dehum_off_thr_c)
@@ -337,7 +337,7 @@ class DemandSignalsBuilder:
         vmc_req_water = (
             vmc_req_heat
             or vmc_req_cool
-            or (vmc_req_dehum and bool(getattr(self.cfg, "vmc_water_on_for_dehumid", False)))
+            or (vmc_req_dehum and bool(getattr(self.cfg.vmc.dehum, "water_on_for_dehumid", False)))
         )
 
         return VmcCluster(

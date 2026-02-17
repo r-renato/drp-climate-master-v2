@@ -5,6 +5,283 @@ from typing import Optional
 
 from ...domain.enums import HVACOperatingProfile
 
+# -----------------------------------------------------------------------------
+# Option A: nested, domain-oriented config blocks
+# -----------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class ComfortBandConfig:
+    """Comfort-band thresholds (°C).
+
+    These are the *base* thresholds used to consider a sensible demand significant.
+    They are later modulated by profile aggressiveness (see planner).
+    """
+
+    # ON if T_op < T_min - thr
+    heat_on_deficit_c: float = 0.3
+
+    # ON if T_op > T_max + thr
+    cool_on_surplus_c: float = 0.3
+
+
+@dataclass(slots=True)
+class DemandGatingConfig:
+    """Profile-aware multi-zone gating (dimensionless).
+
+    In energy-saving profiles we avoid starting the plant for micro-violations in a
+    single zone, unless:
+      - the worst violation is large enough (override), or
+      - the weighted mean is meaningful (mean_factor).
+    """
+
+    # Coverage quorum by profile (0..1). 0 => one zone can trigger.
+    quorum_cov_by_profile: dict[HVACOperatingProfile, float] = field(default_factory=lambda: {
+        HVACOperatingProfile.COMFORT: 0.0,
+        HVACOperatingProfile.BOOST: 0.0,
+        HVACOperatingProfile.ECO: 0.25,
+        HVACOperatingProfile.SLEEP: 0.20,
+        HVACOperatingProfile.AWAY: 0.40,
+        HVACOperatingProfile.VACATION: 0.50,
+    })
+
+    # If max deficit/surplus >= thr * override_factor => force ON
+    demand_override_factor: float = 2.0
+
+    # If weighted mean deficit/surplus >= thr * mean_factor => easier ON
+    demand_mean_factor: float = 0.60
+
+    def quorum_cov(self, profile: HVACOperatingProfile) -> float:
+        return float(self.quorum_cov_by_profile.get(profile, 0.0))
+
+
+@dataclass(slots=True)
+class DewPointGuardConfig:
+    """Cooling condensation guard (°C)."""
+
+    # Hygrometric margin above DP_max
+    dp_margin_c: float = 2.0
+
+    # Conservative Δ(surface↔water)
+    delta_surface_water_c: float = 1.0
+
+
+# -----------------------------------------------------------------------------
+# Heating / cooling setpoints
+# -----------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class HeatCurveConfig:
+    """Linear heating curve: WOT = base + k*(t_ref - t_out)."""
+
+    base_c: float = 35.0
+    k_c_per_c: float = 0.7
+    ref_outdoor_c: float = 15.0
+
+    wot_min_c: float = 28.0
+    wot_max_c: float = 50.0
+    dt_c: float = 2.0
+
+
+@dataclass(slots=True)
+class HeatEnhancementsConfig:
+    """Heating curve enhancements (profile offset + indoor feedback + anti-hunting)."""
+
+    # Keys aligned to HVACOperatingProfile (Comfort, Eco, ...)
+    profile_offset_c: dict[HVACOperatingProfile, float] = field(default_factory=lambda: {
+        HVACOperatingProfile.COMFORT: 0.0,
+        HVACOperatingProfile.ECO: -1.5,
+        HVACOperatingProfile.BOOST: +3.0,
+        HVACOperatingProfile.SLEEP: -1.0,
+        HVACOperatingProfile.AWAY: -3.0,
+        HVACOperatingProfile.VACATION: -4.0,
+    })
+
+    # Indoor feedback (quanto alzare WOT per ogni °C di deficit medio)
+    feedback_gain_c_per_c: float = 0.8
+    feedback_max_up_c: float = 6.0
+    feedback_max_down_c: float = 2.0
+
+    # Extra boost se una zona è molto fuori banda (worst-case)
+    kick_on_max_def_c: float = 4.0
+    kick_extra_c: float = 2.0
+
+    # Anti-hunting: limita variazione setpoint nel tempo
+    wot_rate_limit_c_per_min: float = 0.5
+    wot_deadband_c: float = 0.2
+
+    def offset(self, profile: HVACOperatingProfile) -> float:
+        return float(self.profile_offset_c.get(profile, 0.0))
+
+
+@dataclass(slots=True)
+class HeatingConfig:
+    """Heating configuration bundle."""
+
+    curve: HeatCurveConfig = field(default_factory=HeatCurveConfig)
+    enh: HeatEnhancementsConfig = field(default_factory=HeatEnhancementsConfig)
+
+
+@dataclass(slots=True)
+class CoolingConfig:
+    """Cooling setpoint (flat, to be evolved) + profile offsets."""
+
+    profile_offset_c: dict[HVACOperatingProfile, float] = field(default_factory=lambda: {
+        HVACOperatingProfile.COMFORT: 0.0,
+        HVACOperatingProfile.ECO: +1.0,
+        HVACOperatingProfile.BOOST: -1.5,
+        HVACOperatingProfile.SLEEP: +1.5,
+        HVACOperatingProfile.AWAY: +3.0,
+        HVACOperatingProfile.VACATION: +4.0,
+    })
+
+    wot_min_c: float = 7.0
+    wot_max_c: float = 18.0
+    wot_default_c: float = 12.0
+    dt_c: float = 7.0
+
+    def offset(self, profile: HVACOperatingProfile) -> float:
+        return float(self.profile_offset_c.get(profile, 0.0))
+
+
+# -----------------------------------------------------------------------------
+# Secondary loops / MPC
+# -----------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class RadiantConfig:
+    """Radiant (secondary) targets (°C)."""
+
+    # In heating the radiant supply is typically lower than primary (mixing).
+    heat_supply_offset_c: float = 5.0
+    heat_supply_min_c: float = 25.0
+    heat_supply_max_c: float = 40.0
+
+    # In cooling, condensation constraint dominates.
+    cool_supply_min_c: float = 16.0
+    cool_supply_max_c: float = 22.0
+
+
+@dataclass(slots=True)
+class ZonesMpcConfig:
+    """ZonesPlan / MPC integration knobs."""
+
+    min_duty_ratio: float = 0.05
+    full_off_pct: float = 0.0
+    full_on_pct: float = 50.0
+
+    # Accept MPC heating as "preheat" only when close to lower bound.
+    # Uses min(T_meas - T_min) across zones.
+    preheat_headroom_c: float = 0.4
+
+
+# -----------------------------------------------------------------------------
+# VMC (ventilazione/deumidifica; heating/cooling solo boost)
+# -----------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class VmcBoostConfig:
+    """Boost thresholds: enable VMC heating/cooling only if really out of comfort."""
+
+    enabled: bool = True
+    heat_def_max_thr_c: float = 1.5
+    heat_def_wmean_thr_c: float = 1.0
+    cool_sur_max_thr_c: float = 1.5
+    cool_sur_wmean_thr_c: float = 1.0
+    setpoint_heat_c: float = 22.0
+    setpoint_cool_c: float = 24.0
+    min_air_speed: int = 3
+
+
+@dataclass(slots=True)
+class VmcDehumConfig:
+    """Dehumidification policy."""
+
+    setpoint_rh_default_pct: float = 51.0
+    setpoint_rh_by_profile_pct: dict[HVACOperatingProfile, float] = field(default_factory=lambda: {
+        HVACOperatingProfile.SLEEP: 56.0,
+    })
+    setpoint_rh_by_season_pct: dict[str, float] = field(default_factory=lambda: {
+        "winter": 55.0,
+        "summer": 50.0,
+    })
+
+    setpoint_dp_c: float = 12.0
+    setpoint_ddp_c: float = 0.3
+    hysteresis_c: float = 0.2
+
+    dp_control_percentile: float = 0.8
+    dp_sp_min_c: float = 7.0
+    dp_sp_max_c: float = 15.0
+    dp_setpoint_from_psychrometrics: bool = True
+
+    water_on_for_dehumid: bool = False
+    outdoor_dp_headroom_c: float = 0.2
+
+    def rh_target_pct(self, season: Optional[str], profile: HVACOperatingProfile) -> float:
+        if profile in self.setpoint_rh_by_profile_pct:
+            return float(self.setpoint_rh_by_profile_pct[profile])
+        if season and season in self.setpoint_rh_by_season_pct:
+            return float(self.setpoint_rh_by_season_pct[season])
+        return float(self.setpoint_rh_default_pct)
+
+
+@dataclass(slots=True)
+class VmcSpeedPolicyConfig:
+    """Ventilation speed policy (0..5)."""
+
+    speed_min: int = 0
+    speed_max: int = 5
+    speed_base: int = 2
+    speed_vacation: int = 1
+    speed_windows_open: int = 0
+
+    dp_boost_step1_c: float = 0.5
+    dp_boost_step2_c: float = 1.2
+    dp_boost_step3_c: float = 1.8
+
+
+@dataclass(slots=True)
+class VmcConfig:
+    """VMC configuration bundle."""
+
+    mode_winter: str = "winter"
+    mode_summer: str = "summer"
+
+    setpoint_t_c: float = 20.0
+    temp_neutral_deadband_c: float = 0.3
+    temp_min_c: float = 16.0
+    temp_max_c: float = 28.0
+
+    recirculation: str = "off"
+
+    boost: VmcBoostConfig = field(default_factory=VmcBoostConfig)
+    dehum: VmcDehumConfig = field(default_factory=VmcDehumConfig)
+    speed: VmcSpeedPolicyConfig = field(default_factory=VmcSpeedPolicyConfig)
+
+
+# -----------------------------------------------------------------------------
+# Vacation policy
+# -----------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class VacationConfig:
+    """VACATION policy knobs."""
+
+    allows_vmc_off: bool = True
+    ddp_on_c: float = 0.8
+    allow_dehum_assist: bool = True
+
+
+# -----------------------------------------------------------------------------
+# Root config
+# -----------------------------------------------------------------------------
+
+
 @dataclass(slots=True)
 class PlantPlannerConfig:
     """Configurazione per la pianificazione impianto.
@@ -13,168 +290,15 @@ class PlantPlannerConfig:
     (commissioning). In questa fase il planner non è integrato nel Supervisor.
     """
 
-    # ---- Comfort band usage (°C)
-    # Soglia per considerare "richiesta sensibile" in heating/cooling
-    heat_on_deficit_c: float = 0.3     # accendi se T_op < T_min - soglia
-    cool_on_surplus_c: float = 0.3     # accendi se T_op > T_max + soglia
+    comfort: ComfortBandConfig = field(default_factory=ComfortBandConfig)
+    gating: DemandGatingConfig = field(default_factory=DemandGatingConfig)
+    dp_guard: DewPointGuardConfig = field(default_factory=DewPointGuardConfig)
 
-    # ---- Profile-aware multi-zone gating (dimensionless)
-    # In modalità "energy saving" evita di accendere la PDC per micro-sforamenti in una sola zona.
-    # COMFORT/BOOST: quorum=0 => basta anche una singola zona.
-    # ECO/SLEEP/AWAY/VACATION: richiede una frazione minima (coverage) di "area/weight" fuori banda,
-    # salvo override per errori grandi (override_factor).
-    quorum_cov_eco: float = 0.25
-    quorum_cov_sleep: float = 0.20
-    quorum_cov_away: float = 0.40
-    quorum_cov_vacation: float = 0.50
+    heating: HeatingConfig = field(default_factory=HeatingConfig)
+    cooling: CoolingConfig = field(default_factory=CoolingConfig)
 
-    # Se il deficit/surplus massimo supera (thr * override_factor), accendi comunque anche se la coverage è bassa
-    # (es. una stanza molto fuori comfort).
-    demand_override_factor: float = 2.0
+    radiant: RadiantConfig = field(default_factory=RadiantConfig)
+    zones_mpc: ZonesMpcConfig = field(default_factory=ZonesMpcConfig)
 
-    # Se la media pesata del deficit/surplus supera (thr * mean_factor), accendi anche se la coverage è appena sotto quorum
-    # (utile quando tante zone sono poco fuori banda).
-    demand_mean_factor: float = 0.60
-
-    # ---- Dew point guard (cooling) (°C)
-    dp_margin_c: float = 2.0           # margine igrometrico sopra DP_max
-    delta_surface_water_c: float = 1.0 # Δ(superficie↔acqua) conservativo
-
-    # ---- PDC setpoints (°C)
-    # Curva climatica *semplice* (lineare) per heating: T_wot = base + k*(t_ref - t_out)
-    heat_curve_base_c: float = 35.0
-    heat_curve_k_c_per_c: float = 0.7
-    heat_curve_ref_outdoor_c: float = 15.0
-    heat_wot_min_c: float = 28.0
-    heat_wot_max_c: float = 50.0
-    heat_dt_c: float = 2.0            # default ΔT
-
-    # ---- Heating curve enhancements (profile offset + indoor feedback + anti-hunting)
-    # Nota: chiavi allineate a HVACOperatingProfile.value ("Comfort", "Eco", ...)
-    heat_profile_offset_c: dict[HVACOperatingProfile, float] = field(default_factory=lambda: {
-        HVACOperatingProfile.COMFORT:  0.0,
-        HVACOperatingProfile.ECO:      -1.5,
-        HVACOperatingProfile.BOOST:    +3.0,
-        HVACOperatingProfile.SLEEP:    -1.0,
-        HVACOperatingProfile.AWAY:     -3.0,
-        HVACOperatingProfile.VACATION: -4.0,
-    })
-
-    # Indoor feedback (quanto alzare WOT per ogni °C di deficit medio)
-    heat_feedback_gain_c_per_c: float = 0.8
-    heat_feedback_max_up_c: float = 6.0
-    heat_feedback_max_down_c: float = 2.0
-
-    # Extra boost se una zona è molto fuori banda (worst-case)
-    heat_kick_on_max_def_c: float = 4.0
-    heat_kick_extra_c: float = 2.0
-
-    # Anti-hunting: limita variazione setpoint nel tempo
-    heat_wot_rate_limit_c_per_min: float = 0.5
-    heat_wot_deadband_c: float = 0.2
-
-    cool_profile_offset_c: dict[HVACOperatingProfile, float] = field(default_factory=lambda: {
-        HVACOperatingProfile.COMFORT:  0.0,     # baseline
-        HVACOperatingProfile.ECO:      +1.0,    # meno spinta: acqua più calda
-        HVACOperatingProfile.BOOST:    -1.5,    # più spinta: acqua più fredda
-        HVACOperatingProfile.SLEEP:    +1.5,    # più “morbido” e silenzioso
-        HVACOperatingProfile.AWAY:     +3.0,    # quasi niente cooling sensibile
-        HVACOperatingProfile.VACATION: +4.0,
-    })
-    
-    # Cooling setpoint (flat, da evolvere)
-    cool_wot_min_c: float = 7.0
-    cool_wot_max_c: float = 18.0
-    cool_wot_default_c: float = 12.0
-    cool_dt_c: float = 7.0
-
-    # ---- Radiante (secondary) targets (°C)
-    # In heating la mandata radiante tipica è più bassa del primario (mixing).
-    heat_rad_supply_offset_c: float = 5.0
-    heat_rad_supply_min_c: float = 25.0
-    heat_rad_supply_max_c: float = 40.0
-
-    # In cooling il vincolo anticondensa domina: T_sup_rad >= DP_max + margin + Δ
-    cool_rad_supply_min_c: float = 16.0
-    cool_rad_supply_max_c: float = 22.0
-
-    # --- MPC (ZonesPlan) integration knobs ---
-    zones_mpc_min_duty_ratio: float = 0.05
-    zones_mpc_full_off_pct: float = 0.0
-    zones_mpc_full_on_pct: float = 50.0
-
-    # Accept MPC heating as "preheat" only when close to lower bound.
-    # Uses min(T_meas - T_min) across zones.
-    zones_mpc_preheat_headroom_c: float = 0.4
-
-    # ---- VMC (ventilazione/deumidifica; heating/cooling solo boost)
-    # Nota: la VMC non deve "trascinare" la PDC salvo condizioni significativamente fuori comfort.
-    vmc_mode_winter: str = "winter"
-    vmc_mode_summer: str = "summer"
-
-    # Neutral temperature setpoint: in inverno leggermente sotto l'indoor per evitare richiesta heating,
-    # in estate leggermente sopra per evitare richiesta cooling (deadband).
-    vmc_setpoint_t_c: float = 20.0
-    vmc_temp_neutral_deadband_c: float = 0.3
-    vmc_temp_min_c: float = 16.0
-    vmc_temp_max_c: float = 28.0
-
-    # Boost thresholds: abilita heating/cooling VMC solo se davvero fuori comfort
-    vmc_boost_enabled: bool = True
-    vmc_boost_heat_def_max_thr_c: float = 1.5
-    vmc_boost_heat_def_wmean_thr_c: float = 1.0
-    vmc_boost_cool_sur_max_thr_c: float = 1.5
-    vmc_boost_cool_sur_wmean_thr_c: float = 1.0
-    vmc_boost_setpoint_heat_c: float = 22.0
-    vmc_boost_setpoint_cool_c: float = 24.0
-    vmc_boost_min_air_speed: int = 3
-
-    # Dehumidificazione via dew point setpoint
-    vmc_setpoint_rh_pct: float = 51.0
-    # Optional: piu tolleranza in Sleep (evita over-ventilation notturna in inverno)
-    vmc_setpoint_rh_sleep_pct: float | None = 56.0
-    # Optional seasonal RH targets. If set, they override vmc_setpoint_rh_pct
-    vmc_setpoint_rh_winter_pct: float | None = 55.0
-    vmc_setpoint_rh_summer_pct: float | None = 50.0
-    vmc_setpoint_dp_c: float = 12.0
-    vmc_setpoint_ddp_c: float = 0.3
-    # Isteresi (ΔDP) per evitare flapping: ON a (dp_sp + ddp), OFF a (dp_sp + ddp - hysteresis)
-    vmc_dehum_hysteresis_c: float = 0.2
-    # Percentile (0..1) used to derive a robust indoor DP for dehumidification control
-    # from zone dew points (1.0 = max, 0.5 = median)
-    vmc_dp_control_percentile: float = 0.8
-    vmc_dp_sp_min_c: float = 7.0
-    vmc_dp_sp_max_c: float = 15.0
-    vmc_dp_setpoint_from_psychrometrics: bool = True
-
-    # Water request gating: la deumidifica non deve forzare acqua calda/fredda salvo impianti specifici.
-    vmc_water_on_for_dehumid: bool = False
-    # In "ventilation-only" (senza batteria acqua), la deumidifica è considerata fattibile solo se:
-    #   DP_outdoor <= DP_indoor_robust - headroom
-    # dove DP_indoor_robust è il percentile delle zone (vmc_dp_control_percentile).
-    vmc_dehum_outdoor_dp_headroom_c: float = 0.2
-
-    # Ventilation speed policy (0..5)
-    vmc_speed_min: int = 0
-    vmc_speed_max: int = 5
-    vmc_speed_base: int = 2
-    vmc_speed_vacation: int = 1
-    vmc_speed_windows_open: int = 0
-    vmc_speed_dp_boost_step1_c: float = 0.5
-    vmc_speed_dp_boost_step2_c: float = 1.2
-    vmc_speed_dp_boost_step3_c: float = 1.8
-
-    vmc_recirculation: str = "off"
-
-    # ---- Vacation policy ------------------------------------------------
-    # In VACATION, the plant may go fully OFF (including VMC), unless there is
-    # a humidity/dew-point safety reason to keep ventilation/dehumidification on.
-    vacation_allows_vmc_off: bool = True
-
-    # Dew-point hysteresis used ONLY for VACATION safety gating.
-    # Wider than normal to reduce hunting while the home is empty.
-    vacation_ddp_on_c: float = 0.8
-
-    # If dew risk is detected in VACATION during summer/shoulder, allow DEHUM_ASSIST
-    # (PDC cooling for latent control). If False, fallback to VENT_ONLY.
-    vacation_allow_dehum_assist: bool = True
+    vmc: VmcConfig = field(default_factory=VmcConfig)
+    vacation: VacationConfig = field(default_factory=VacationConfig)

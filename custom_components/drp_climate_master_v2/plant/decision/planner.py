@@ -159,8 +159,8 @@ class PlantDecisionPlanner:
         # cannot be achieved within configured bounds, degrade mode to avoid condensation risk.
         # (We still allow DEHUM_ASSIST if latent demand exists.)
         if dec.mode == PlantMode.COOLING and demand.dp_max_c is not None:
-            safe_required = float(demand.dp_max_c) + float(self.cfg.dp_margin_c) + float(self.cfg.delta_surface_water_c)
-            if safe_required > float(self.cfg.cool_rad_supply_max_c) + 1e-6:
+            safe_required = float(demand.dp_max_c) + float(self.cfg.dp_guard.dp_margin_c) + float(self.cfg.dp_guard.delta_surface_water_c)
+            if safe_required > float(self.cfg.radiant.cool_supply_max_c) + 1e-6:
                 dec.warnings.append("dew_guard_unachievable_switch_mode")
                 dec.mode = PlantMode.DEHUM_ASSIST if bool(demand.vmc_req_dehumidif) else PlantMode.VENT_ONLY
 
@@ -198,16 +198,7 @@ class PlantDecisionPlanner:
         cool_sur_wmean = float(demand.cool_sur_wmean_c)
 
         def _profile_quorum(p: HVACOperatingProfile) -> float:
-            if p == HVACOperatingProfile.ECO:
-                return float(cfg.quorum_cov_eco)
-            if p == HVACOperatingProfile.SLEEP:
-                return float(cfg.quorum_cov_sleep)
-            if p == HVACOperatingProfile.AWAY:
-                return float(cfg.quorum_cov_away)
-            if p == HVACOperatingProfile.VACATION:
-                return float(cfg.quorum_cov_vacation)
-            # COMFORT/BOOST and any unknown profile: no quorum
-            return 0.0
+            return float(cfg.gating.quorum_cov(p))
 
         # --------------------
         # 0) User intent (HA Climate)
@@ -240,8 +231,8 @@ class PlantDecisionPlanner:
         ctrl_aggr = float(_PROFILE_CTRL_AGGR.get(profile, 1.0))
         ctrl_eff = max(0.2, ctrl_aggr)  # avoid division blow-ups
 
-        heat_thr = float(cfg.heat_on_deficit_c) / ctrl_eff
-        cool_thr = float(cfg.cool_on_surplus_c) / ctrl_eff
+        heat_thr = float(cfg.comfort.heat_on_deficit_c) / ctrl_eff
+        cool_thr = float(cfg.comfort.cool_on_surplus_c) / ctrl_eff
 
         demand.ctrl_aggr = ctrl_aggr
         demand.heat_on_thr_c = heat_thr
@@ -262,14 +253,14 @@ class PlantDecisionPlanner:
             heat_sensible = (heat_def >= heat_thr)
             cool_sensible = (cool_sur >= cool_thr)
         else:
-            heat_override = (heat_def >= heat_thr * float(cfg.demand_override_factor))
+            heat_override = (heat_def >= heat_thr * float(cfg.gating.demand_override_factor))
             heat_quorum_ok = (heat_cov >= quorum)
-            heat_mean_ok = (heat_def_wmean >= heat_thr * float(cfg.demand_mean_factor))
+            heat_mean_ok = (heat_def_wmean >= heat_thr * float(cfg.gating.demand_mean_factor))
             heat_sensible = heat_override or ((heat_def >= heat_thr) and (heat_quorum_ok or heat_mean_ok))
 
-            cool_override = (cool_sur >= cool_thr * float(cfg.demand_override_factor))
+            cool_override = (cool_sur >= cool_thr * float(cfg.gating.demand_override_factor))
             cool_quorum_ok = (cool_cov >= quorum)
-            cool_mean_ok = (cool_sur_wmean >= cool_thr * float(cfg.demand_mean_factor))
+            cool_mean_ok = (cool_sur_wmean >= cool_thr * float(cfg.gating.demand_mean_factor))
             cool_sensible = cool_override or ((cool_sur >= cool_thr) and (cool_quorum_ok or cool_mean_ok))
 
             demand.heat_override = heat_override
@@ -282,7 +273,7 @@ class PlantDecisionPlanner:
         # MPC may schedule heating far from the band; accept it only as preheat close to T_min.
         zones_preheat_ok = False
         if zones_any_heat and getattr(demand, "heat_headroom_min_c", None) is not None:
-            zones_preheat_ok = demand.heat_headroom_min_c <= float(getattr(cfg, "zones_mpc_preheat_headroom_c", 0.4))
+            zones_preheat_ok = demand.heat_headroom_min_c <= float(getattr(cfg.zones_mpc, "preheat_headroom_c", 0.4))
         if profile in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
             zones_preheat_ok = False
         demand.zones_mpc_heat_preheat_ok = zones_preheat_ok
@@ -319,10 +310,10 @@ class PlantDecisionPlanner:
         # 3.a) VACATION override (may switch plant fully OFF, including VMC),
         #      except when dew-point risk suggests keeping ventilation/dehumidification active.
         # --------------------
-        if bool(snapshot.presence_vacation) and bool(cfg.vacation_allows_vmc_off):
+        if bool(snapshot.presence_vacation) and bool(cfg.vacation.allows_vmc_off):
             dp_cur = as_float(demand.dp_max_c)
             dp_sp = float(demand.vmc_dp_sp_c) if getattr(demand, "vmc_dp_sp_c", None) is not None else float(self._compute_vmc_dp_setpoint_c(snapshot))
-            ddp_vac = float(cfg.vacation_ddp_on_c)
+            ddp_vac = float(cfg.vacation.ddp_on_c)
             dew_risk = (dp_cur is not None) and (float(dp_cur) > (dp_sp + ddp_vac))
 
             if dew_risk:
@@ -330,7 +321,7 @@ class PlantDecisionPlanner:
                 if operative == "winter":
                     return PlantMode.VENT_ONLY
                 # Summer/shoulder: allow latent assist if configured and dehumidification is requested.
-                if bool(cfg.vacation_allow_dehum_assist) and bool(demand.vmc_req_dehumidif):
+                if bool(cfg.vacation.allow_dehum_assist) and bool(demand.vmc_req_dehumidif):
                     return PlantMode.DEHUM_ASSIST
                 return PlantMode.VENT_ONLY
 
@@ -390,30 +381,30 @@ class PlantDecisionPlanner:
 
             # --- 1) base curve (outdoor-driven)
             if t_out is not None:
-                curve = cfg.heat_curve_base_c + cfg.heat_curve_k_c_per_c * (
-                    cfg.heat_curve_ref_outdoor_c - float(t_out)
+                curve = cfg.heating.curve.base_c + cfg.heating.curve.k_c_per_c * (
+                    cfg.heating.curve.ref_outdoor_c - float(t_out)
                 )
             else:
                 # fallback conservativo
-                curve = cfg.heat_curve_base_c
+                curve = cfg.heating.curve.base_c
 
             # --- 2) profile offset (by preset/profile)
             prof_key = snapshot.climate_preset_mode if snapshot.climate_preset_mode else HVACOperatingProfile.COMFORT
-            prof_offset = float(cfg.heat_profile_offset_c.get(prof_key, 0.0))
+            prof_offset = float(cfg.heating.enh.offset(prof_key))
 
             # --- 3) indoor feedback (use already computed signals)
             heat_def_max = float(demand.heat_def_max_c)
             heat_def_wmean = float(demand.heat_def_wmean_c)
 
-            fb = float(cfg.heat_feedback_gain_c_per_c) * heat_def_wmean
-            fb = clamp(fb, -float(cfg.heat_feedback_max_down_c), float(cfg.heat_feedback_max_up_c))
+            fb = float(cfg.heating.enh.feedback_gain_c_per_c) * heat_def_wmean
+            fb = clamp(fb, -float(cfg.heating.enh.feedback_max_down_c), float(cfg.heating.enh.feedback_max_up_c))
 
             kick = 0.0
-            if heat_def_max >= float(cfg.heat_kick_on_max_def_c):
-                kick = float(cfg.heat_kick_extra_c)
+            if heat_def_max >= float(cfg.heating.enh.kick_on_max_def_c):
+                kick = float(cfg.heating.enh.kick_extra_c)
 
             target = curve + prof_offset + fb + kick
-            target = clamp(target, cfg.heat_wot_min_c, cfg.heat_wot_max_c)
+            target = clamp(target, cfg.heating.curve.wot_min_c, cfg.heating.curve.wot_max_c)
 
             # --- 4) deadband + rate-limit (anti-hunting, stateful)
             now = dec.ts
@@ -422,9 +413,9 @@ class PlantDecisionPlanner:
 
             if prev is not None and prev_ts is not None:
                 dt_min = max(0.001, (now - prev_ts).total_seconds() / 60.0)
-                max_step = float(cfg.heat_wot_rate_limit_c_per_min) * dt_min
+                max_step = float(cfg.heating.enh.wot_rate_limit_c_per_min) * dt_min
 
-                if abs(float(target) - float(prev)) < float(cfg.heat_wot_deadband_c):
+                if abs(float(target) - float(prev)) < float(cfg.heating.enh.wot_deadband_c):
                     target = float(prev)
                 else:
                     target = clamp(float(target), float(prev) - max_step, float(prev) + max_step)
@@ -433,7 +424,7 @@ class PlantDecisionPlanner:
             self._last_heat_wot_ts = now
 
             pdc.heat_wot_c = math.ceil(target)
-            pdc.heat_dt_c = math.ceil(cfg.heat_dt_c)
+            pdc.heat_dt_c = math.ceil(cfg.heating.curve.dt_c)
             pdc.debug.update({
                 "t_out_c": t_out,
                 "curve": "linear+profile+feedback",
@@ -451,8 +442,14 @@ class PlantDecisionPlanner:
             pdc.mode = "cooling"
             pdc.power = True
             # In questa fase usiamo un setpoint flat; in futuro: profilo + vincoli batteria VMC.
-            pdc.cool_wot_c = math.ceil(clamp(cfg.cool_wot_default_c, cfg.cool_wot_min_c, cfg.cool_wot_max_c))
-            pdc.cool_dt_c = math.ceil(cfg.cool_dt_c)
+            pdc.cool_wot_c = math.ceil(
+                clamp(
+                    cfg.cooling.wot_default_c + cfg.cooling.offset(snapshot.climate_preset_mode),
+                    cfg.cooling.wot_min_c,
+                    cfg.cooling.wot_max_c,
+                )
+            )
+            pdc.cool_dt_c = math.ceil(cfg.cooling.dt_c)
 
         elif dec.mode == PlantMode.VENT_ONLY:
             # Nota: in molte PDC conviene spegnere, salvo logiche anti-gelo/anti-stallo gestite nativamente.
@@ -484,8 +481,8 @@ class PlantDecisionPlanner:
             any_zone_on = any(v.valve_on is True for v in zones_decision.zones.values())
         else:
             # fallback: se c'è deficit/surplus, assumiamo che almeno una zona debba essere aperta
-            any_zone_on = (float(demand.heat_def_max_c) >= cfg.heat_on_deficit_c) or (
-                float(demand.cool_sur_max_c) >= cfg.cool_on_surplus_c
+            any_zone_on = (float(demand.heat_def_max_c) >= cfg.comfort.heat_on_deficit_c) or (
+                float(demand.cool_sur_max_c) >= cfg.comfort.cool_on_surplus_c
             )
 
         if dec.mode in (PlantMode.HEATING, PlantMode.COOLING, PlantMode.DEHUM_ASSIST):
@@ -504,24 +501,30 @@ class PlantDecisionPlanner:
         if dec.mode == PlantMode.HEATING:
             # Deriva un target radiante da PDC heating setpoint (offset mixing)
             if dec.pdc.heat_wot_c is not None:
-                t = dec.pdc.heat_wot_c - cfg.heat_rad_supply_offset_c
-                s.rad_supply_target_c = float(clamp(t, cfg.heat_rad_supply_min_c, cfg.heat_rad_supply_max_c))
+                t = dec.pdc.heat_wot_c - cfg.radiant.heat_supply_offset_c
+                s.rad_supply_target_c = float(clamp(t, cfg.radiant.heat_supply_min_c, cfg.radiant.heat_supply_max_c))
         elif dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST):
             if dp_max is not None:
-                safe_required = float(dp_max) + float(cfg.dp_margin_c) + float(cfg.delta_surface_water_c)
+                safe_required = float(dp_max) + float(cfg.dp_guard.dp_margin_c) + float(cfg.dp_guard.delta_surface_water_c)
 
                 # HARD guard: if required safe temp is above max allowed, do not run radiant cooling.
-                if safe_required > float(cfg.cool_rad_supply_max_c) + 1e-6:
+                if safe_required > float(cfg.radiant.cool_supply_max_c) + 1e-6:
                     dec.warnings.append("dew_guard_unachievable_radiant_disabled")
                     s.adj_pump_on = False
                     s.rad_supply_target_c = None
                     s.debug.update({
                         "dew_guard_required_c": safe_required,
-                        "dew_guard_max_c": float(cfg.cool_rad_supply_max_c),
+                        "dew_guard_max_c": float(cfg.radiant.cool_supply_max_c),
                         "dew_guard_action": "disable_radiant",
                     })
                 else:
-                    s.rad_supply_target_c = float(clamp(safe_required, cfg.cool_rad_supply_min_c, cfg.cool_rad_supply_max_c))
+                    s.rad_supply_target_c = float(
+                        clamp(
+                            safe_required,
+                            cfg.radiant.cool_supply_min_c,
+                            cfg.radiant.cool_supply_max_c,
+                        )
+                    )
             else:
                 dec.warnings.append("missing_dp_max_for_dew_guard")
 
@@ -565,18 +568,18 @@ class PlantDecisionPlanner:
             return
 
         if demand.operative_season == "winter":
-            mode = cfg.vmc_mode_winter
+            mode = cfg.vmc.mode_winter
         elif demand.operative_season == "summer":
-            mode = cfg.vmc_mode_summer
+            mode = cfg.vmc.mode_summer
         else:
-            mode = getattr(snapshot.vmc, "processing_mode", None) or cfg.vmc_mode_winter
+            mode = getattr(snapshot.vmc, "processing_mode", None) or cfg.vmc.mode_winter
 
         t_ref_c = self._get_indoor_reference_temp_c(snapshot)
         profile = HVACOperatingProfile.from_value(demand.user_profile, default=HVACOperatingProfile.COMFORT) or HVACOperatingProfile.COMFORT
         rh_target_pct = float(self._resolve_vmc_rh_target_pct(demand.operative_season, profile))
 
         dp_sp_c = float(getattr(demand, "vmc_dp_sp_c", None) or self._compute_vmc_dp_setpoint_c_from(t_ref_c, rh_target_pct))
-        ddp_sp_c = float(cfg.vmc_setpoint_ddp_c)
+        ddp_sp_c = float(cfg.vmc.dehum.setpoint_ddp_c)
 
         dp_current = getattr(demand, "dp_dehum_c", None) or demand.dp_max_c
         boost_active = bool(demand.vmc_req_heating or demand.vmc_req_cooling or demand.vmc_req_dehumidif)
@@ -589,19 +592,19 @@ class PlantDecisionPlanner:
         )
 
         if demand.vmc_req_heating:
-            t_sp = float(cfg.vmc_boost_setpoint_heat_c)
+            t_sp = float(cfg.vmc.boost.setpoint_heat_c)
         elif demand.vmc_req_cooling:
-            t_sp = float(cfg.vmc_boost_setpoint_cool_c)
+            t_sp = float(cfg.vmc.boost.setpoint_cool_c)
         else:
-            dead = float(cfg.vmc_temp_neutral_deadband_c)
-            if mode == cfg.vmc_mode_winter:
+            dead = float(cfg.vmc.temp_neutral_deadband_c)
+            if mode == cfg.vmc.mode_winter:
                 t_sp = t_ref_c - dead
-            elif mode == cfg.vmc_mode_summer:
+            elif mode == cfg.vmc.mode_summer:
                 t_sp = t_ref_c + dead
             else:
                 t_sp = t_ref_c
 
-        t_sp = clamp(float(t_sp), float(cfg.vmc_temp_min_c), float(cfg.vmc_temp_max_c))
+        t_sp = clamp(float(t_sp), float(cfg.vmc.temp_min_c), float(cfg.vmc.temp_max_c))
 
         v.power = True
         v.mode = mode
@@ -615,7 +618,7 @@ class PlantDecisionPlanner:
         if snapshot.vmc:
             vmc = snapshot.vmc
             v.debug.update({
-                "recirculation": cfg.vmc_recirculation,
+                "recirculation": cfg.vmc.recirculation,
                 "device_power": getattr(vmc, "power_on", None),
                 "req_water": getattr(vmc, "request_water", None),
                 "req_heating": getattr(vmc, "request_heating", None),
@@ -637,7 +640,7 @@ class PlantDecisionPlanner:
                 v = as_float(getattr(av, "value", None))
                 if v is not None:
                     return float(v)
-        return float(self.cfg.vmc_setpoint_t_c)
+        return float(self.cfg.vmc.setpoint_t_c)
 
     def _compute_vmc_dp_setpoint_c(self, snapshot: PlantSnapshot) -> float:
         t_ref = self._get_indoor_reference_temp_c(snapshot)
@@ -647,14 +650,14 @@ class PlantDecisionPlanner:
         return self._compute_vmc_dp_setpoint_c_from(t_ref, rh_target_pct)
 
     def _compute_vmc_dp_setpoint_c_from(self, t_c: float, rh_pct: float) -> float:
-        if bool(getattr(self.cfg, "vmc_dp_setpoint_from_psychrometrics", True)):
+        if bool(getattr(self.cfg.vmc.dehum, "dp_setpoint_from_psychrometrics", True)):
             try:
                 dp = float(dew_point_celsius(t_c, rh_pct))
             except Exception:
-                dp = float(self.cfg.vmc_setpoint_dp_c)
+                dp = float(self.cfg.vmc.dehum.setpoint_dp_c)
         else:
-            dp = float(self.cfg.vmc_setpoint_dp_c)
-        return clamp(dp, float(self.cfg.vmc_dp_sp_min_c), float(self.cfg.vmc_dp_sp_max_c))
+            dp = float(self.cfg.vmc.dehum.setpoint_dp_c)
+        return clamp(dp, float(self.cfg.vmc.dehum.dp_sp_min_c), float(self.cfg.vmc.dehum.dp_sp_max_c))
 
     def _vmc_need_dehumidification(
         self,
@@ -687,15 +690,7 @@ class PlantDecisionPlanner:
 
     def _resolve_vmc_rh_target_pct(self, operative: Optional[str], profile: HVACOperatingProfile) -> float:
         """Resolve RH target considering season + profile (Sleep override)."""
-        cfg = self.cfg
-        rh = float(cfg.vmc_setpoint_rh_pct)
-        if operative == "winter" and getattr(cfg, "vmc_setpoint_rh_winter_pct", None) is not None:
-            rh = float(cfg.vmc_setpoint_rh_winter_pct)
-        elif operative == "summer" and getattr(cfg, "vmc_setpoint_rh_summer_pct", None) is not None:
-            rh = float(cfg.vmc_setpoint_rh_summer_pct)
-        if profile == HVACOperatingProfile.SLEEP and cfg.vmc_setpoint_rh_sleep_pct is not None:
-            rh = float(cfg.vmc_setpoint_rh_sleep_pct)
-        return rh
+        return float(self.cfg.vmc.dehum.rh_target_pct(operative, profile))
 
     def _vmc_allow_heat_boost(
         self,
@@ -704,15 +699,15 @@ class PlantDecisionPlanner:
         heat_def_wmean_c: float,
         heat_cov: float,
     ) -> bool:
-        if not bool(self.cfg.vmc_boost_enabled):
+        if not bool(self.cfg.vmc.boost.enabled):
             return False
         if not bool(snapshot.windows_close_state):
             return False
         if bool(snapshot.presence_vacation):
             return False
-        if heat_def_max_c >= float(self.cfg.vmc_boost_heat_def_max_thr_c):
+        if heat_def_max_c >= float(self.cfg.vmc.boost.heat_def_max_thr_c):
             return True
-        if heat_def_wmean_c >= float(self.cfg.vmc_boost_heat_def_wmean_thr_c) and heat_cov >= 0.6:
+        if heat_def_wmean_c >= float(self.cfg.vmc.boost.heat_def_wmean_thr_c) and heat_cov >= 0.6:
             return True
         return False
 
@@ -723,15 +718,15 @@ class PlantDecisionPlanner:
         cool_sur_wmean_c: float,
         cool_cov: float,
     ) -> bool:
-        if not bool(self.cfg.vmc_boost_enabled):
+        if not bool(self.cfg.vmc.boost.enabled):
             return False
         if not bool(snapshot.windows_close_state):
             return False
         if bool(snapshot.presence_vacation):
             return False
-        if cool_sur_max_c >= float(self.cfg.vmc_boost_cool_sur_max_thr_c):
+        if cool_sur_max_c >= float(self.cfg.vmc.boost.cool_sur_max_thr_c):
             return True
-        if cool_sur_wmean_c >= float(self.cfg.vmc_boost_cool_sur_wmean_thr_c) and cool_cov >= 0.6:
+        if cool_sur_wmean_c >= float(self.cfg.vmc.boost.cool_sur_wmean_thr_c) and cool_cov >= 0.6:
             return True
         return False
 
@@ -743,25 +738,25 @@ class PlantDecisionPlanner:
         boost: bool,
     ) -> int:
         if not bool(snapshot.windows_close_state):
-            sp = int(self.cfg.vmc_speed_windows_open)
+            sp = int(self.cfg.vmc.speed.speed_windows_open)
         elif bool(snapshot.presence_vacation) or bool(snapshot.presence_nobodysin):
-            sp = int(self.cfg.vmc_speed_vacation)
+            sp = int(self.cfg.vmc.speed.speed_vacation)
         else:
-            sp = int(self.cfg.vmc_speed_base)
+            sp = int(self.cfg.vmc.speed.speed_base)
 
         if dp_current_c is not None:
             delta = float(dp_current_c) - float(dp_setpoint_c)
-            if delta > float(self.cfg.vmc_speed_dp_boost_step1_c):
+            if delta > float(self.cfg.vmc.speed.dp_boost_step1_c):
                 sp += 1
-            if delta > float(self.cfg.vmc_speed_dp_boost_step2_c):
+            if delta > float(self.cfg.vmc.speed.dp_boost_step2_c):
                 sp += 1
-            if delta > float(self.cfg.vmc_speed_dp_boost_step3_c):
+            if delta > float(self.cfg.vmc.speed.dp_boost_step3_c):
                 sp += 1
 
         if boost:
-            sp = max(sp, int(self.cfg.vmc_boost_min_air_speed))
+            sp = max(sp, int(self.cfg.vmc.boost.min_air_speed))
 
-        return int(clamp(float(sp), float(self.cfg.vmc_speed_min), float(self.cfg.vmc_speed_max)))
+        return int(clamp(float(sp), float(self.cfg.vmc.speed.speed_min), float(self.cfg.vmc.speed.speed_max)))
 
     # ---- Validation ------------------------------------------------------
     def _validate_decision(self, dec: PlantDecision) -> list[str]:
