@@ -1,65 +1,37 @@
 from __future__ import annotations
 
 from dataclasses import fields as dc_fields, is_dataclass
-from typing import Any, Callable, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional
 
 from ..contracts import MetricBasis, PlantDemandSignals
-from ....domain.enums import HVACOperatingProfile
 from ....domain.models.plant import PlantSnapshot
 from ....helpers.psychrometric import dew_point_celsius
 from ....helpers.utils import as_float
 
-from .clusters import DewPointCluster, VmcCluster, ZoneComfortCluster, ZoneDemandMetrics
+from ..config import PlantPlannerConfig
+from .clusters import DewPointCluster, ZoneComfortCluster, ZoneDemandMetrics
 from .stats import percentile_sorted
 
 
-class PlannerLike(Protocol):
-    cfg: Any
-
-    def _infer_operative_bucket(self, snapshot: PlantSnapshot) -> Any: ...
-
-    def _get_indoor_reference_temp_c(self, snapshot: PlantSnapshot) -> float: ...
-
-    def _resolve_vmc_rh_target_pct(self, operative: Any, profile: HVACOperatingProfile) -> float: ...
-
-    def _compute_vmc_dp_setpoint_c_from(self, t_ref_c: float, rh_target_pct: float) -> float: ...
-
-    def _vmc_need_dehumidification(
-        self,
-        dp_dehum_c: Optional[float],
-        dp_on_thr_c: float,
-        dp_off_thr_c: float,
-    ) -> bool: ...
-
-    def _vmc_allow_heat_boost(
-        self,
-        snapshot: PlantSnapshot,
-        heat_def_max_c: float,
-        heat_def_wmean_c: float,
-        heat_cov: float,
-    ) -> bool: ...
-
-    def _vmc_allow_cool_boost(
-        self,
-        snapshot: PlantSnapshot,
-        cool_sur_max_c: float,
-        cool_sur_wmean_c: float,
-        cool_cov: float,
-    ) -> bool: ...
-
-
 class DemandSignalsBuilder:
-    """Compute PlantDemandSignals via clustered methods (zone comfort / DP / VMC)."""
+    """Compute PlantDemandSignals via clustered methods (zone comfort / DP).
+
+    NOTE
+    ----
+    This builder is intentionally **observation-only**:
+    - It aggregates zone comfort deltas and dew-point signals.
+    - It does NOT compute VMC policy (requests, DP setpoints, hysteresis), which lives
+      in the dedicated VMC domain module.
+    """
 
     def __init__(
         self,
-        planner: PlannerLike,
+        cfg: PlantPlannerConfig,
         *,
         zone_weight_fn: Callable[[Any], float],
         percentile_sorted_fn: Callable[[List[float], float], float] = percentile_sorted,
     ) -> None:
-        self._planner = planner
-        self.cfg = planner.cfg
+        self.cfg = cfg
         self._zone_weight_fn = zone_weight_fn
         self._percentile_sorted_fn = percentile_sorted_fn
 
@@ -67,7 +39,6 @@ class DemandSignalsBuilder:
         zc = self._compute_zone_comfort_cluster(snapshot)
         zm = self._compute_zone_demand_metrics(zc)
         dp = self._compute_dew_point_cluster(snapshot, zc)
-        vmc = self._compute_vmc_cluster(snapshot, zc, zm, dp)
 
         payload: Dict[str, Any] = dict(
             # zone comfort
@@ -88,15 +59,6 @@ class DemandSignalsBuilder:
             dp_max_c=dp.dp_max_c,
             dp_dehum_c=dp.dp_dehum_c,
             outdoor_dp_c=dp.outdoor_dp_c,
-            # vmc
-            vmc_dehum_feasible=vmc.vmc_dehum_feasible,
-            vmc_req_heating=vmc.vmc_req_heating,
-            vmc_req_cooling=vmc.vmc_req_cooling,
-            vmc_req_dehumidif=vmc.vmc_req_dehumidif,
-            vmc_req_water=vmc.vmc_req_water,
-            vmc_dp_sp_c=vmc.vmc_dp_sp_c,
-            vmc_dehum_on_thr_c=vmc.vmc_dehum_on_thr_c,
-            vmc_dehum_off_thr_c=vmc.vmc_dehum_off_thr_c,
         )
 
         return self._safe_signals_init(payload)
@@ -282,73 +244,6 @@ class DemandSignalsBuilder:
             dp_max_c=zc.dp_max_c,
             dp_dehum_c=dp_dehum_c,
             outdoor_dp_c=float(outdoor_dp_c) if outdoor_dp_c is not None else None,
-        )
-
-    def _compute_vmc_cluster(
-        self,
-        snapshot: PlantSnapshot,
-        zc: ZoneComfortCluster,
-        zm: ZoneDemandMetrics,
-        dp: DewPointCluster,
-    ) -> VmcCluster:
-        vmc = getattr(snapshot, "vmc", None)
-        vmc_raw_req_dehum = bool(getattr(vmc, "request_dehumidification", False)) if vmc else False
-
-        # dp_sp coherent with profile/season
-        preset_raw = getattr(snapshot, "climate_preset_mode", None)
-        profile = HVACOperatingProfile.from_value(preset_raw, default=HVACOperatingProfile.COMFORT) or HVACOperatingProfile.COMFORT
-        operative = self._planner._infer_operative_bucket(snapshot)
-
-        t_ref_c = float(self._planner._get_indoor_reference_temp_c(snapshot))
-        rh_target_pct = float(self._planner._resolve_vmc_rh_target_pct(operative, profile))
-        vmc_dp_sp_c = float(self._planner._compute_vmc_dp_setpoint_c_from(t_ref_c, rh_target_pct))
-
-        ddp = float(getattr(self.cfg.vmc.dehum, "setpoint_ddp_c", 0.0))
-        hyst = float(getattr(self.cfg.vmc.dehum, "hysteresis_c", 0.0))
-        vmc_dehum_on_thr_c = float(vmc_dp_sp_c) + ddp
-        vmc_dehum_off_thr_c = float(vmc_dehum_on_thr_c) - max(0.0, hyst)
-
-        # Feasibility
-        vmc_dehum_feasible: Optional[bool] = None
-        if bool(getattr(self.cfg.vmc.dehum, "water_on_for_dehumid", False)):
-            vmc_dehum_feasible = True
-        elif dp.outdoor_dp_c is not None and dp.dp_dehum_c is not None:
-            headroom = float(getattr(self.cfg.vmc.dehum, "outdoor_dp_headroom_c", 0.0))
-            vmc_dehum_feasible = float(dp.outdoor_dp_c) <= (float(dp.dp_dehum_c) - headroom)
-
-        vmc_need_dehum = self._planner._vmc_need_dehumidification(dp.dp_dehum_c, vmc_dehum_on_thr_c, vmc_dehum_off_thr_c)
-
-        vmc_boost_heat = self._planner._vmc_allow_heat_boost(
-            snapshot,
-            float(zc.heat_def_max_c),
-            float(zm.heat_def_wmean_c),
-            float(zm.heat_cov),
-        )
-        vmc_boost_cool = self._planner._vmc_allow_cool_boost(
-            snapshot,
-            float(zc.cool_sur_max_c),
-            float(zm.cool_sur_wmean_c),
-            float(zm.cool_cov),
-        )
-
-        vmc_req_heat = bool(vmc_boost_heat)
-        vmc_req_cool = bool(vmc_boost_cool)
-        vmc_req_dehum = bool(vmc_need_dehum or vmc_raw_req_dehum) and (vmc_dehum_feasible is not False)
-        vmc_req_water = (
-            vmc_req_heat
-            or vmc_req_cool
-            or (vmc_req_dehum and bool(getattr(self.cfg.vmc.dehum, "water_on_for_dehumid", False)))
-        )
-
-        return VmcCluster(
-            vmc_dp_sp_c=float(vmc_dp_sp_c) if vmc_dp_sp_c is not None else None,
-            vmc_dehum_on_thr_c=float(vmc_dehum_on_thr_c) if vmc_dehum_on_thr_c is not None else None,
-            vmc_dehum_off_thr_c=float(vmc_dehum_off_thr_c) if vmc_dehum_off_thr_c is not None else None,
-            vmc_dehum_feasible=vmc_dehum_feasible,
-            vmc_req_heating=bool(vmc_req_heat),
-            vmc_req_cooling=bool(vmc_req_cool),
-            vmc_req_dehumidif=bool(vmc_req_dehum),
-            vmc_req_water=bool(vmc_req_water),
         )
 
     # -----------------

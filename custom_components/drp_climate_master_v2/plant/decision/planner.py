@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 import logging
 
 from homeassistant.util import dt as dt_util
@@ -12,15 +12,15 @@ from homeassistant.components.climate.const import HVACMode
 from ...helpers.logger import log_debug
 
 from ...helpers.utils import as_float, clamp
-from ...helpers.psychrometric import dew_point_celsius
 from ...domain.models.plant import PlantSnapshot
 from ...domain.enums import HVACOperatingProfile
 
 from .zone.contracts import ZonesDecision
 
 from .config import PlantPlannerConfig
-from .contracts import MetricBasis, PlantDecision, PlantDemandSignals, PlantMode
+from .contracts import PlantDecision, PlantDemandSignals, PlantMode
 from .signals.builder import DemandSignalsBuilder
+from .vmc.policy import VmcPolicy, VmcState
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -106,18 +106,19 @@ class PlantDecisionPlanner:
 
     cfg: PlantPlannerConfig = field(default_factory=PlantPlannerConfig)
     _signals: DemandSignalsBuilder = field(init=False, repr=False)
+    _vmc_policy: VmcPolicy = field(init=False, repr=False)
+    _vmc_state: VmcState = field(default_factory=VmcState, init=False, repr=False)
 
     # --- minimal state for setpoint rate limiting (anti-hunting)
     _last_heat_wot_c: Optional[float] = field(default=None, init=False, repr=False)
     _last_heat_wot_ts: Optional[datetime] = field(default=None, init=False, repr=False)
-    _last_vmc_dehum_on: Optional[bool] = field(default=None, init=False, repr=False)
+    # VMC hysteresis state lives in _vmc_state (domain-owned)
 
     def __post_init__(self) -> None:
-        # Builder expects a Planner-like instance + zone weight function
-        self._signals = DemandSignalsBuilder(
-            self,
-            zone_weight_fn=_zone_weight,
-        )
+        # Observation builder (zone comfort + dew point)
+        self._signals = DemandSignalsBuilder(self.cfg, zone_weight_fn=_zone_weight)
+        # VMC domain policy (requests + DP hysteresis)
+        self._vmc_policy = VmcPolicy(self.cfg.vmc, state=self._vmc_state)
 
     def plan(
         self,
@@ -140,6 +141,8 @@ class PlantDecisionPlanner:
 
         # --- Extract indoor demand signals
         demand = self._signals.build(snapshot=snapshot)
+        # --- VMC domain: compute requests & DP setpoints (hysteresis-aware)
+        self._enrich_vmc_signals(snapshot, demand)
 
         # --- Determine regime
         mode = self._infer_mode(snapshot, demand, zones_decision)
@@ -312,7 +315,7 @@ class PlantDecisionPlanner:
         # --------------------
         if bool(snapshot.presence_vacation) and bool(cfg.vacation.allows_vmc_off):
             dp_cur = as_float(demand.dp_max_c)
-            dp_sp = float(demand.vmc_dp_sp_c) if getattr(demand, "vmc_dp_sp_c", None) is not None else float(self._compute_vmc_dp_setpoint_c(snapshot))
+            dp_sp = float(demand.vmc_dp_sp_c) if getattr(demand, "vmc_dp_sp_c", None) is not None else float(self.cfg.vmc.dehum.setpoint_dp_c)
             ddp_vac = float(cfg.vacation.ddp_on_c)
             dew_risk = (dp_cur is not None) and (float(dp_cur) > (dp_sp + ddp_vac))
 
@@ -364,6 +367,42 @@ class PlantDecisionPlanner:
 
         # Idle shoulder
         return PlantMode.OFF
+
+    # ---- VMC integration -------------------------------------------------
+
+    def _enrich_vmc_signals(self, snapshot: PlantSnapshot, demand: PlantDemandSignals) -> None:
+        """Fill VMC-related signals using the VMC domain policy.
+
+        This keeps `signals/builder.py` observation-only.
+        """
+        profile = HVACOperatingProfile.from_value(
+            getattr(snapshot, "climate_preset_mode", None),
+            default=HVACOperatingProfile.COMFORT,
+        ) or HVACOperatingProfile.COMFORT
+
+        vmc_dem = self._vmc_policy.compute(
+            snapshot=snapshot,
+            profile=profile,
+            heat_def_max_c=float(demand.heat_def_max_c),
+            heat_def_wmean_c=float(demand.heat_def_wmean_c),
+            heat_cov=float(demand.heat_cov),
+            cool_sur_max_c=float(demand.cool_sur_max_c),
+            cool_sur_wmean_c=float(demand.cool_sur_wmean_c),
+            cool_cov=float(demand.cool_cov),
+            dp_dehum_c=getattr(demand, "dp_dehum_c", None),
+            dp_max_c=getattr(demand, "dp_max_c", None),
+            outdoor_dp_c=getattr(demand, "outdoor_dp_c", None),
+        )
+
+        # PlantDemandSignals stores VMC policy outputs flat for logging/backward-compat.
+        demand.vmc_dp_sp_c = vmc_dem.dp_sp_c
+        demand.vmc_dehum_on_thr_c = vmc_dem.dehum_on_thr_c
+        demand.vmc_dehum_off_thr_c = vmc_dem.dehum_off_thr_c
+        demand.vmc_dehum_feasible = vmc_dem.dehum_feasible
+        demand.vmc_req_heating = vmc_dem.req_heating
+        demand.vmc_req_cooling = vmc_dem.req_cooling
+        demand.vmc_req_dehumidif = vmc_dem.req_dehumidif
+        demand.vmc_req_water = vmc_dem.req_water
 
     def _fill_pdc_commands(
         self,
@@ -574,11 +613,11 @@ class PlantDecisionPlanner:
         else:
             mode = getattr(snapshot.vmc, "processing_mode", None) or cfg.vmc.mode_winter
 
-        t_ref_c = self._get_indoor_reference_temp_c(snapshot)
+        t_ref_c = float(self._vmc_policy.get_indoor_reference_temp_c(snapshot))
         profile = HVACOperatingProfile.from_value(demand.user_profile, default=HVACOperatingProfile.COMFORT) or HVACOperatingProfile.COMFORT
-        rh_target_pct = float(self._resolve_vmc_rh_target_pct(demand.operative_season, profile))
+        rh_target_pct = float(self._vmc_policy.rh_target_pct(demand.operative_season, profile))
 
-        dp_sp_c = float(getattr(demand, "vmc_dp_sp_c", None) or self._compute_vmc_dp_setpoint_c_from(t_ref_c, rh_target_pct))
+        dp_sp_c = float(getattr(demand, "vmc_dp_sp_c", None) or self._vmc_policy.compute_dp_setpoint_c_from(t_ref_c, rh_target_pct))
         ddp_sp_c = float(cfg.vmc.dehum.setpoint_ddp_c)
 
         dp_current = getattr(demand, "dp_dehum_c", None) or demand.dp_max_c
@@ -633,103 +672,8 @@ class PlantDecisionPlanner:
             })
 
     # ---- VMC helpers -----------------------------------------------------
-    def _get_indoor_reference_temp_c(self, snapshot: PlantSnapshot) -> float:
-        z = snapshot.global_indoor_zone
-        if z is not None:
-            for av in (getattr(z, "t_op", None), getattr(z, "temperature", None)):
-                v = as_float(getattr(av, "value", None))
-                if v is not None:
-                    return float(v)
-        return float(self.cfg.vmc.setpoint_t_c)
-
-    def _compute_vmc_dp_setpoint_c(self, snapshot: PlantSnapshot) -> float:
-        t_ref = self._get_indoor_reference_temp_c(snapshot)
-        operative = self._infer_operative_bucket(snapshot)
-        profile = HVACOperatingProfile.from_value(getattr(snapshot, "climate_preset_mode", None), default=HVACOperatingProfile.COMFORT) or HVACOperatingProfile.COMFORT
-        rh_target_pct = float(self._resolve_vmc_rh_target_pct(operative, profile))
-        return self._compute_vmc_dp_setpoint_c_from(t_ref, rh_target_pct)
-
-    def _compute_vmc_dp_setpoint_c_from(self, t_c: float, rh_pct: float) -> float:
-        if bool(getattr(self.cfg.vmc.dehum, "dp_setpoint_from_psychrometrics", True)):
-            try:
-                dp = float(dew_point_celsius(t_c, rh_pct))
-            except Exception:
-                dp = float(self.cfg.vmc.dehum.setpoint_dp_c)
-        else:
-            dp = float(self.cfg.vmc.dehum.setpoint_dp_c)
-        return clamp(dp, float(self.cfg.vmc.dehum.dp_sp_min_c), float(self.cfg.vmc.dehum.dp_sp_max_c))
-
-    def _vmc_need_dehumidification(
-        self,
-        dp_current_c: float | None,
-        on_thr_c: float,
-        off_thr_c: float,
-    ) -> bool:
-        """Deumidifica con isteresi (anti-flapping) e memoria minimale."""
-        if dp_current_c is None:
-            self._last_vmc_dehum_on = False
-            return False
-        cur = float(dp_current_c)
-        prev = self._last_vmc_dehum_on
-        if prev is True:
-            keep = cur > float(off_thr_c)
-            self._last_vmc_dehum_on = bool(keep)
-            return bool(keep)
-        turn_on = cur > float(on_thr_c)
-        self._last_vmc_dehum_on = bool(turn_on)
-        return bool(turn_on)
-
-    def _infer_operative_bucket(self, snapshot: PlantSnapshot) -> str:
-        season = getattr(getattr(snapshot, "season", None), "season", None)
-        season_val = getattr(season, "value", None)
-        if season_val == "winter":
-            return "winter"
-        if season_val == "summer":
-            return "summer"
-        return "shoulder"
-
-    def _resolve_vmc_rh_target_pct(self, operative: Optional[str], profile: HVACOperatingProfile) -> float:
-        """Resolve RH target considering season + profile (Sleep override)."""
-        return float(self.cfg.vmc.dehum.rh_target_pct(operative, profile))
-
-    def _vmc_allow_heat_boost(
-        self,
-        snapshot: PlantSnapshot,
-        heat_def_max_c: float,
-        heat_def_wmean_c: float,
-        heat_cov: float,
-    ) -> bool:
-        if not bool(self.cfg.vmc.boost.enabled):
-            return False
-        if not bool(snapshot.windows_close_state):
-            return False
-        if bool(snapshot.presence_vacation):
-            return False
-        if heat_def_max_c >= float(self.cfg.vmc.boost.heat_def_max_thr_c):
-            return True
-        if heat_def_wmean_c >= float(self.cfg.vmc.boost.heat_def_wmean_thr_c) and heat_cov >= 0.6:
-            return True
-        return False
-
-    def _vmc_allow_cool_boost(
-        self,
-        snapshot: PlantSnapshot,
-        cool_sur_max_c: float,
-        cool_sur_wmean_c: float,
-        cool_cov: float,
-    ) -> bool:
-        if not bool(self.cfg.vmc.boost.enabled):
-            return False
-        if not bool(snapshot.windows_close_state):
-            return False
-        if bool(snapshot.presence_vacation):
-            return False
-        if cool_sur_max_c >= float(self.cfg.vmc.boost.cool_sur_max_thr_c):
-            return True
-        if cool_sur_wmean_c >= float(self.cfg.vmc.boost.cool_sur_wmean_thr_c) and cool_cov >= 0.6:
-            return True
-        return False
-
+    # Kept here for now (speed policy is mostly device/actuation oriented). Consider
+    # moving into a dedicated VMC controller module when the VMC domain is expanded.
     def _compute_vmc_air_speed(
         self,
         snapshot: PlantSnapshot,

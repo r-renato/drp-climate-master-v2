@@ -53,16 +53,3 @@ class DewPointCluster:
     dp_max_c: Optional[float]
     dp_dehum_c: Optional[float]
     outdoor_dp_c: Optional[float]
-
-
-@dataclass(slots=True)
-class VmcCluster:
-    vmc_dp_sp_c: Optional[float]
-    vmc_dehum_on_thr_c: Optional[float]
-    vmc_dehum_off_thr_c: Optional[float]
-    vmc_dehum_feasible: Optional[bool]
-
-    vmc_req_heating: bool
-    vmc_req_cooling: bool
-    vmc_req_dehumidif: bool
-    vmc_req_water: bool
