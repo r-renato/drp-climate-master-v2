@@ -108,7 +108,7 @@ class PlantDemandSignals:
     - **Clustered signals**: fields are logically grouped (zone comfort, dew-point,
       VMC, user intent, MPC) even if stored flat for logging and backward compatibility.
     - **Deterministic semantics**: each field has a clear unit, range and meaning.
-    - **Observability-first**: most “extra” fields exist to make `_infer_mode()`
+    - **Observability-first**: most “extra” fields exist to make `ModeResolver.decide()`
       explainable in logs and to speed up commissioning/tuning.
 
     Cluster A - Zone comfort (sensible demand)
@@ -137,7 +137,7 @@ class PlantDemandSignals:
     - vmc_dehum_feasible : whether dehumidification can work (coil vs ventilation-only constraints)
     - vmc_req_* : what VMC is asking from hydronics/plant (heat/cool/dehum/water)
 
-    Cluster D - User intent & decision diagnostics (filled by `_infer_mode()`)
+    Cluster D - User intent & decision diagnostics (filled by `ModeResolver.decide()`)
     -------------------------------------------------------------------------
     - user_hvac_mode / user_profile / user_forced_off : HA intent mapping
     - ctrl_aggr, *_on_thr_c, quorum_cov_req : thresholds after profile scaling
@@ -394,7 +394,7 @@ class PlantDemandSignals:
             "doc": "True if MPC heating is accepted as 'preheat' (only when close to the lower bound).",
             "unit": "bool",
             "values": ["True", "False", "None(not evaluated)"],
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
 
@@ -404,7 +404,7 @@ class PlantDemandSignals:
         metadata={
             "doc": "User HVAC mode as seen by the HA Climate entity (normalized string, e.g. 'off'/'auto').",
             "unit": "-",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     user_profile: str = field(
@@ -412,7 +412,7 @@ class PlantDemandSignals:
         metadata={
             "doc": "User preset/profile (HVACOperatingProfile.value), stored as a string for logs.",
             "unit": "-",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     user_forced_off: bool = field(
@@ -420,7 +420,7 @@ class PlantDemandSignals:
         metadata={
             "doc": "True when the user explicitly forces HVAC OFF (absolute override).",
             "unit": "bool",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     ctrl_aggr: float = field(
@@ -429,7 +429,7 @@ class PlantDemandSignals:
             "doc": "Control aggressiveness factor derived from profile (BOOST > 1, AWAY/VACATION < 1).",
             "unit": "1",
             "range": "(0..+inf)",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     heat_on_thr_c: float = field(
@@ -438,7 +438,7 @@ class PlantDemandSignals:
             "doc": "Effective heating ON threshold after profile scaling.",
             "unit": "°C",
             "range": "[0..+inf)",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     cool_on_thr_c: float = field(
@@ -447,7 +447,7 @@ class PlantDemandSignals:
             "doc": "Effective cooling ON threshold after profile scaling.",
             "unit": "°C",
             "range": "[0..+inf)",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     quorum_cov_req: float = field(
@@ -456,7 +456,7 @@ class PlantDemandSignals:
             "doc": "Required coverage (0..1) for energy-saving profiles (ECO/SLEEP/AWAY/VACATION).",
             "unit": "1",
             "range": "[0..1]",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     heat_override: Optional[bool] = field(
@@ -465,7 +465,7 @@ class PlantDemandSignals:
             "doc": "Heating override triggered by large worst-case deficit (bypasses quorum).",
             "unit": "bool",
             "values": ["True", "False", "None(not applicable)"],
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     heat_quorum_ok: Optional[bool] = field(
@@ -474,7 +474,7 @@ class PlantDemandSignals:
             "doc": "Heating quorum check: heat_cov >= quorum_cov_req (energy-saving profiles).",
             "unit": "bool",
             "values": ["True", "False", "None(not applicable)"],
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     heat_mean_ok: Optional[bool] = field(
@@ -483,7 +483,7 @@ class PlantDemandSignals:
             "doc": "Heating mean check: heat_def_wmean >= heat_on_thr * mean_factor (energy-saving profiles).",
             "unit": "bool",
             "values": ["True", "False", "None(not applicable)"],
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     cool_override: Optional[bool] = field(
@@ -492,7 +492,7 @@ class PlantDemandSignals:
             "doc": "Cooling override triggered by large worst-case surplus (bypasses quorum).",
             "unit": "bool",
             "values": ["True", "False", "None(not applicable)"],
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     cool_quorum_ok: Optional[bool] = field(
@@ -501,7 +501,7 @@ class PlantDemandSignals:
             "doc": "Cooling quorum check: cool_cov >= quorum_cov_req (energy-saving profiles).",
             "unit": "bool",
             "values": ["True", "False", "None(not applicable)"],
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     cool_mean_ok: Optional[bool] = field(
@@ -510,7 +510,7 @@ class PlantDemandSignals:
             "doc": "Cooling mean check: cool_sur_wmean >= cool_on_thr * mean_factor (energy-saving profiles).",
             "unit": "bool",
             "values": ["True", "False", "None(not applicable)"],
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     any_heat: bool = field(
@@ -518,7 +518,7 @@ class PlantDemandSignals:
         metadata={
             "doc": "Final aggregated flag: any heating reason exists (sensible, VMC, or MPC-preheat).",
             "unit": "bool",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     any_cool: bool = field(
@@ -526,7 +526,7 @@ class PlantDemandSignals:
         metadata={
             "doc": "Final aggregated flag: any cooling reason exists (sensible or VMC).",
             "unit": "bool",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     any_dehum: bool = field(
@@ -534,7 +534,7 @@ class PlantDemandSignals:
         metadata={
             "doc": "Final aggregated flag: any dehumidification reason exists (latent control).",
             "unit": "bool",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     heat_sensible: bool = field(
@@ -542,7 +542,7 @@ class PlantDemandSignals:
         metadata={
             "doc": "True if sensible heating demand is considered significant under current profile.",
             "unit": "bool",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     cool_sensible: bool = field(
@@ -550,7 +550,7 @@ class PlantDemandSignals:
         metadata={
             "doc": "True if sensible cooling demand is considered significant under current profile.",
             "unit": "bool",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     runtime_season: str = field(
@@ -558,7 +558,7 @@ class PlantDemandSignals:
         metadata={
             "doc": "Runtime season raw value coming from snapshot (e.g. 'winter', 'summer', ...).",
             "unit": "-",
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
     operative_season: str = field(
@@ -567,7 +567,7 @@ class PlantDemandSignals:
             "doc": "Operative bucket derived from runtime season (winter/summer/shoulder) used for gating.",
             "unit": "-",
             "values": ["winter", "summer", "shoulder", "--"],
-            "source": "PlantDecisionPlanner._infer_mode",
+            "source": "ModeResolver.decide",
         },
     )
 
