@@ -88,6 +88,11 @@ class ModeResolver:
         demand.zones_full_on_pct = g.zones_full_on_pct
         demand.zones_mpc_heat_preheat_ok = g.zones_preheat_ok
 
+        # Extra MPC-lite KPIs (for observability and plant-side tuning)
+        demand.zones_duty_avg_pct = g.zones_duty_avg_pct
+        demand.zones_on_now_pct = g.zones_on_now_pct
+        demand.zones_first_on_step = g.zones_first_on_step
+
         demand.any_heat = g.any_heat
         demand.any_cool = g.any_cool
         demand.any_dehum = g.vmc_req_dehum

@@ -30,10 +30,6 @@ class GatingResult:
     heat_sensible: bool
     cool_sensible: bool
 
-    zones_any_heat: bool
-    zones_full_on_pct: Optional[float]
-    zones_preheat_ok: bool
-
     vmc_req_heat: bool
     vmc_req_cool: bool
     vmc_req_dehum: bool
@@ -41,7 +37,14 @@ class GatingResult:
     any_heat: bool
     any_cool: bool
     any_cool_or_dehum: bool
+    zones_any_heat: bool
+    zones_full_on_pct: Optional[float]
+    zones_preheat_ok: bool
 
+    # MPC-lite KPIs (copied from ZonesDecision.meta when available)
+    zones_duty_avg_pct: Optional[float] = None
+    zones_on_now_pct: Optional[float] = None
+    zones_first_on_step: Optional[int] = None
 
 def compute_gating(
     *,
@@ -104,6 +107,11 @@ def compute_gating(
     zones_any_heat = bool(zones_decision.any_heat_demand) if zones_decision else False
     zones_full_on_pct = zones_decision.meta.get("mpc_full_on_pct") if zones_decision else None
 
+    # Extra MPC KPIs: duty + on-now + first ON
+    zones_duty_avg_pct = zones_decision.meta.get("mpc_duty_avg_pct") if zones_decision else None
+    zones_on_now_pct = zones_decision.meta.get("mpc_on_now_pct") if zones_decision else None
+    zones_first_on_step = zones_decision.meta.get("mpc_first_on_step") if zones_decision else None
+
     zones_preheat_ok = False
     if zones_any_heat and getattr(demand, "heat_headroom_min_c", None) is not None:
         zones_preheat_ok = demand.heat_headroom_min_c <= float(getattr(cfg.zones_mpc, "preheat_headroom_c", 0.4))
@@ -131,6 +139,9 @@ def compute_gating(
         zones_any_heat=zones_any_heat,
         zones_full_on_pct=float(zones_full_on_pct) if zones_full_on_pct is not None else None,
         zones_preheat_ok=bool(zones_preheat_ok),
+        zones_duty_avg_pct=float(zones_duty_avg_pct) if zones_duty_avg_pct is not None else None,
+        zones_on_now_pct=float(zones_on_now_pct) if zones_on_now_pct is not None else None,
+        zones_first_on_step=int(zones_first_on_step) if zones_first_on_step is not None else None,
         vmc_req_heat=vmc_req_heat,
         vmc_req_cool=vmc_req_cool,
         vmc_req_dehum=vmc_req_dehum,

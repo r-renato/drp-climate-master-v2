@@ -67,6 +67,25 @@ class ZoneDecisionPlanner:
         full_off = sum(1 for cmd in plan.zones.values() if (cmd.seq and int(sum(cmd.seq)) == 0))
         full_on_pct = 100.0 * full_on / max(1, n)
         full_off_pct = 100.0 * full_off / max(1, n)
+
+        # --- Extra MPC KPIs (used by plant-level planners)
+        # mpc_duty_avg_pct : mean duty across *all* zone-time slots in horizon (0..100)
+        # mpc_on_now_pct   : fraction of zones ON at step 0 (now) (0..100)
+        # mpc_first_on_step: earliest horizon step where any zone is scheduled ON (0..h-1)
+        h = max(1, int(plan.horizon_steps))
+        on_now = sum(1 for cmd in plan.zones.values() if (cmd.seq and len(cmd.seq) > 0 and int(cmd.seq[0]) == 1))
+        total_on = sum(sum(int(x) for x in (cmd.seq or [])) for cmd in plan.zones.values())
+
+        first_on_step: int | None = None
+        for i in range(h):
+            if any((cmd.seq and len(cmd.seq) > i and int(cmd.seq[i]) == 1) for cmd in plan.zones.values()):
+                first_on_step = i
+                break
+
+        plan.meta["mpc_duty_avg_pct"] = round(100.0 * float(total_on) / float(max(1, n) * h), 1)
+        plan.meta["mpc_on_now_pct"] = round(100.0 * float(on_now) / float(max(1, n)), 1)
+        plan.meta["mpc_first_on_step"] = first_on_step
+
         plan.meta["mpc_full_on_pct"] = round(full_on_pct, 1)
         plan.meta["mpc_full_off_pct"] = round(full_off_pct, 1)
 

@@ -11,6 +11,36 @@ from ..contracts import PlantDecision, PlantDemandSignals, PlantMode
 from ..zone.contracts import ZonesDecision
 
 
+def _mix_valve_target_pct(
+    *,
+    t_target_c: float | None,
+    t_primary_c: float | None,
+    t_return_c: float | None,
+    eps_c: float = 0.10,
+) -> float | None:
+    """Compute mixing valve target percentage (0..100) for a desired mixed supply.
+
+    Decision-level approximation using a linear mixing law::
+
+        T_mix = x*T_primary + (1-x)*T_return
+
+    Returned value is x*100, i.e. the fraction of primary/PDC water admitted.
+    Works for both heating and cooling (denominator sign changes).
+    """
+    if t_target_c is None or t_primary_c is None or t_return_c is None:
+        return None
+
+    denom = t_primary_c - t_return_c
+    if abs(denom) < eps_c:
+        # Primary and return are essentially identical -> valve position is irrelevant.
+        # Default to 100% (no mixing) as a safe monotonic choice.
+        return 100.0
+
+    x = (t_target_c - t_return_c) / denom
+    x = clamp(x, 0.0, 1.0)
+    return round(x * 100.0, 1)
+
+
 @dataclass(slots=True)
 class SupplyCommandBuilder:
     """Build commands for pumps/supply unit based on PlantMode and zone plan."""
@@ -88,13 +118,33 @@ class SupplyCommandBuilder:
         # Snapshot values for diagnostics
         if snapshot.supply_unit:
             su = snapshot.supply_unit
+            t_adj_supply = as_float(getattr(su, "sensor_adjustable_temp_system_supply", None))
+            t_adj_return = as_float(getattr(su, "sensor_adjustable_temp_system_return", None))
+            t_dir_supply = as_float(getattr(su, "sensor_direct_temp_system_supply", None))
+            t_dir_return = as_float(getattr(su, "sensor_direct_temp_system_return", None))
+            t_boiler_supply = as_float(getattr(su, "sensor_boiler_temp_system_supply", None))
+            t_boiler_return = as_float(getattr(su, "sensor_boiler_temp_system_return", None))
+
+            # Decision-level mixing valve target: percentage of primary water admitted (0..100).
+            s.mix_valve_pct = _mix_valve_target_pct(
+                t_target_c=s.rad_supply_target_c,
+                t_primary_c=t_boiler_supply,
+                t_return_c=t_adj_return,
+            )
+
             s.debug.update(
                 {
-                    "adj_supply_flow_c": as_float(getattr(su, "sensor_adjustable_temp_system_supply", None)),
-                    "adj_return_flow_c": as_float(getattr(su, "sensor_adjustable_temp_system_return", None)),
-                    "direct_supply_flow_c": as_float(getattr(su, "sensor_direct_temp_system_supply", None)),
-                    "direct_return_flow_c": as_float(getattr(su, "sensor_direct_temp_system_return", None)),
-                    "boiler_supply_flow_c": as_float(getattr(su, "sensor_boiler_temp_system_supply", None)),
-                    "boiler_return_flow_c": as_float(getattr(su, "sensor_boiler_temp_system_return", None)),
+                    "adj_supply_flow_c": t_adj_supply,
+                    "adj_return_flow_c": t_adj_return,
+                    "direct_supply_flow_c": t_dir_supply,
+                    "direct_return_flow_c": t_dir_return,
+                    "boiler_supply_flow_c": t_boiler_supply,
+                    "boiler_return_flow_c": t_boiler_return,
+                    "mix_valve_calc": {
+                        "t_target_c": s.rad_supply_target_c,
+                        "t_primary_c": t_boiler_supply,
+                        "t_return_c": t_adj_return,
+                        "mix_valve_pct": s.mix_valve_pct,
+                    },
                 }
             )

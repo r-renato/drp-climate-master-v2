@@ -388,6 +388,33 @@ class PlantDemandSignals:
             "source": "ZonesDecision.meta",
         },
     )
+    zones_duty_avg_pct: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": "Mean duty across all zones and horizon steps (0..100), if MPC plan is available.",
+            "unit": "%",
+            "range": "[0..100]",
+            "source": "ZonesDecision.meta",
+        },
+    )
+    zones_on_now_pct: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": "Percentage of zones ON at the first MPC step (now) (0..100), if available.",
+            "unit": "%",
+            "range": "[0..100]",
+            "source": "ZonesDecision.meta",
+        },
+    )
+    zones_first_on_step: Optional[int] = field(
+        default=None,
+        metadata={
+            "doc": "Earliest MPC horizon step where any zone is scheduled ON (0..h-1), if available.",
+            "unit": "step",
+            "range": "[0..h-1]",
+            "source": "ZonesDecision.meta",
+        },
+    )
     zones_mpc_heat_preheat_ok: Optional[bool] = field(
         default=None,
         metadata={
@@ -593,6 +620,14 @@ class PlantDemandSignals:
         def fbool(b, on="True", off="False"):
             return on if b is True else (off if b is False else "-")
 
+        def fint(x) -> str:
+            if x is None:
+                return "-"
+            try:
+                return str(int(x))
+            except (TypeError, ValueError):
+                return str(x)
+
         def fstr(s):
             return s if s else "-"
 
@@ -722,6 +757,9 @@ class PlantDemandSignals:
         lines += ["MPC hints"]
         emit(lines, "Zones MPC heat", "zones_any_heat_demand", fbool(self.zones_any_heat_demand, "True", "False"))
         emit(lines, "Zones MPC full-on", "zones_full_on_pct", f"{fnum(self.zones_full_on_pct, 1)} %")
+        emit(lines, "Zones MPC duty avg", "zones_duty_avg_pct", f"{fnum(self.zones_duty_avg_pct, 1)} %")
+        emit(lines, "Zones MPC on-now", "zones_on_now_pct", f"{fnum(self.zones_on_now_pct, 1)} %")
+        emit(lines, "Zones MPC first ON", "zones_first_on_step", fint(self.zones_first_on_step))
         emit(lines, "Zones MPC preheat", "zones_mpc_heat_preheat_ok", fbool(self.zones_mpc_heat_preheat_ok, "True", "False"))
 
         # -------------------------
