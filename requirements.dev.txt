@@ -7,7 +7,7 @@ influxdb-client==1.24.0
 holidays
 #
 pylint
-# pyright
+pyright
 # business-time
 # flake8
 # pylint

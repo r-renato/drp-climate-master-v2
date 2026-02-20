@@ -8,7 +8,6 @@ from homeassistant.components.climate.const import HVACMode
 from homeassistant.core import HomeAssistant, State
 
 from ...domain.enums import HVACOperatingProfile
-from ..confort.confort_band import ComfortBandResult
 from ..sensor_aggregator import AggregatedValue, SensorAggregator
 
 from ..logger import log_debug, log_exception, log_warning
@@ -26,8 +25,6 @@ from ...domain.models.runtime_schema import (
     AreaConfig,
     RadiantConfig,
     RuntimeConfig,
-    SensorPair,
-    SupplyUnitSensors,
     SupplyUnitsConfig,
     VMCConfig,
 )
@@ -36,12 +33,11 @@ from ..utils import as_bool, as_float, as_int, make_class, slugify
 
 _LOGGER = logging.getLogger(__name__)
 
-async def async_take_plant_snapshot(
+async def async_build_plant_states_snapshot(
     hass: HomeAssistant,
     runtime_config: RuntimeConfig,
     season: SeasonState,
     sensor_aggr: SensorAggregator,
-    confort_bands: dict[str, ComfortBandResult],
     entities_state: dict,
     climate_hvac_mode: HVACMode,
     climate_preset_mode: HVACOperatingProfile,
@@ -53,7 +49,6 @@ async def async_take_plant_snapshot(
             runtime_config: RuntimeConfig, 
             ts: datetime,
             sensor_aggr: SensorAggregator,
-            confort_bands: dict[str, ComfortBandResult],
     ) -> dict[str, ZoneSnapshot] | None:
         zone_snapshots: dict[str, ZoneSnapshot] = {}
 
@@ -75,7 +70,6 @@ async def async_take_plant_snapshot(
                     radiant_valve_open: AggregatedValue = sensor_aggr.get(name=f"{name}.radiant_valve_open")
                     t_op: AggregatedValue = sensor_aggr.get(name=f"{name}.t_op")
 
-                    confort_band: ComfortBandResult | None = confort_bands.get(name)
                 else:
                     continue
 
@@ -91,7 +85,6 @@ async def async_take_plant_snapshot(
                                     mrt=mrt,
                                     condensation_margin=condensation_margin,
                                     radiant_valve=radiant_valve_open,
-                                    confort_band=confort_band,
                 )
 
                 zone_snapshots[name] = zone_snapshot
@@ -346,7 +339,7 @@ async def async_take_plant_snapshot(
 # Main logic
 # --------------------------------------------------------
     try:
-        indoor_zones_snapshot = _build_indoor_zones_snapshot(runtime_config, timestamp, sensor_aggr, confort_bands)
+        indoor_zones_snapshot = _build_indoor_zones_snapshot(runtime_config, timestamp, sensor_aggr)
         outdoor_zones_snapshot = _build_outdoor_zones_snapshot(runtime_config, timestamp, sensor_aggr)
 
         pdc = _build_pdc_snapshot(runtime_config, timestamp)
@@ -373,8 +366,6 @@ async def async_take_plant_snapshot(
             t_op=sensor_aggr.get("global.t_op"),
             mrt=sensor_aggr.get("global.mrt"),
             condensation_margin=sensor_aggr.get("global.condensation_margin_min"),
-
-            confort_band=confort_bands.get("global_indoor"),
             
             flow_t=supply_unit.sensor_adjustable_temp_system_supply if supply_unit else None,
             return_t=supply_unit.sensor_adjustable_temp_system_return if supply_unit else None

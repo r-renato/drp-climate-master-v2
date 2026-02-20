@@ -5,6 +5,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from custom_components.drp_climate_master_v2.helpers.formatter import fpadstr
+
+from .zone.contracts import ZonesDecision
+
 class MetricBasis(str, Enum):
     WEIGHTED = "weighted"
     COUNT = "count"
@@ -658,11 +662,11 @@ class PlantDemandSignals:
 
         def emit(lines: list[str], label: str, field_name: str, value: str) -> None:
             # riga valore
-            lines.append(f"  {label:<18} :: {value}")
+            lines.append(f"{fpadstr(fstr(label), pad_before=2, field_width=30)} :: {value}")
             # riga doc sotto (se presente)
             d = fdoc(field_name)
             if d is not None:
-                lines.append(f"                     :: {d}")
+                lines.append(f"{fpadstr(fstr(""), pad_before=2, field_width=30)} :: {d}")
 
         # NB: primo header "finto" per compatibilità con PlantDecision.__str__ che fa splitlines()[1:]
         lines: list[str] = ["PlantDemandSignals", "------------------------------------------------------------------", "Signals"]
@@ -847,6 +851,11 @@ class PlantDecision:
     supply: SupplyCommand = field(default_factory=SupplyCommand)
     vmc: VmcCommand = field(default_factory=VmcCommand)
 
+    # Optional zones MPC plan produced/consumed by the plant-level orchestrator.
+    # Kept here to allow a single decision object to carry *both* plant commands
+    # and the zone valve plan for consistent actuation and logging.
+    zones: Optional[ZonesDecision] = None
+
     signals: PlantDemandSignals = field(default_factory=PlantDemandSignals)
     warnings: List[str] = field(default_factory=list)
 
@@ -964,6 +973,42 @@ class PlantDecision:
             #     f"  Heat def by zone   :: {fdict_compact(s.heat_def_by_zone_c, nd=1)}",
             #     f"  Cool sur by zone   :: {fdict_compact(s.cool_sur_by_zone_c, nd=1)}",
             # ]
+
+        # --- zones MPC plan (valves) ---
+        zdec = getattr(self, "zones", None)
+        if zdec is not None:
+            try:
+                n_zones = len(getattr(zdec, "zones", {}) or {})
+                n_on = sum(1 for c in (getattr(zdec, "zones", {}) or {}).values() if getattr(c, "valve_on", False))
+                meta = getattr(zdec, "meta", {}) or {}
+                duty = meta.get("mpc_duty_avg_pct")
+                on_now = meta.get("mpc_on_now_pct")
+                first_on = meta.get("mpc_first_on_step")
+                full_on = meta.get("mpc_full_on_pct")
+                full_off = meta.get("mpc_full_off_pct")
+
+                # Compact per-zone status list (truncated)
+                items = sorted((getattr(zdec, "zones", {}) or {}).items(), key=lambda kv: str(kv[0]))
+                preview = items[:8]
+                more = f" (+{len(items) - 8})" if len(items) > 8 else ""
+                zs = ", ".join(f"{k}={'On' if getattr(v, 'valve_on', False) else 'Off'}" for k, v in preview)
+                zs = (zs + more) if zs else "-"
+
+                lines += [
+                    f"------------------------------------------------------------------",
+                    f"Zones MPC plan",
+                    f"  Zones              :: {n_zones} (on={n_on}, off={max(0, n_zones - n_on)})",
+                    f"  Duty avg           :: {fnum(duty, 1)} %",
+                    f"  On-now             :: {fnum(on_now, 1)} %",
+                    f"  First ON step      :: {first_on if first_on is not None else '-'}",
+                    f"  Full-on / Full-off :: {fnum(full_on, 1)} % / {fnum(full_off, 1)} %",
+                    f"  Valves             :: {zs}",
+                ]
+                if getattr(zdec, "warnings", None):
+                    lines += [f"  Warnings           :: {flist(list(getattr(zdec, 'warnings', []) or []))}"]
+            except Exception:
+                # Never break decision logging due to zones formatting
+                pass
 
         # --- warnings ---
         if self.warnings:

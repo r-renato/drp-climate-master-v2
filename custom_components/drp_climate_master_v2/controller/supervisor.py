@@ -69,7 +69,6 @@ from homeassistant.core import HomeAssistant, Event, callback
 
 from ..plant.control.actuator import PlantActuator
 from ..plant.decision.zone.contracts import ZonesDecision
-from ..plant.decision.zone.planner import ZoneDecisionPlanner
 
 from ..plant.decision.contracts import PlantDecision
 from ..plant.decision.planner import PlantDecisionPlanner
@@ -133,7 +132,6 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
             hvac_action=HVACAction.IDLE,
         )
 
-        self._zones_decision_planner: ZoneDecisionPlanner = ZoneDecisionPlanner()
         self._plant_decision_planner: PlantDecisionPlanner = PlantDecisionPlanner()
         self._plant_actuator = PlantActuator(hass=self._hass, runtime_cfg=coordinator.runtime_config)
         
@@ -305,18 +303,19 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                 if snap is not None:
                     try:
                         log_debug(_LOGGER, "PlantSnapshot %s", snap)
-                        self._last_zones_decision = self._zones_decision_planner.plan(
-                            snapshot=snap,
-                            reason="tick",
-                        )
-                        log_debug(_LOGGER, "ZonesDecision %s", self._last_zones_decision)
-
                         self._last_plant_decision = self._plant_decision_planner.plan(
                             snapshot=snap,
-                            zones_decision=self._last_zones_decision,
                             reason="tick",
                         )
                         log_debug(_LOGGER, "PlantDecision %s", self._last_plant_decision)
+
+                        # # Zones MPC plan may be produced by the plant planner.
+                        # self._last_zones_decision = getattr(self._last_plant_decision, "zones", None)
+                        # if self._last_zones_decision is not None:
+                        #     log_debug(_LOGGER, "ZonesDecision %s", self._last_zones_decision)
+
+                        # # Expose zones plan to UI logic below
+                        # plan = self._last_zones_decision
 
 
                         await self._plant_actuator.async_apply(decision=self._last_plant_decision)

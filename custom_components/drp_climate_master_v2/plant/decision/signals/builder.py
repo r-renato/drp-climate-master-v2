@@ -3,25 +3,41 @@ from __future__ import annotations
 from dataclasses import fields as dc_fields, is_dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from ....helpers.num import quantile_linear
+
 from ..contracts import MetricBasis, PlantDemandSignals
 from ....domain.models.plant import PlantSnapshot
 from ....helpers.psychrometric import dew_point_celsius
 from ....helpers.utils import as_float
 
 from ..config import PlantPlannerConfig
-from .clusters import DewPointCluster, ZoneComfortCluster, ZoneDemandMetrics
-from .stats import percentile_sorted
+from .model import DewPointCluster, ZoneComfortCluster, ZoneDemandMetrics
 
 
 class DemandSignalsBuilder:
-    """Compute PlantDemandSignals via clustered methods (zone comfort / DP).
+    """
+    Costruttore dei segnali di domanda impianto (`PlantDemandSignals`) a partire
+    dallo snapshot corrente (`PlantSnapshot`).
+
+    Scopo
+    -----
+    Questo builder aggrega e “compatta” le informazioni di domanda termica/igrometrica
+    provenienti dalle zone interne, producendo un payload unico usato dal planner.
+
+    In particolare calcola:
+    - **comfort cluster di zona**: deficit di riscaldamento e surplus di raffrescamento
+      rispetto alla comfort band (T_op_min / T_op_max), inclusi headroom minimi.
+    - **metriche aggregate di domanda**: media pesata (o per conteggio) e coverage
+      (quanta parte delle zone è fuori banda).
+    - **cluster dew point**: max dew point indoor, dew point robusto per controllo
+      deumidifica (percentile), e dew point outdoor stimato (best effort).
 
     NOTE
     ----
-    This builder is intentionally **observation-only**:
-    - It aggregates zone comfort deltas and dew-point signals.
-    - It does NOT compute VMC policy (requests, DP setpoints, hysteresis), which lives
-      in the dedicated VMC domain module.
+    Questo builder è intenzionalmente **osservativo**:
+    - aggrega delta di comfort e segnali di dew point;
+    - NON calcola policy VMC (richieste, setpoint DP, isteresi), che risiede nel
+      dominio dedicato alla VMC.
     """
 
     def __init__(
@@ -29,13 +45,40 @@ class DemandSignalsBuilder:
         cfg: PlantPlannerConfig,
         *,
         zone_weight_fn: Callable[[Any], float],
-        percentile_sorted_fn: Callable[[List[float], float], float] = percentile_sorted,
+        # percentile_sorted_fn: Callable[[List[float], float], float] = quantile_linear,
     ) -> None:
+        """
+        Inizializza il builder.
+
+        Args:
+            cfg: configurazione del planner (include anche sotto-config VMC per
+                percentile dew point, ecc.).
+            zone_weight_fn: funzione che ritorna il peso di una zona (>=0) per
+                calcoli pesati. Tipicamente dipende da priorità stanza, area,
+                occupancy, ecc.
+            # percentile_sorted_fn: (opzionale) funzione percentile; lasciata
+            # commentata perché si usa direttamente `quantile_linear`.
+        """
         self.cfg = cfg
         self._zone_weight_fn = zone_weight_fn
-        self._percentile_sorted_fn = percentile_sorted_fn
+        # self._percentile_sorted_fn = percentile_sorted_fn
 
     def build(self, *, snapshot: PlantSnapshot) -> PlantDemandSignals:
+        """
+        Costruisce l'oggetto `PlantDemandSignals` a partire dallo snapshot impianto.
+
+        Pipeline:
+        1) Cluster comfort di zona (deficit heating / surplus cooling + headroom + dp values)
+        2) Metriche aggregate (media pesata / coverage e basis)
+        3) Cluster dew point (indoor max, dehum percentile, outdoor dp best-effort)
+        4) Assemblaggio in `PlantDemandSignals` con filtraggio safe dei campi.
+
+        Args:
+            snapshot: fotografia coerente dello stato sensori/zone/impianto.
+
+        Returns:
+            Istanza di `PlantDemandSignals` pronta per l'uso nel planner.
+        """
         zc = self._compute_zone_comfort_cluster(snapshot)
         zm = self._compute_zone_demand_metrics(zc)
         dp = self._compute_dew_point_cluster(snapshot, zc)
@@ -68,6 +111,33 @@ class DemandSignalsBuilder:
     # -----------------
 
     def _compute_zone_comfort_cluster(self, snapshot: PlantSnapshot) -> ZoneComfortCluster:
+        """
+        Calcola il cluster “comfort” sulle zone indoor.
+
+        Per ogni zona:
+        - legge la temperatura misurata (preferendo T_op se disponibile, altrimenti T aria)
+        - legge i limiti di comfort band (t_op_min, t_op_max)
+        - calcola:
+          - heating deficit: max(0, t_min - t_meas)
+          - cooling surplus: max(0, t_meas - t_max)
+          - headroom heating: t_meas - t_min (quanto margine prima di andare “freddo”)
+          - headroom cooling: t_max - t_meas (quanto margine prima di andare “caldo”)
+        - accumula anche statistiche per metriche aggregate:
+          - denominatori pesati e per conteggio
+          - “out-of-band” pesato e per conteggio
+          - somme pesate e non pesate dei delta
+
+        Inoltre raccoglie dew point indoor per stimare:
+        - dp_max_c: massimo dew point osservato nelle zone
+        - dp_values: lista di dew point validi (per percentile robusto)
+
+        Args:
+            snapshot: stato corrente che contiene `indoor_zones`.
+
+        Returns:
+            `ZoneComfortCluster` con massimi, mappe per zona, headroom minimi e
+            accumulatori (pesati e per conteggio) per metriche successive.
+        """
         heat_def_max = 0.0
         cool_sur_max = 0.0
         heat_def_by_zone: Dict[str, float] = {}
@@ -75,6 +145,7 @@ class DemandSignalsBuilder:
         heat_headroom_min_c: Optional[float] = None
         cool_headroom_min_c: Optional[float] = None
 
+        # Accumulatori heating (pesati e per conteggio)
         heat_den_w = 0.0
         heat_out_w = 0.0
         heat_sum_wdef = 0.0
@@ -82,6 +153,7 @@ class DemandSignalsBuilder:
         heat_out_n = 0
         heat_sum_ndef = 0.0
 
+        # Accumulatori cooling (pesati e per conteggio)
         cool_den_w = 0.0
         cool_out_w = 0.0
         cool_sum_wsur = 0.0
@@ -89,10 +161,12 @@ class DemandSignalsBuilder:
         cool_out_n = 0
         cool_sum_nsur = 0.0
 
+        # Dew point indoor
         dp_max: Optional[float] = None
         dp_values: List[float] = []
 
         for zone_key, z in (getattr(snapshot, "indoor_zones", None) or {}).items():
+            # Temperatura di riferimento: T_op se presente, altrimenti T aria.
             t_meas = as_float(getattr(getattr(z, "t_op", None), "value", None))
             if t_meas is None:
                 t_meas = as_float(getattr(getattr(z, "temperature", None), "value", None))
@@ -101,7 +175,7 @@ class DemandSignalsBuilder:
             t_min = as_float(getattr(band, "t_op_min", None))
             t_max = as_float(getattr(band, "t_op_max", None))
 
-            # headroom
+            # headroom (margine rispetto ai limiti banda)
             if t_meas is not None and t_min is not None:
                 hh = float(t_meas) - float(t_min)
                 heat_headroom_min_c = hh if heat_headroom_min_c is None else min(heat_headroom_min_c, hh)
@@ -109,7 +183,7 @@ class DemandSignalsBuilder:
                 ch = float(t_max) - float(t_meas)
                 cool_headroom_min_c = ch if cool_headroom_min_c is None else min(cool_headroom_min_c, ch)
 
-            # heating deficit
+            # heating deficit (quanto manca al minimo comfort)
             if t_meas is not None and t_min is not None:
                 d = max(0.0, float(t_min) - float(t_meas))
                 heat_def_by_zone[zone_key] = d
@@ -128,7 +202,7 @@ class DemandSignalsBuilder:
                     if d > 0.0:
                         heat_out_w += w
 
-            # cooling surplus
+            # cooling surplus (quanto eccede oltre massimo comfort)
             if t_meas is not None and t_max is not None:
                 d = max(0.0, float(t_meas) - float(t_max))
                 cool_sur_by_zone[zone_key] = d
@@ -147,7 +221,7 @@ class DemandSignalsBuilder:
                     if d > 0.0:
                         cool_out_w += w
 
-            # dew point
+            # dew point indoor (se disponibile)
             dp = as_float(getattr(getattr(z, "dew_point", None), "value", None))
             if dp is not None:
                 dp_f = float(dp)
@@ -178,6 +252,26 @@ class DemandSignalsBuilder:
         )
 
     def _compute_zone_demand_metrics(self, zc: ZoneComfortCluster) -> ZoneDemandMetrics:
+        """
+        Converte gli accumulatori del cluster comfort in metriche sintetiche di domanda.
+
+        Heating:
+        - heat_def_wmean_c: deficit medio (pesato se disponibile, altrimenti medio semplice)
+        - heat_cov: coverage (quota di zone/peso fuori banda per heating)
+        - heat_metric_basis: base del calcolo (WEIGHTED / COUNT / NONE)
+
+        Cooling:
+        - cool_sur_wmean_c: surplus medio (pesato se disponibile, altrimenti medio semplice)
+        - cool_cov: coverage (quota di zone/peso fuori banda per cooling)
+        - cool_metric_basis: base del calcolo (WEIGHTED / COUNT / NONE)
+
+        Args:
+            zc: cluster comfort con accumulatori già popolati.
+
+        Returns:
+            `ZoneDemandMetrics` con medie e coverage coerenti e un flag esplicito
+            che indica se il calcolo è pesato o per conteggio.
+        """
         # heating
         if zc.heat_den_w > 0.0:
             heat_def_wmean = zc.heat_sum_wdef / zc.heat_den_w
@@ -216,6 +310,25 @@ class DemandSignalsBuilder:
         )
 
     def _compute_dew_point_cluster(self, snapshot: PlantSnapshot, zc: ZoneComfortCluster) -> DewPointCluster:
+        """
+        Calcola il cluster dew point per supportare logiche di deumidifica/condensa.
+
+        Include:
+        - outdoor_dp_c: dew point esterno (best effort):
+          - se presente `snapshot.global_outdoor_dew_point` lo usa direttamente
+          - altrimenti lo stima da T_out e RH_out con formula psicrometrica
+        - dp_dehum_c: dew point indoor robusto per controllo deumidifica:
+          - percentile configurabile (es. 1.0 = max, 0.9 = 90° percentile, ecc.)
+          - fallback al massimo se percentile fallisce
+          - fallback finale a `zc.dp_max_c`
+
+        Args:
+            snapshot: snapshot impianto per recuperare grandezze outdoor.
+            zc: zone cluster che contiene `dp_values` e `dp_max_c`.
+
+        Returns:
+            `DewPointCluster` con dp max indoor, dp “robusto” per deumidifica e dp outdoor.
+        """
         # Outdoor dew point (best effort)
         outdoor_dp_c = as_float(getattr(getattr(snapshot, "global_outdoor_dew_point", None), "value", None))
         if outdoor_dp_c is None:
@@ -233,7 +346,7 @@ class DemandSignalsBuilder:
             xs = sorted(zc.dp_values)
             p = float(getattr(self.cfg.vmc.dehum, "dp_control_percentile", 1.0))
             try:
-                dp_dehum_c = float(self._percentile_sorted_fn(xs, p))
+                dp_dehum_c = quantile_linear(xs, p, assume_sorted=True, clamp_p=True, nan_policy="raise")
             except Exception:
                 dp_dehum_c = float(xs[-1])
 
@@ -251,6 +364,25 @@ class DemandSignalsBuilder:
     # -----------------
 
     def _safe_signals_init(self, payload: Dict[str, Any]) -> PlantDemandSignals:
+        """
+        Inizializza `PlantDemandSignals` in modo robusto rispetto a differenze di schema.
+
+        Questa funzione:
+        - parte da `payload` e costruisce kwargs
+        - se `PlantDemandSignals` è una dataclass, filtra i campi non previsti
+          (utile in refactor/versioni diverse)
+        - infine istanzia `PlantDemandSignals(**kwargs)`.
+
+        Args:
+            payload: dizionario con i segnali calcolati (può contenere extra keys).
+
+        Returns:
+            Istanza di `PlantDemandSignals`.
+
+        Note:
+            - In caso di eccezioni nel riflesso dataclass, non fallisce:
+              tenta comunque l'inizializzazione.
+        """
         kwargs = dict(payload)
         try:
             if is_dataclass(PlantDemandSignals):

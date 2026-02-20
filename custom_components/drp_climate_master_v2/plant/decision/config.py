@@ -398,6 +398,14 @@ class ZonesMpcConfig:
     This block configures how a zones-level controller (MPC-like) is interpreted
     by the plant-level planner.
 
+    Design notes (termotecnica)
+    --------------------------
+    - The current MPC-lite (v1) is **heating-oriented** (binary radiant valve ON/OFF).
+      For this reason, running it in summer is usually unnecessary unless you later
+      extend it to cooling/dehumidification logic.
+    - Keeping enable/season gating here allows the plant planner to remain a single
+      entrypoint while still isolating the MPC implementation.
+
     Attributes
     ----------
     min_duty_ratio:
@@ -417,6 +425,29 @@ class ZonesMpcConfig:
 
         If the minimum headroom is small, preheat is accepted; otherwise ignored.
     """
+
+    enabled: bool = True
+    """Enable/disable zones MPC integration entirely."""
+
+    run_in_winter: bool = True
+    run_in_shoulder: bool = True
+    run_in_summer: bool = False
+    """Season gating for the MPC provider.
+
+    Notes
+    -----
+    - v1 MPC-lite is heating-only, therefore default disables summer.
+    - Operative season is derived as winter/summer/shoulder.
+    """
+
+    skip_if_user_off: bool = True
+    """If True, do not compute a plan when the user HVAC mode is OFF."""
+
+    swallow_exceptions: bool = True
+    """If True, exceptions in zone MPC are swallowed (plant planner remains robust)."""
+
+    propagate_warnings_to_plant: bool = True
+    """If True, `ZonesDecision.warnings` are surfaced into `PlantDecision.warnings`."""
 
     min_duty_ratio: float = 0.05
     full_off_pct: float = 0.0

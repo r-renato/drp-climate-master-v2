@@ -50,13 +50,13 @@ class EnerenRER020I(ControlledMechanicalVentilationDevice):
 
     async def async_set_temperature(self, target: float | None = None) -> None:
         if target is not None and self._vmc is not None and self._vmc.t_setpoint is not None:
-            changed = await set_entity_number(hass=self._hass, entity_id=self._vmc.t_setpoint, value=target, tol=3)
+            changed = await set_entity_number(hass=self._hass, entity_id=self._vmc.t_setpoint, value=target, tol=0.5)
             if changed:
                 log_info(_LOGGER, "Temperature set to %.1f", target)
 
     async def async_set_humidity(self, target: float | None = None) -> None:
         if target is not None and self._vmc is not None and self._vmc.h_setpoint is not None:
-            changed = await set_entity_number(hass=self._hass, entity_id=self._vmc.h_setpoint, value=target, tol=5)
+            changed = await set_entity_number(hass=self._hass, entity_id=self._vmc.h_setpoint, value=target, tol=3)
             if changed:
                 log_info(_LOGGER, "Humidity set to %.1f", target)
 

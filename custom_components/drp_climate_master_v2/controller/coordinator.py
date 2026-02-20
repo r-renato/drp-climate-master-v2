@@ -22,13 +22,10 @@ from homeassistant.const import EntityCategory, CONF_NAME, EVENT_HOMEASSISTANT_S
 from ..domain.models.plant import PlantSnapshot
 
 from ..domain.enums import HVACOperatingProfile
-from ..helpers.plant.plant_state import async_take_plant_snapshot
+from ..helpers.builders.snapshot_plant_states import async_build_plant_states_snapshot
 from ..helpers.timeutils import now_utc
 
-from ..helpers.confort.policy_layer import ComfortPolicyLayer, PolicyContext, PolicyDecision, build_policy_layer
-
 from ..domain.models.season import OperativeSeason, SeasonState, Seasons
-from ..helpers.confort.confort_band import ComfortBandCalculator, ComfortBandResult
 
 from ..domain.influx import InfluxConfig
 # from ..strategies.plant_regime_pipeline import InfluxSeriesReader, PlantEntities, PlantRegimePipeline, RegimeConfig, RegimeSearchResult, daily_local_mean
@@ -99,8 +96,8 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._climate_hvac_mode: HVACMode | None = None
         self._season_state = None
 
-        self._policy_layer: ComfortPolicyLayer = build_policy_layer()
-        self._confort_bands = ComfortBandCalculator()
+        # self._policy_layer: ComfortPolicyLayer = build_policy_layer()
+        # self._confort_bands = ComfortBandCalculator()
 
         self._plant_snapshot: PlantSnapshot | None = None 
 
@@ -404,103 +401,103 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except asyncio.CancelledError:
             return
 
-    def _compute_confort_band(self):
-        result: Dict[str, ComfortBandResult] = {}
+    # def _compute_confort_band(self):
+    #     result: Dict[str, ComfortBandResult] = {}
 
-        runtime_vmc = self._runtime.climate.devices.vmc
+    #     runtime_vmc = self._runtime.climate.devices.vmc
 
-        season_state = self._season_state
-        vmc_speed = self._entities_state.get(runtime_vmc.spare_setpoint) if runtime_vmc else None
-        vmc_air_speed = as_int(vmc_speed.state) if vmc_speed and vmc_speed.state is not None else None
+    #     season_state = self._season_state
+    #     vmc_speed = self._entities_state.get(runtime_vmc.spare_setpoint) if runtime_vmc else None
+    #     vmc_air_speed = as_int(vmc_speed.state) if vmc_speed and vmc_speed.state is not None else None
 
-        # log_debug(_LOGGER, "runtime_vmc.spare_setpoint %s", runtime_vmc.spare_setpoint if runtime_vmc else "***")
-        # log_debug(_LOGGER, "self._entities_state.keys %s", self._entities_state.keys())
+    #     # log_debug(_LOGGER, "runtime_vmc.spare_setpoint %s", runtime_vmc.spare_setpoint if runtime_vmc else "***")
+    #     # log_debug(_LOGGER, "self._entities_state.keys %s", self._entities_state.keys())
 
-        def _compute_area_confort_band(self, name: str, season: Seasons, vmc_speed: int) -> ComfortBandResult | None:
-            rh_pct = self._sensor_aggregator.get(f"{name}.indoor_humidity")
-            if rh_pct.value is None:
-                return            
+    #     def _compute_area_confort_band(self, name: str, season: Seasons, vmc_speed: int) -> ComfortBandResult | None:
+    #         rh_pct = self._sensor_aggregator.get(f"{name}.indoor_humidity")
+    #         if rh_pct.value is None:
+    #             return            
 
-            area_policy_ctx = PolicyContext(
-                now=datetime.now(timezone.utc),
-                room=name,
-                season=OperativeSeason.from_value(season),
-                vmc_speed=vmc_speed,
-                rh_pct=rh_pct.value,
-                t_op_current=self._sensor_aggregator.get( f"{name}.t_op" ).value,
-                outdoor_temp=self._sensor_aggregator.get( "global.outdoor_temperature" ).value,
-                mode=self._climate_preset_mode
-            )
+    #         area_policy_ctx = PolicyContext(
+    #             now=datetime.now(timezone.utc),
+    #             room=name,
+    #             season=OperativeSeason.from_value(season),
+    #             vmc_speed=vmc_speed,
+    #             rh_pct=rh_pct.value,
+    #             t_op_current=self._sensor_aggregator.get( f"{name}.t_op" ).value,
+    #             outdoor_temp=self._sensor_aggregator.get( "global.outdoor_temperature" ).value,
+    #             mode=self._climate_preset_mode
+    #         )
 
-            decision: PolicyDecision = self._policy_layer.decide(area_policy_ctx)
+    #         decision: PolicyDecision = self._policy_layer.decide(area_policy_ctx)
             
-            area_confort_band = self._confort_bands.compute_comfort_band(
-                room=name,
-                speed=vmc_speed,
-                rh_pct=rh_pct.value,
-                season=OperativeSeason.from_value(season),
-                t_op_current=self._sensor_aggregator.get(f"{name}.t_op").value,
-                policy=decision,  # <-- QUI
-            )
+    #         area_confort_band = self._confort_bands.compute_comfort_band(
+    #             room=name,
+    #             speed=vmc_speed,
+    #             rh_pct=rh_pct.value,
+    #             season=OperativeSeason.from_value(season),
+    #             t_op_current=self._sensor_aggregator.get(f"{name}.t_op").value,
+    #             policy=decision,  # <-- QUI
+    #         )
 
-            # log_debug(_LOGGER, "[comfort_policy] ctrl_aggressiveness=%.2f", decision.ctrl_aggressiveness)
-            # log_debug(_LOGGER, "%s", area_policy_ctx)
-            # log_debug(_LOGGER, "%s", area_confort_band)
+    #         # log_debug(_LOGGER, "[comfort_policy] ctrl_aggressiveness=%.2f", decision.ctrl_aggressiveness)
+    #         # log_debug(_LOGGER, "%s", area_policy_ctx)
+    #         # log_debug(_LOGGER, "%s", area_confort_band)
 
-            return area_confort_band
+    #         return area_confort_band
 
-        if season_state and runtime_vmc and vmc_air_speed is not None and self._climate_preset_mode:
+    #     if season_state and runtime_vmc and vmc_air_speed is not None and self._climate_preset_mode:
 
-            for area in self._runtime.climate.areas:
-                name = slugify(area.name)
+    #         for area in self._runtime.climate.areas:
+    #             name = slugify(area.name)
 
-                # rh_pct = self._sensor_aggregator.get(f"{name}.indoor_humidity")
-                # if rh_pct.value is None:
-                #     continue
+    #             # rh_pct = self._sensor_aggregator.get(f"{name}.indoor_humidity")
+    #             # if rh_pct.value is None:
+    #             #     continue
 
-                # area_policy_ctx = PolicyContext(
-                #     now=datetime.now(timezone.utc),
-                #     room=name,
-                #     season=OperativeSeason.from_value(season_state.season),
-                #     vmc_speed=int(vmc_speed.state),
-                #     rh_pct=rh_pct.value,
-                #     t_op_current=self._sensor_aggregator.get( f"{name}.t_op" ).value,
-                #     outdoor_temp=self._sensor_aggregator.get( "global.outdoor_temperature" ).value,
-                #     mode=self._climate_preset_mode
-                # )
+    #             # area_policy_ctx = PolicyContext(
+    #             #     now=datetime.now(timezone.utc),
+    #             #     room=name,
+    #             #     season=OperativeSeason.from_value(season_state.season),
+    #             #     vmc_speed=int(vmc_speed.state),
+    #             #     rh_pct=rh_pct.value,
+    #             #     t_op_current=self._sensor_aggregator.get( f"{name}.t_op" ).value,
+    #             #     outdoor_temp=self._sensor_aggregator.get( "global.outdoor_temperature" ).value,
+    #             #     mode=self._climate_preset_mode
+    #             # )
 
-                # # area_confort_band = self._confort_band.compute_comfort_band(
-                # #     room=name,
-                # #     speed=int(vmc_speed.state),
-                # #     rh_pct=rh_pct.value,
-                # #     season=OperativeSeason.from_value(season_state.season),
-                # #     t_op_current=self._sensor_aggregator.get( f"{name}.t_op" ).value
-                # # )
+    #             # # area_confort_band = self._confort_band.compute_comfort_band(
+    #             # #     room=name,
+    #             # #     speed=int(vmc_speed.state),
+    #             # #     rh_pct=rh_pct.value,
+    #             # #     season=OperativeSeason.from_value(season_state.season),
+    #             # #     t_op_current=self._sensor_aggregator.get( f"{name}.t_op" ).value
+    #             # # )
 
-                # decision: PolicyDecision = self._policy_layer.decide(area_policy_ctx)
-                # _LOGGER.debug("[comfort_policy] ctrl_aggressiveness=%.2f", decision.ctrl_aggressiveness)
-                # area_confort_band = self._confort_bands.compute_comfort_band(
-                #     room=name,
-                #     speed=int(vmc_speed.state),
-                #     rh_pct=rh_pct.value,
-                #     season=OperativeSeason.from_value(season_state.season),
-                #     t_op_current=self._sensor_aggregator.get(f"{name}.t_op").value,
-                #     policy=decision,  # <-- QUI
-                # )
+    #             # decision: PolicyDecision = self._policy_layer.decide(area_policy_ctx)
+    #             # _LOGGER.debug("[comfort_policy] ctrl_aggressiveness=%.2f", decision.ctrl_aggressiveness)
+    #             # area_confort_band = self._confort_bands.compute_comfort_band(
+    #             #     room=name,
+    #             #     speed=int(vmc_speed.state),
+    #             #     rh_pct=rh_pct.value,
+    #             #     season=OperativeSeason.from_value(season_state.season),
+    #             #     t_op_current=self._sensor_aggregator.get(f"{name}.t_op").value,
+    #             #     policy=decision,  # <-- QUI
+    #             # )
 
-                area_confort_band = _compute_area_confort_band(self, name, season_state.season, vmc_air_speed)
+    #             area_confort_band = _compute_area_confort_band(self, name, season_state.season, vmc_air_speed)
  
-                if area_confort_band:
-                    result[name] = area_confort_band
+    #             if area_confort_band:
+    #                 result[name] = area_confort_band
 
-            area_confort_band = _compute_area_confort_band(self, "global", season_state.season, vmc_air_speed)
-            if area_confort_band:
-                result["global_indoor"] = area_confort_band
-        else:
-            log_warning(_LOGGER, "season_state=%s", season_state)
-            log_warning(_LOGGER, "vmc_speed=%s", vmc_speed)
+    #         area_confort_band = _compute_area_confort_band(self, "global", season_state.season, vmc_air_speed)
+    #         if area_confort_band:
+    #             result["global_indoor"] = area_confort_band
+    #     else:
+    #         log_warning(_LOGGER, "season_state=%s", season_state)
+    #         log_warning(_LOGGER, "vmc_speed=%s", vmc_speed)
 
-        return result
+    #     return result
 
     # async def _test_regime_config(self) -> None:
     #     season_state = self._entry_store.get(SEASON_STATE)
@@ -634,44 +631,19 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._sensor_aggregator.async_update()
 
             if self._season_state and self._climate_hvac_mode and self._climate_preset_mode:
-                self._plant_snapshot = await async_take_plant_snapshot(
+                self._plant_snapshot = await async_build_plant_states_snapshot(
                     hass=self._hass,
                     timestamp=now_utc(),
                     runtime_config=self._runtime,
                     season=self._season_state,
                     entities_state=self._entities_state,
                     sensor_aggr=self._sensor_aggregator,
-                    confort_bands=self._compute_confort_band(),
+                    # confort_bands=self._compute_confort_band(),
                     climate_hvac_mode=self._climate_hvac_mode,
                     climate_preset_mode=self._climate_preset_mode,
                 )
             else:
                 log_warning(_LOGGER, "Invalid season state %s", self._season_state)
-
-            # rh_pct = self._sensor_aggregator.get( "kitchen.indoor_humidity" ).value
-            # t_op_current = self._sensor_aggregator.get( "kitchen.t_op" ).value
-
-            # if rh_pct is not None and t_op_current is not None:
-            #     kitchen_cb = self._confort_band.compute_comfort_band(
-            #         room="kitchen",
-            #         speed=1,
-            #         rh_pct=rh_pct,
-            #         season="winter",
-            #         t_op_current=t_op_current
-            #     )
-            #     log_debug(_LOGGER, "%s", kitchen_cb)
-            #     kitchen_cb = self._confort_band.compute_comfort_band(
-            #         room="kitchen",
-            #         speed=5,
-            #         rh_pct=rh_pct,
-            #         season="winter",
-            #         t_op_current=t_op_current
-            #     )
-            #     log_debug(_LOGGER, "%s", kitchen_cb)
-            # await self._test_regime_config()
-
-            # log_debug(_LOGGER, "%s", self._sensor_aggregator.latest_all())
-            # log_debug(_LOGGER, "_plant_snapshot=%s", self._plant_snapshot)
             
             # TODO: costruire snapshot reale (PlantSnapshot ecc.)
             # Esempio minimale: esporta solo timestamp e numero entity osservate

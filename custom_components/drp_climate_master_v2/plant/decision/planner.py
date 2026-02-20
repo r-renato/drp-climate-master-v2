@@ -14,6 +14,7 @@ from ...domain.models.plant import PlantSnapshot
 from ...domain.enums import HVACOperatingProfile
 
 from .zone.contracts import ZonesDecision
+from .zone.provider import ZonesMpcProvider
 
 from .config import PlantPlannerConfig
 from .contracts import PlantDecision, PlantDemandSignals, PlantMode
@@ -80,6 +81,9 @@ class PlantDecisionPlanner:
     _supply_cmd: SupplyCommandBuilder = field(init=False, repr=False)
     _vmc_cmd: VmcCommandBuilder = field(init=False, repr=False)
 
+    # Zones MPC-lite integration (kept isolated in `zone/provider.py`)
+    _zones_mpc: ZonesMpcProvider = field(init=False, repr=False)
+
     def __post_init__(self) -> None:
         # Observation builder (zone comfort + dew point)
         self._signals = DemandSignalsBuilder(self.cfg, zone_weight_fn=_zone_weight)
@@ -94,6 +98,9 @@ class PlantDecisionPlanner:
         self._pdc_cmd = PdcCommandBuilder(self.cfg)
         self._supply_cmd = SupplyCommandBuilder(self.cfg)
         self._vmc_cmd = VmcCommandBuilder(self.cfg, self._vmc_policy)
+
+        # Zones MPC provider (optional)
+        self._zones_mpc = ZonesMpcProvider(cfg=self.cfg.zones_mpc)
 
     def plan(
         self,
@@ -119,6 +126,22 @@ class PlantDecisionPlanner:
 
         # --- VMC domain: compute requests & DP setpoints (hysteresis-aware)
         self._enrich_vmc_signals(snapshot, demand)
+
+        # --- Zones MPC-lite (optional): if not provided by caller, compute here.
+        # Kept isolated behind a provider for maintainability.
+        if zones_decision is None:
+            zones_decision = self._zones_mpc.maybe_plan(snapshot=snapshot, reason=f"{reason}/zones")
+
+        # Expose zones plan in the decision object (single output artifact)
+        dec.zones = zones_decision
+
+        # Surface zones MPC warnings without losing plant-level robustness.
+        if (
+            zones_decision
+            and getattr(zones_decision, "warnings", None)
+            and bool(getattr(self.cfg.zones_mpc, "propagate_warnings_to_plant", True))
+        ):
+            dec.warnings.extend([f"zones_mpc_{w}" for w in zones_decision.warnings])
 
         # --- Determine regime
         mode = self._mode_resolver.decide(snapshot=snapshot, demand=demand, zones_decision=zones_decision)

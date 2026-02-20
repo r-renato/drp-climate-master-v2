@@ -10,7 +10,6 @@ from homeassistant.components.climate.const import HVACMode
 from ...helpers.ha import EntityTimeInStateStats
 
 from ...domain.enums import HVACOperatingProfile
-from ...helpers.confort.confort_band import ComfortBandResult
 from ...helpers.sensor_aggregator import AggregatedValue
 
 from ...helpers.utils import pad
@@ -60,8 +59,6 @@ class ZoneSnapshot:
     condensation_margin: Optional[AggregatedValue] = None
 
     radiant_valve: Optional[AggregatedValue] = None
-
-    confort_band: Optional[ComfortBandResult] = None
     
     flow_t: Optional[float] = None
     return_t: Optional[float] = None
@@ -480,7 +477,6 @@ class PlantSnapshot:
         if indoor:
             for key in sorted(indoor.keys()):
                 z = indoor[key]
-                cb = z.confort_band
 
                 sensors = (
                     f":: ["
@@ -499,36 +495,36 @@ class PlantSnapshot:
                     f"[t_op:{fav(z.t_op)} °C mrt:{fav(z.mrt)} °C cm:{fav(z.condensation_margin)} °C]"
                 ]
 
-                if cb:
-                    conf_band_air = (
-                        f":: Opr. season: {cb.season} "
-                        f"Air set: {fnum(cb.speed, 2)} "
-                        f"Air best: {fnum(cb.v_air_best, 2)} "
-                        f"Air low: {fnum(cb.v_air_lo, 2)} "
-                        f"Air High: {fnum(cb.v_air_hi, 2)} "
-                    )
-                    conf_band_pov = (
-                        f":: t_op: {cb.t_op} °C "
-                        f"t_op_min: {fnum(cb.t_op_min)} °C "
-                        f"t_op_max: {fnum(cb.t_op_max)} °C "
-                        f"pmv: {fnum(cb.pmv)} "
-                        f"ppd: {fnum(cb.ppd)} "
-                        f"is in band: {fbool(cb.ok)} "
-                    )
-                    conf_band_diagnostic = (
-                        f":: pmv_center: {cb.pmv_center} "
-                        f"pmv_band: {fnum(cb.pmv_band)} "
-                        f"met_used: {fnum(cb.met_used)} "
-                        f"clo_used: {fnum(cb.clo_used)} "
-                    )
-                    lines += [
-                        f"  {pad('confort band Air', width=18, align='right')} "
-                        f"{conf_band_air}",
-                        f"  {pad('Pov', width=18, align='right')} "
-                        f"{conf_band_pov}",
-                        f"  {pad('diagnostic', width=18, align='right')} "
-                        f"{conf_band_diagnostic}"
-                    ]
+                # if cb:
+                #     conf_band_air = (
+                #         f":: Opr. season: {cb.season} "
+                #         f"Air set: {fnum(cb.speed, 2)} "
+                #         f"Air best: {fnum(cb.v_air_best, 2)} "
+                #         f"Air low: {fnum(cb.v_air_lo, 2)} "
+                #         f"Air High: {fnum(cb.v_air_hi, 2)} "
+                #     )
+                #     conf_band_pov = (
+                #         f":: t_op: {cb.t_op} °C "
+                #         f"t_op_min: {fnum(cb.t_op_min)} °C "
+                #         f"t_op_max: {fnum(cb.t_op_max)} °C "
+                #         f"pmv: {fnum(cb.pmv)} "
+                #         f"ppd: {fnum(cb.ppd)} "
+                #         f"is in band: {fbool(cb.ok)} "
+                #     )
+                #     conf_band_diagnostic = (
+                #         f":: pmv_center: {cb.pmv_center} "
+                #         f"pmv_band: {fnum(cb.pmv_band)} "
+                #         f"met_used: {fnum(cb.met_used)} "
+                #         f"clo_used: {fnum(cb.clo_used)} "
+                #     )
+                #     lines += [
+                #         f"  {pad('confort band Air', width=18, align='right')} "
+                #         f"{conf_band_air}",
+                #         f"  {pad('Pov', width=18, align='right')} "
+                #         f"{conf_band_pov}",
+                #         f"  {pad('diagnostic', width=18, align='right')} "
+                #         f"{conf_band_diagnostic}"
+                #     ]
 
         # --- dettaglio zone outdoor (se utile) ---
         if outdoor:
@@ -555,7 +551,7 @@ class PlantSnapshot:
             self.global_outdoor_dew_point,
         ]):
             z = self.global_indoor_zone
-            cb = z.confort_band
+            # cb = z.confort_band
             lines += [
                 f"------------------------------------------------------------------",
                 f"Global aggregates",
@@ -577,36 +573,36 @@ class PlantSnapshot:
                 f"[t_op:{fav(z.t_op)} °C mrt:{fav(z.mrt)} °C cm:{fav(z.condensation_margin)} °C]"
             ]
 
-            if cb:
-                conf_band_air = (
-                    f":: Opr. season: {cb.season} "
-                    f"Air set: {fnum(cb.speed)} "
-                    f"Air best: {fnum(cb.v_air_best, 2)} "
-                    f"Air low: {fnum(cb.v_air_lo, 2)} "
-                    f"Air High: {fnum(cb.v_air_hi, 2)} "
-                )
-                conf_band_pov = (
-                    f":: t_op: {cb.t_op} °C "
-                    f"t_op_min: {fnum(cb.t_op_min)} °C "
-                    f"t_op_max: {fnum(cb.t_op_max)} °C "
-                    f"pmv: {fnum(cb.pmv)} "
-                    f"ppd: {fnum(cb.ppd)} "
-                    f"is in band: {fbool(cb.ok)} "
-                )
-                conf_band_diagnostic = (
-                    f":: pmv_center: {cb.pmv_center} "
-                    f"pmv_band: {fnum(cb.pmv_band)} "
-                    f"met_used: {fnum(cb.met_used)} "
-                    f"clo_used: {fnum(cb.clo_used)} "
-                )
-                lines += [
-                    f"  {pad('confort band Air', width=18, align='right')} "
-                    f"{conf_band_air}",
-                    f"  {pad('Pov', width=18, align='right')} "
-                    f"{conf_band_pov}",
-                    f"  {pad('diagnostic', width=18, align='right')} "
-                    f"{conf_band_diagnostic}"
-                ]
+            # if cb:
+            #     conf_band_air = (
+            #         f":: Opr. season: {cb.season} "
+            #         f"Air set: {fnum(cb.speed)} "
+            #         f"Air best: {fnum(cb.v_air_best, 2)} "
+            #         f"Air low: {fnum(cb.v_air_lo, 2)} "
+            #         f"Air High: {fnum(cb.v_air_hi, 2)} "
+            #     )
+            #     conf_band_pov = (
+            #         f":: t_op: {cb.t_op} °C "
+            #         f"t_op_min: {fnum(cb.t_op_min)} °C "
+            #         f"t_op_max: {fnum(cb.t_op_max)} °C "
+            #         f"pmv: {fnum(cb.pmv)} "
+            #         f"ppd: {fnum(cb.ppd)} "
+            #         f"is in band: {fbool(cb.ok)} "
+            #     )
+            #     conf_band_diagnostic = (
+            #         f":: pmv_center: {cb.pmv_center} "
+            #         f"pmv_band: {fnum(cb.pmv_band)} "
+            #         f"met_used: {fnum(cb.met_used)} "
+            #         f"clo_used: {fnum(cb.clo_used)} "
+            #     )
+            #     lines += [
+            #         f"  {pad('confort band Air', width=18, align='right')} "
+            #         f"{conf_band_air}",
+            #         f"  {pad('Pov', width=18, align='right')} "
+            #         f"{conf_band_pov}",
+            #         f"  {pad('diagnostic', width=18, align='right')} "
+            #         f"{conf_band_diagnostic}"
+            #     ]
 
             lines += [
                 f"  Outdoor means      :: [T:{fav(self.global_outdoor_temperature)} °C RH:{fav(self.global_outdoor_humidity,0)} % "
