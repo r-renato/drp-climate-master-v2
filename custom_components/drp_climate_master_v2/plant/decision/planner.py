@@ -8,12 +8,14 @@ import logging
 
 from homeassistant.util import dt as dt_util
 
-from ...helpers.logger import log_debug
-from ...helpers.utils import as_float
+from ...helpers.logger import log_debug, log_exception
+from ...helpers.utils import as_float, as_int
 from ...domain.models.plant import PlantSnapshot
 from ...domain.enums import HVACOperatingProfile
 
 from .zone.model import ZonesDecision
+from .zone.confort_band.builder import build_comfort_engine, build_confort_zones
+from .zone.confort_band.policy_layer import ComfortPolicyLayer, ConfortPolicyConfig
 from .zone.confort_band_mpc.provider import ZonesMpcProvider
 
 from .context import DecisionDerivedInputs
@@ -74,6 +76,8 @@ class PlantDecisionPlanner:
     """
 
     cfg: PlantPlannerConfig = field(default_factory=PlantPlannerConfig)
+    cpcfg: ConfortPolicyConfig = field(default_factory=ConfortPolicyConfig)
+    cpl: ComfortPolicyLayer = field(init=False)
 
     _signals: DemandSignalsBuilder = field(init=False, repr=False)
     _vmc_policy: VmcPolicy = field(init=False, repr=False)
@@ -90,6 +94,8 @@ class PlantDecisionPlanner:
     _zones_mpc: ZonesMpcProvider = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.cpcfg, self.cpl = build_comfort_engine()
+
         # Observation builder (zone comfort + dew point)
         self._signals = DemandSignalsBuilder(self.cfg, zone_weight_fn=_zone_weight)
 
@@ -115,8 +121,8 @@ class PlantDecisionPlanner:
         *,
         snapshot: PlantSnapshot,
         reason: str,
-        zones_decision: Optional[ZonesDecision] = None,
-        derived: DecisionDerivedInputs | None = None,
+        # zones_decision: Optional[ZonesDecision] = None,
+        # derived: DecisionDerivedInputs | None = None,
     ) -> PlantDecision:
         ts = snapshot.timestamp if isinstance(snapshot.timestamp, datetime) else dt_util.utcnow()
         if isinstance(ts, datetime) and ts.tzinfo is None:
@@ -130,6 +136,7 @@ class PlantDecisionPlanner:
             dec.warnings.append("missing_outdoor_temperature")
             t_out = None
 
+        derived = self._conf_bands_derived(snapshot=snapshot)
         comfort_bands_by_zone = derived.comfort_bands_by_zone if derived is not None else None
 
         # --- Extract indoor demand signals
@@ -140,8 +147,7 @@ class PlantDecisionPlanner:
 
         # --- Zones MPC-lite (optional): if not provided by caller, compute here.
         # Kept isolated behind a provider for maintainability.
-        if zones_decision is None:
-            zones_decision = self._zones_mpc.maybe_plan(snapshot=snapshot, reason=f"{reason}/zones", comfort_bands_by_zone=comfort_bands_by_zone)
+        zones_decision = self._zones_mpc.maybe_plan(snapshot=snapshot, reason=f"{reason}/zones", comfort_bands_by_zone=comfort_bands_by_zone)
 
         # Expose zones plan in the decision object (single output artifact)
         dec.zones = zones_decision
@@ -196,8 +202,38 @@ class PlantDecisionPlanner:
 
         return dec
 
-    # ---- VMC integration -------------------------------------------------
+    # ---- Confoert Band integration -------------------------------------------------
 
+    def _conf_bands_derived(self, snapshot: PlantSnapshot) -> DecisionDerivedInputs | None:
+        derived: DecisionDerivedInputs | None = None
+
+        try:
+            # Compute comfort-band per zone as *derived decision input*.
+            # The comfort band is not part of PlantSnapshot by design.
+            if snapshot.indoor_zones and snapshot.season is not None:
+                vmc_speed = as_int(getattr(getattr(snapshot, "vmc", None), "spare_setpoint", None), default=0, min_value=0, max_value=5) or 0
+                t_out = as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None))
+                preset = getattr(snapshot, "climate_preset_mode", None) or HVACOperatingProfile.ECO
+                
+                bands = build_confort_zones(
+                    now=snapshot.timestamp,
+                    season_state=snapshot.season,
+                    indoor_zones=snapshot.indoor_zones,
+                    vmc_speed=int(vmc_speed),
+                    outdoor_temp=t_out,
+                    preset_mode=preset,
+                    policy_cfg=self.cpcfg,
+                    policy_layer=self.cpl,
+                )
+                derived = DecisionDerivedInputs(comfort_bands_by_zone=bands)
+        except Exception as e:
+            # Comfort-band failures must not break the plant tick.
+            log_exception(_LOGGER, "Comfort-band computation failed: %s", e)
+
+        return derived
+    
+    # ---- VMC integration -------------------------------------------------
+    
     def _enrich_vmc_signals(self, snapshot: PlantSnapshot, demand: PlantDemandSignals) -> None:
         """Fill VMC-related signals using the VMC domain policy.
 

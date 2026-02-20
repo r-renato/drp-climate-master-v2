@@ -139,7 +139,7 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
         
         # Comfort-band engine (policy + layer) cached at supervisor level.
         # Computed bands are *decision-time derived inputs* (not stored in PlantSnapshot).
-        self._comfort_policy_cfg, self._comfort_policy_layer = build_comfort_engine()
+        # self._comfort_policy_cfg, self._comfort_policy_layer = build_comfort_engine()
         self._plant_actuator = PlantActuator(hass=self._hass, runtime_cfg=coordinator.runtime_config)
         
         # self._engine = ControlEngine(hass=hass, coordinator=coordinator)
@@ -311,34 +311,34 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                     try:
                         log_debug(_LOGGER, "PlantSnapshot %s", snap)
                         
-                        derived: DecisionDerivedInputs | None = None
-                        try:
-                            # Compute comfort-band per zone as *derived decision input*.
-                            # The comfort band is not part of PlantSnapshot by design.
-                            if snap.indoor_zones and snap.season is not None:
-                                vmc_speed = as_int(getattr(getattr(snap, "vmc", None), "spare_setpoint", None), default=0, min_value=0, max_value=5) or 0
-                                t_out = as_float(getattr(getattr(snap, "global_outdoor_temperature", None), "value", None))
-                                preset = getattr(snap, "climate_preset_mode", None) or HVACOperatingProfile.COMFORT
-                                bands = build_confort_zones(
-                                    now=snap.timestamp,
-                                    runtime_config=self._coordinator.runtime_config,
-                                    season_state=snap.season,
-                                    indoor_zones=snap.indoor_zones,
-                                    vmc_speed=int(vmc_speed),
-                                    outdoor_temp=t_out,
-                                    preset_mode=preset,
-                                    policy_cfg=self._comfort_policy_cfg,
-                                    policy_layer=self._comfort_policy_layer,
-                                )
-                                derived = DecisionDerivedInputs(comfort_bands_by_zone=bands)
-                        except Exception as e:
-                            # Comfort-band failures must not break the plant tick.
-                            log_exception(_LOGGER, "Comfort-band computation failed: %s", e)
+                        # derived: DecisionDerivedInputs | None = None
+                        # try:
+                        #     # Compute comfort-band per zone as *derived decision input*.
+                        #     # The comfort band is not part of PlantSnapshot by design.
+                        #     if snap.indoor_zones and snap.season is not None:
+                        #         vmc_speed = as_int(getattr(getattr(snap, "vmc", None), "spare_setpoint", None), default=0, min_value=0, max_value=5) or 0
+                        #         t_out = as_float(getattr(getattr(snap, "global_outdoor_temperature", None), "value", None))
+                        #         preset = getattr(snap, "climate_preset_mode", None) or HVACOperatingProfile.COMFORT
+                        #         bands = build_confort_zones(
+                        #             now=snap.timestamp,
+                        #             runtime_config=self._coordinator.runtime_config,
+                        #             season_state=snap.season,
+                        #             indoor_zones=snap.indoor_zones,
+                        #             vmc_speed=int(vmc_speed),
+                        #             outdoor_temp=t_out,
+                        #             preset_mode=preset,
+                        #             policy_cfg=self._comfort_policy_cfg,
+                        #             policy_layer=self._comfort_policy_layer,
+                        #         )
+                        #         derived = DecisionDerivedInputs(comfort_bands_by_zone=bands)
+                        # except Exception as e:
+                        #     # Comfort-band failures must not break the plant tick.
+                        #     log_exception(_LOGGER, "Comfort-band computation failed: %s", e)
 
                         self._last_plant_decision = self._plant_decision_planner.plan(
                             snapshot=snap,
                             reason="tick",
-                            derived=derived,
+                            # derived=derived,
                         )
                         log_debug(_LOGGER, "PlantDecision %s", self._last_plant_decision)
 

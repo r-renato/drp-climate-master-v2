@@ -85,7 +85,7 @@ class ComplianceMode(StrEnum):
 
 
 @dataclass(slots=True)
-class PolicyConfig:
+class ConfortPolicyConfig:
     """Static configuration for the comfort policy layer."""
 
     # Context
@@ -209,11 +209,10 @@ MODE_CTRL_DEFAULTS: Dict[HVACOperatingProfile, float] = {
 # Implementation
 # -----------------------------
 
-
 class ComfortPolicyLayer:
     """Policy layer that selects comfort-model inputs."""
 
-    def __init__(self, cfg: PolicyConfig) -> None:
+    def __init__(self, cfg: ConfortPolicyConfig) -> None:
         self._cfg = cfg
 
     def decide(self, ctx: PolicyContext) -> PolicyDecision:
@@ -434,5 +433,5 @@ def build_policy_layer(
         v = str(climate_zone).strip().upper()
         cz = ClimateZoneIT.from_str(v) if ClimateZoneIT.is_member(v) else None
 
-    cfg = PolicyConfig(climate_zone=cz, compliance_mode=compliance_mode)
+    cfg = ConfortPolicyConfig(climate_zone=cz, compliance_mode=compliance_mode)
     return ComfortPolicyLayer(cfg)

@@ -5,19 +5,21 @@ import logging
 from datetime import datetime, timezone, time
 from typing import Dict
 
+from custom_components.drp_climate_master_v2.domain.models.plant import ZoneSnapshot
+
 from .....domain.enums import HVACOperatingProfile
 from .....helpers.utils import slugify
 from .....helpers.logger import log_debug
 
 from .calculator import ComfortBandCalculator
-from .policy_layer import ClimateZoneIT, ComfortPolicyLayer, ComplianceMode, PolicyConfig
+from .policy_layer import ClimateZoneIT, ComfortPolicyLayer, ComplianceMode, ConfortPolicyConfig
 from .model import ComfortBandResult
 
 _LOGGER = logging.getLogger(__name__)
 
-def build_comfort_engine() -> tuple[PolicyConfig, ComfortPolicyLayer]:
+def build_comfort_engine() -> tuple[ConfortPolicyConfig, ComfortPolicyLayer]:
     # 1) CONFIG policy (tarabile da YAML/config entry)
-    policy_cfg = PolicyConfig(
+    policy_cfg = ConfortPolicyConfig(
         climate_zone=ClimateZoneIT.D,
         # met/clo base (poi il policy layer può modificarli per profilo/stagione)
         base_met=1.10,
@@ -47,13 +49,12 @@ def build_comfort_engine() -> tuple[PolicyConfig, ComfortPolicyLayer]:
 def build_confort_zones(
     *,
     now: datetime | None = None,
-    runtime_config,
     season_state,
-    indoor_zones,        # dict[str, ZoneSnapshot]
+    indoor_zones: dict[str, ZoneSnapshot],        # dict[str, ZoneSnapshot]
     vmc_speed: int,
     outdoor_temp: float | None,
     preset_mode: HVACOperatingProfile,
-    policy_cfg: PolicyConfig | None = None,
+    policy_cfg: ConfortPolicyConfig | None = None,
     policy_layer: ComfortPolicyLayer | None = None,
 
 ) -> Dict[str, ComfortBandResult]:
@@ -69,7 +70,7 @@ def build_confort_zones(
     )
 
     # Le room_id usate dal tuo mapping devono combaciare con indoor_zones keys
-    room_names = [slugify(a.name) for a in runtime_config.climate.areas]
+    room_names = [slugify(a) for a in indoor_zones.keys()]
 
     bands = calculator.compute_many(
         now=(now or datetime.now(timezone.utc)),
