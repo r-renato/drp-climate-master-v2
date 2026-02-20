@@ -7,7 +7,7 @@ from ....domain.enums import HVACOperatingProfile
 
 from ..config import PlantPlannerConfig
 from ..contracts import PlantDemandSignals
-from ..zone.contracts import ZonesDecision
+from ..zone.model import ZonesDecision
 
 
 @dataclass(slots=True, frozen=True)

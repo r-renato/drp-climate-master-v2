@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List
 
-from .config import RcZoneParams
+from ..config import RcZoneParams
 
 
 @dataclass(slots=True)

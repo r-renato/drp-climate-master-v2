@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import fields as dc_fields, is_dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from ....helpers.num import quantile_linear
 
@@ -63,7 +63,7 @@ class DemandSignalsBuilder:
         self._zone_weight_fn = zone_weight_fn
         # self._percentile_sorted_fn = percentile_sorted_fn
 
-    def build(self, *, snapshot: PlantSnapshot) -> PlantDemandSignals:
+    def build(self, *, snapshot: PlantSnapshot, comfort_bands_by_zone: Optional[Mapping[str, Any]] = None) -> PlantDemandSignals:
         """
         Costruisce l'oggetto `PlantDemandSignals` a partire dallo snapshot impianto.
 
@@ -79,7 +79,7 @@ class DemandSignalsBuilder:
         Returns:
             Istanza di `PlantDemandSignals` pronta per l'uso nel planner.
         """
-        zc = self._compute_zone_comfort_cluster(snapshot)
+        zc = self._compute_zone_comfort_cluster(snapshot, comfort_bands_by_zone=comfort_bands_by_zone)
         zm = self._compute_zone_demand_metrics(zc)
         dp = self._compute_dew_point_cluster(snapshot, zc)
 
@@ -110,7 +110,7 @@ class DemandSignalsBuilder:
     # Cluster builders
     # -----------------
 
-    def _compute_zone_comfort_cluster(self, snapshot: PlantSnapshot) -> ZoneComfortCluster:
+    def _compute_zone_comfort_cluster(self, snapshot: PlantSnapshot, *, comfort_bands_by_zone: Optional[Mapping[str, Any]] = None) -> ZoneComfortCluster:
         """
         Calcola il cluster “comfort” sulle zone indoor.
 
@@ -171,7 +171,7 @@ class DemandSignalsBuilder:
             if t_meas is None:
                 t_meas = as_float(getattr(getattr(z, "temperature", None), "value", None))
 
-            band = getattr(z, "confort_band", None)
+            band = (comfort_bands_by_zone or {}).get(zone_key) if comfort_bands_by_zone is not None else getattr(z, "confort_band", None)
             t_min = as_float(getattr(band, "t_op_min", None))
             t_max = as_float(getattr(band, "t_op_max", None))
 

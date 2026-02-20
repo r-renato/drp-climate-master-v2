@@ -467,26 +467,26 @@ class TemperatureSensor(BaseSensor):
         
         data: dict[str, Any] = super().extra_state_attributes
 
-        if self._area is not None and self._zone_snapshot is not None:
-            cb = self._zone_snapshot.confort_band
-            if cb is not None:
-                data[ "air band" ] = (
-                    f"in band={fbool(cb.v_air_best >= cb.v_air_lo and cb.v_air_best <= cb.v_air_hi, on='yes', off='no')}, "
-                    f"speed={fnum(cb.speed, 0)}, "
-                    f"best={fnum(cb.v_air_best, 2)}, "
-                    f"low={fnum(cb.v_air_lo, 2)}, "
-                    f"hi={fnum(cb.v_air_hi, 2)}"
-                    )
-                data[ "t band" ] = (
-                    f"in band={fbool(cb.t_op is not None and cb.t_op >= cb.t_op_min and cb.t_op <= cb.t_op_max, on='yes', off='no')}, "
-                    f"t_op={fnum(cb.t_op)}, "
-                    f"t_min={fnum(cb.t_op_min)}, "
-                    f"t_max={fnum(cb.t_op_max)}, "
-                    f"[pmv={fnum(cb.pmv)}, ppd={fnum(cb.ppd)}%]"
-                )
-                data[ "pmv legend" ] = (
-                    "-3=molto freddo, -2=freddo, -1=leggermente freddo, 0=neutro, +1=leggermente caldo, +2=caldo, +3=molto caldo"
-                )
+        # if self._area is not None and self._zone_snapshot is not None and:
+        #     cb = self._zone_snapshot.confort_band
+        #     if cb is not None:
+        #         data[ "air band" ] = (
+        #             f"in band={fbool(cb.v_air_best >= cb.v_air_lo and cb.v_air_best <= cb.v_air_hi, on='yes', off='no')}, "
+        #             f"speed={fnum(cb.speed, 0)}, "
+        #             f"best={fnum(cb.v_air_best, 2)}, "
+        #             f"low={fnum(cb.v_air_lo, 2)}, "
+        #             f"hi={fnum(cb.v_air_hi, 2)}"
+        #             )
+        #         data[ "t band" ] = (
+        #             f"in band={fbool(cb.t_op is not None and cb.t_op >= cb.t_op_min and cb.t_op <= cb.t_op_max, on='yes', off='no')}, "
+        #             f"t_op={fnum(cb.t_op)}, "
+        #             f"t_min={fnum(cb.t_op_min)}, "
+        #             f"t_max={fnum(cb.t_op_max)}, "
+        #             f"[pmv={fnum(cb.pmv)}, ppd={fnum(cb.ppd)}%]"
+        #         )
+        #         data[ "pmv legend" ] = (
+        #             "-3=molto freddo, -2=freddo, -1=leggermente freddo, 0=neutro, +1=leggermente caldo, +2=caldo, +3=molto caldo"
+        #         )
 
         return data
     

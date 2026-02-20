@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping, Optional
 
 from ...domain.enums import HVACOperatingProfile
+from .zone.confort_band.model import ComfortBandResult
 
 
 @dataclass(slots=True, frozen=True)
@@ -30,3 +32,17 @@ class SeasonContext:
 
     runtime: str
     operative: str
+
+
+@dataclass(slots=True, frozen=True)
+class DecisionDerivedInputs:
+    """Input derivati calcolati *solo* in fase di decisione.
+
+    Questo oggetto esiste per evitare di "inquinare" i model osservativi (snapshot)
+    con output o parametri decisionali.
+
+    Attualmente include:
+    - comfort_bands_by_zone: banda di comfort per ciascuna zona (T_op_min/max, PMV/PPD, debug)
+    """
+
+    comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None

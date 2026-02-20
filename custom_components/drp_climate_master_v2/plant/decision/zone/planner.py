@@ -4,7 +4,7 @@ import itertools
 import math
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from homeassistant.util import dt as dt_util
 
@@ -12,9 +12,10 @@ from ....helpers.utils import as_float
 from ....helpers.sensor_aggregator import AggregatedValue
 from ....domain.models.plant import PlantSnapshot, ZoneSnapshot
 
-from .contracts import ZoneCommand, ZonesDecision
+from .model import ZoneCommand, ZonesDecision
 from .config import ControlConfig, MpcConfig
-from .rc_model import RcZoneModel
+from .confort_band_mpc.rc_model import RcZoneModel
+from .confort_band.model import ComfortBandResult
 
 def _binary_sequences(n: int) -> Iterable[list[int]]:
     """Generate all binary sequences of length n (as lists of 0/1)."""
@@ -55,9 +56,9 @@ class ZoneDecisionPlanner:
 
     cfg: ControlConfig = field(default_factory=ControlConfig)
 
-    def plan(self, *, snapshot: PlantSnapshot, reason: str) -> ZonesDecision:
+    def plan(self, *, snapshot: PlantSnapshot, reason: str, comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None) -> ZonesDecision:
         mpc_base = self.cfg.mpc
-        plan = self._plan_once(snapshot=snapshot, reason=reason, mpc=mpc_base, meta_extra={"mpc_retry": False})
+        plan = self._plan_once(snapshot=snapshot, reason=reason, mpc=mpc_base, comfort_bands_by_zone=comfort_bands_by_zone, meta_extra={"mpc_retry": False})
 
         n = len(plan.zones)
         if n == 0:
@@ -92,7 +93,8 @@ class ZoneDecisionPlanner:
         all_in_band = True
         for zn in plan.zones.keys():
             z = (snapshot.indoor_zones or {}).get(zn)
-            ok = getattr(getattr(z, "confort_band", None), "ok", None) if z else None
+            band = (comfort_bands_by_zone or {}).get(zn) if comfort_bands_by_zone is not None else (getattr(z, "confort_band", None) if z else None)
+            ok = getattr(band, "ok", None) if band is not None else None
             if ok is not True:
                 all_in_band = False
                 break
@@ -113,6 +115,7 @@ class ZoneDecisionPlanner:
                 snapshot=snapshot,
                 reason=reason,
                 mpc=mpc_retry,
+                comfort_bands_by_zone=comfort_bands_by_zone,
                 meta_extra={
                     "mpc_retry": True,
                     "mpc_retry_reason": "degenerate_full_on",
@@ -124,7 +127,7 @@ class ZoneDecisionPlanner:
 
         return plan
 
-    def _plan_once(self, *, snapshot: PlantSnapshot, reason: str, mpc: MpcConfig, meta_extra: dict[str, Any] | None = None) -> ZonesDecision:
+    def _plan_once(self, *, snapshot: PlantSnapshot, reason: str, mpc: MpcConfig, comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None, meta_extra: dict[str, Any] | None = None) -> ZonesDecision:
         ts = snapshot.timestamp if isinstance(snapshot.timestamp, datetime) else dt_util.utcnow()
         # Enforce timezone-aware timestamp (best effort)
         if isinstance(ts, datetime) and ts.tzinfo is None:
@@ -182,6 +185,7 @@ class ZoneDecisionPlanner:
                 windows_closed=snapshot.windows_close_state,
                 reason=reason,
                 mpc=mpc,
+                comfort_bands_by_zone=comfort_bands_by_zone,
             )
             if zd is not None:
                 plan.zones[zone_name] = zd
@@ -197,6 +201,7 @@ class ZoneDecisionPlanner:
         windows_closed: Optional[bool],
         reason: str,
         mpc: MpcConfig,
+        comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None,
     ) -> ZoneCommand | None:
         # We need a controlled variable: prefer operative temperature.
         t_meas = as_float(getattr(zone.t_op, "value", None))
@@ -206,8 +211,9 @@ class ZoneDecisionPlanner:
             return None
 
         # Comfort band bounds
-        t_min = as_float(getattr(getattr(zone, "confort_band", None), "t_op_min", None))
-        t_max = as_float(getattr(getattr(zone, "confort_band", None), "t_op_max", None))
+        band = (comfort_bands_by_zone or {}).get(zone_key) if comfort_bands_by_zone is not None else getattr(zone, "confort_band", None)
+        t_min = as_float(getattr(band, "t_op_min", None))
+        t_max = as_float(getattr(band, "t_op_max", None))
         if t_min is None or t_max is None:
             # No band -> skip MPC (or fall back to a simple deadband later)
             return ZoneCommand(

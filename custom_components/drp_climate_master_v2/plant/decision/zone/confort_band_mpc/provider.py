@@ -2,15 +2,16 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Mapping, Optional
 
 from homeassistant.components.climate.const import HVACMode
 
-from ....domain.models.plant import PlantSnapshot
+from .....domain.models.plant import PlantSnapshot
 
-from ..config import ZonesMpcConfig
-from .contracts import ZonesDecision
-from .planner import ZoneDecisionPlanner
+from ...config import ZonesMpcConfig
+from ..model import ZonesDecision
+from ..planner import ZoneDecisionPlanner
+from ..confort_band.model import ComfortBandResult
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class ZonesMpcProvider:
     cfg: ZonesMpcConfig = field(default_factory=ZonesMpcConfig)
     planner: ZoneDecisionPlanner = field(default_factory=ZoneDecisionPlanner)
 
-    def maybe_plan(self, *, snapshot: PlantSnapshot, reason: str) -> Optional[ZonesDecision]:
+    def maybe_plan(self, *, snapshot: PlantSnapshot, reason: str, comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None) -> Optional[ZonesDecision]:
         """Return a `ZonesDecision` when eligible, otherwise None."""
 
         if not bool(getattr(self.cfg, "enabled", True)):
@@ -72,7 +73,7 @@ class ZonesMpcProvider:
             return None
 
         try:
-            return self.planner.plan(snapshot=snapshot, reason=reason)
+            return self.planner.plan(snapshot=snapshot, reason=reason, comfort_bands_by_zone=comfort_bands_by_zone)
         except Exception:
             # Keep plant planner robust: a failure in zone MPC must not kill the whole tick.
             _LOGGER.exception("Zones MPC planning failed")

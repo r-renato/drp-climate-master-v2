@@ -11,7 +11,7 @@ from ....domain.models.plant import PlantSnapshot
 
 from ..config import PlantPlannerConfig
 from ..contracts import PlantDemandSignals, PlantMode
-from ..zone.contracts import ZonesDecision
+from ..zone.model import ZonesDecision
 
 from .gating import compute_gating
 

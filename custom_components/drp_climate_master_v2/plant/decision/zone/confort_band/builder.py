@@ -46,6 +46,7 @@ def build_comfort_engine() -> tuple[PolicyConfig, ComfortPolicyLayer]:
 
 def build_confort_zones(
     *,
+    now: datetime | None = None,
     runtime_config,
     season_state,
     indoor_zones,        # dict[str, ZoneSnapshot]
@@ -71,7 +72,7 @@ def build_confort_zones(
     room_names = [slugify(a.name) for a in runtime_config.climate.areas]
 
     bands = calculator.compute_many(
-        now=datetime.now(timezone.utc),
+        now=(now or datetime.now(timezone.utc)),
         season=season_state.season,          # accetta Seasons o OperativeSeason
         vmc_air_speed=int(vmc_speed),
         indoor_zones=indoor_zones,

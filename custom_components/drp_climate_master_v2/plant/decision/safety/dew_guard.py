@@ -63,13 +63,19 @@ class DewGuardPolicy:
             )
 
         if dp_max_c is None:
+            # FAIL-SAFE: without a dew-point signal we cannot guarantee condensation safety.
+            suggested = None
+            if mode == PlantMode.COOLING:
+                # If cooling was requested but we lack DP, degrade to a non-radiant mode.
+                # Prefer dehumidification assist (coil-based) when available, otherwise ventilation-only.
+                suggested = PlantMode.DEHUM_ASSIST if allow_dehum_assist else PlantMode.VENT_ONLY
             return DewGuardResult(
                 dp_max_c=None,
                 safe_required_c=None,
                 max_allowed_c=max_allowed,
                 radiant_allowed=False,
                 radiant_target_c=None,
-                suggested_mode=None,
+                suggested_mode=suggested,
                 reason="missing_dp_max",
             )
 

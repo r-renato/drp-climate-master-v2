@@ -13,8 +13,10 @@ from ...helpers.utils import as_float
 from ...domain.models.plant import PlantSnapshot
 from ...domain.enums import HVACOperatingProfile
 
-from .zone.contracts import ZonesDecision
-from .zone.provider import ZonesMpcProvider
+from .zone.model import ZonesDecision
+from .zone.confort_band_mpc.provider import ZonesMpcProvider
+
+from .context import DecisionDerivedInputs
 
 from .config import PlantPlannerConfig
 from .contracts import PlantDecision, PlantDemandSignals, PlantMode
@@ -26,6 +28,7 @@ from .commands.supply import SupplyCommandBuilder
 from .commands.vmc import VmcCommandBuilder
 from .mode.resolver import ModeResolver
 from .validation import validate_decision
+from .safety.dew_guard import DewGuardPolicy, DewGuardResult
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -81,6 +84,8 @@ class PlantDecisionPlanner:
     _supply_cmd: SupplyCommandBuilder = field(init=False, repr=False)
     _vmc_cmd: VmcCommandBuilder = field(init=False, repr=False)
 
+    _dew_guard: DewGuardPolicy = field(init=False, repr=False)
+
     # Zones MPC-lite integration (kept isolated in `zone/provider.py`)
     _zones_mpc: ZonesMpcProvider = field(init=False, repr=False)
 
@@ -99,6 +104,9 @@ class PlantDecisionPlanner:
         self._supply_cmd = SupplyCommandBuilder(self.cfg)
         self._vmc_cmd = VmcCommandBuilder(self.cfg, self._vmc_policy)
 
+        # Dew-point safety (single source of truth)
+        self._dew_guard = DewGuardPolicy(self.cfg)
+
         # Zones MPC provider (optional)
         self._zones_mpc = ZonesMpcProvider(cfg=self.cfg.zones_mpc)
 
@@ -108,6 +116,7 @@ class PlantDecisionPlanner:
         snapshot: PlantSnapshot,
         reason: str,
         zones_decision: Optional[ZonesDecision] = None,
+        derived: DecisionDerivedInputs | None = None,
     ) -> PlantDecision:
         ts = snapshot.timestamp if isinstance(snapshot.timestamp, datetime) else dt_util.utcnow()
         if isinstance(ts, datetime) and ts.tzinfo is None:
@@ -121,8 +130,10 @@ class PlantDecisionPlanner:
             dec.warnings.append("missing_outdoor_temperature")
             t_out = None
 
+        comfort_bands_by_zone = derived.comfort_bands_by_zone if derived is not None else None
+
         # --- Extract indoor demand signals
-        demand = self._signals.build(snapshot=snapshot)
+        demand = self._signals.build(snapshot=snapshot, comfort_bands_by_zone=comfort_bands_by_zone)
 
         # --- VMC domain: compute requests & DP setpoints (hysteresis-aware)
         self._enrich_vmc_signals(snapshot, demand)
@@ -130,7 +141,7 @@ class PlantDecisionPlanner:
         # --- Zones MPC-lite (optional): if not provided by caller, compute here.
         # Kept isolated behind a provider for maintainability.
         if zones_decision is None:
-            zones_decision = self._zones_mpc.maybe_plan(snapshot=snapshot, reason=f"{reason}/zones")
+            zones_decision = self._zones_mpc.maybe_plan(snapshot=snapshot, reason=f"{reason}/zones", comfort_bands_by_zone=comfort_bands_by_zone)
 
         # Expose zones plan in the decision object (single output artifact)
         dec.zones = zones_decision
@@ -157,17 +168,27 @@ class PlantDecisionPlanner:
         log_debug(_LOGGER, "Computed plant regime: %s", mode)
         dec.signals = demand
 
-        # --- HARD dew-guard: degrade cooling if safe radiant supply is unachievable.
-        # Kept here for now (safety pre-mode); can be extracted into a dedicated policy.
-        if dec.mode == PlantMode.COOLING and demand.dp_max_c is not None:
-            safe_required = float(demand.dp_max_c) + float(self.cfg.dp_guard.dp_margin_c) + float(self.cfg.dp_guard.delta_surface_water_c)
-            if safe_required > float(self.cfg.radiant.cool_supply_max_c) + 1e-6:
+        # --- Dew-point safety (single source of truth).
+        dew_guard: DewGuardResult = self._dew_guard.evaluate(
+            mode=dec.mode,
+            dp_max_c=getattr(demand, "dp_max_c", None),
+            allow_dehum_assist=bool(getattr(demand, "vmc_req_dehumidif", False)),
+        )
+
+        # If cooling was selected but radiant cooling is unsafe/unknown, degrade the plant mode.
+        if dec.mode == PlantMode.COOLING and dew_guard.suggested_mode is not None:
+            # Keep existing warning name for backward compatibility.
+            if dew_guard.reason == "unachievable":
                 dec.warnings.append("dew_guard_unachievable_switch_mode")
-                dec.mode = PlantMode.DEHUM_ASSIST if bool(demand.vmc_req_dehumidif) else PlantMode.VENT_ONLY
+            elif dew_guard.reason == "missing_dp_max":
+                dec.warnings.append("dew_guard_missing_dp_max_switch_mode")
+            else:
+                dec.warnings.append(f"dew_guard_{dew_guard.reason}_switch_mode")
+            dec.mode = dew_guard.suggested_mode
 
         # --- Build device commands for the chosen mode
         self._pdc_cmd.fill(dec, snapshot, t_out, demand)
-        self._supply_cmd.fill(dec, snapshot, demand, zones_decision)
+        self._supply_cmd.fill(dec, snapshot, demand, zones_decision, dew_guard=dew_guard)
         self._vmc_cmd.fill(dec, snapshot, demand)
 
         # --- Coherence validation (PlantMode invariants)

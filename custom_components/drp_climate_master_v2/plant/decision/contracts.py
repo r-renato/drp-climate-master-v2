@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from custom_components.drp_climate_master_v2.helpers.formatter import fpadstr
 
-from .zone.contracts import ZonesDecision
+from .zone.model import ZonesDecision
 
 class MetricBasis(str, Enum):
     WEIGHTED = "weighted"
@@ -666,7 +666,7 @@ class PlantDemandSignals:
             # riga doc sotto (se presente)
             d = fdoc(field_name)
             if d is not None:
-                lines.append(f"{fpadstr(fstr(""), pad_before=2, field_width=30)} :: {d}")
+                lines.append(f"{fpadstr(fstr(''), pad_before=2, field_width=30)} :: {d}")
 
         # NB: primo header "finto" per compatibilità con PlantDecision.__str__ che fa splitlines()[1:]
         lines: list[str] = ["PlantDemandSignals", "------------------------------------------------------------------", "Signals"]

@@ -8,7 +8,8 @@ from ....domain.models.plant import PlantSnapshot
 
 from ..config import PlantPlannerConfig
 from ..contracts import PlantDecision, PlantDemandSignals, PlantMode
-from ..zone.contracts import ZonesDecision
+from ..safety.dew_guard import DewGuardResult
+from ..zone.model import ZonesDecision
 
 
 def _mix_valve_target_pct(
@@ -53,6 +54,7 @@ class SupplyCommandBuilder:
         snapshot: PlantSnapshot,
         demand: PlantDemandSignals,
         zones_decision: Optional[ZonesDecision],
+        dew_guard: Optional[DewGuardResult] = None,
     ) -> None:
         cfg = self.cfg
         s = dec.supply
@@ -79,7 +81,6 @@ class SupplyCommandBuilder:
             s.direct_pump_on = False
 
         # Target mandata radiante (solo come segnale/telemetria, non è ancora un attuatore diretto)
-        dp_max = as_float(demand.dp_max_c)
         if dec.mode == PlantMode.HEATING:
             # Deriva un target radiante da PDC heating setpoint (offset mixing)
             if dec.pdc.heat_wot_c is not None:
@@ -87,31 +88,49 @@ class SupplyCommandBuilder:
                 s.rad_supply_target_c = float(clamp(t, cfg.radiant.heat_supply_min_c, cfg.radiant.heat_supply_max_c))
 
         elif dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST):
-            if dp_max is not None:
-                safe_required = float(dp_max) + float(cfg.dp_guard.dp_margin_c) + float(cfg.dp_guard.delta_surface_water_c)
-
-                # HARD guard: if required safe temp is above max allowed, do not run radiant cooling.
-                if safe_required > float(cfg.radiant.cool_supply_max_c) + 1e-6:
+            # Dew-point safety is evaluated upstream by DewGuardPolicy (single source of truth).
+            if dew_guard is None:
+                dec.warnings.append("dew_guard_missing_result_radiant_disabled")
+                s.adj_pump_on = False
+                s.rad_supply_target_c = None
+                s.debug.update(
+                    {
+                        "dew_guard_action": "disable_radiant",
+                        "dew_guard_reason": "missing_result",
+                    }
+                )
+            elif not dew_guard.radiant_allowed:
+                # FAIL-SAFE: if radiant is not allowed, force the mixing circuit off.
+                if dew_guard.reason == "missing_dp_max":
+                    dec.warnings.append("dew_guard_missing_dp_max_radiant_disabled")
+                elif dew_guard.reason == "unachievable":
                     dec.warnings.append("dew_guard_unachievable_radiant_disabled")
-                    s.adj_pump_on = False
-                    s.rad_supply_target_c = None
-                    s.debug.update(
-                        {
-                            "dew_guard_required_c": safe_required,
-                            "dew_guard_max_c": float(cfg.radiant.cool_supply_max_c),
-                            "dew_guard_action": "disable_radiant",
-                        }
-                    )
                 else:
-                    s.rad_supply_target_c = float(
-                        clamp(
-                            safe_required,
-                            cfg.radiant.cool_supply_min_c,
-                            cfg.radiant.cool_supply_max_c,
-                        )
-                    )
+                    dec.warnings.append(f"dew_guard_{dew_guard.reason}_radiant_disabled")
+
+                s.adj_pump_on = False
+                s.rad_supply_target_c = None
+                s.debug.update(
+                    {
+                        "dew_guard_dp_max_c": dew_guard.dp_max_c,
+                        "dew_guard_required_c": dew_guard.safe_required_c,
+                        "dew_guard_max_c": dew_guard.max_allowed_c,
+                        "dew_guard_action": "disable_radiant",
+                        "dew_guard_reason": dew_guard.reason,
+                        "dew_guard_suggested_mode": dew_guard.suggested_mode.value if dew_guard.suggested_mode else None,
+                    }
+                )
             else:
-                dec.warnings.append("missing_dp_max_for_dew_guard")
+                s.rad_supply_target_c = float(dew_guard.radiant_target_c) if dew_guard.radiant_target_c is not None else None
+                s.debug.update(
+                    {
+                        "dew_guard_dp_max_c": dew_guard.dp_max_c,
+                        "dew_guard_required_c": dew_guard.safe_required_c,
+                        "dew_guard_max_c": dew_guard.max_allowed_c,
+                        "dew_guard_action": "set_radiant_target",
+                        "dew_guard_reason": dew_guard.reason,
+                    }
+                )
 
         s.debug["any_zone_on"] = any_zone_on
 
