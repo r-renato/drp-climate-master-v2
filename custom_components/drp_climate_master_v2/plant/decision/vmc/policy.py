@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Optional
 
 from ....domain.enums import HVACOperatingProfile
@@ -16,11 +17,15 @@ from .state import VmcState
 class VmcDemand:
     """Policy output for VMC demand (requests + DP control thresholds)."""
 
-    # DP control
+    # DP control (commanded / effective on device)
     dp_sp_c: Optional[float]
+    ddp_cmd_c: Optional[float]
     dehum_on_thr_c: Optional[float]
     dehum_off_thr_c: Optional[float]
     dehum_feasible: Optional[bool]
+
+    # DP control (raw, pre-quantization)
+    dp_sp_raw_c: Optional[float]
 
     # Requests (towards hydronics / plant)
     req_heating: bool
@@ -78,10 +83,22 @@ class VmcPolicy:
         rh_target_pct = float(self.rh_target_pct(operative, profile))
 
         # dp setpoint + hysteresis thresholds
-        dp_sp_c = float(self.compute_dp_setpoint_c_from(t_ref_c, rh_target_pct))
-        ddp = float(self.cfg.dehum.setpoint_ddp_c)
+        # NOTE: the device may support ΔDP only in coarse steps (e.g. 1°C).
+        # We preserve the intended ON threshold by adjusting the *commanded*
+        # DP setpoint when quantizing ΔDP for the device.
+        dp_sp_raw_c = float(self.compute_dp_setpoint_c_from(t_ref_c, rh_target_pct))
+        ddp_policy = float(self.cfg.dehum.setpoint_ddp_c)
+        step = max(1e-9, float(getattr(self.cfg.dehum, "ddp_device_step_c", 1.0)))
+        if ddp_policy <= 0.0:
+            ddp_cmd = 0.0
+        else:
+            # Quantize UP to avoid triggering dehumidification earlier than intended.
+            ddp_cmd = step * math.ceil(ddp_policy / step - 1e-12)
+        # Adjust commanded DP setpoint so that dp_sp_cmd + ddp_cmd ~= dp_sp_raw + ddp_policy
+        dp_sp_cmd_c = float(dp_sp_raw_c) + float(ddp_policy) - float(ddp_cmd)
+        dp_sp_cmd_c = float(clamp(dp_sp_cmd_c, float(self.cfg.dehum.dp_sp_min_c), float(self.cfg.dehum.dp_sp_max_c)))
         hyst = max(0.0, float(self.cfg.dehum.hysteresis_c))
-        on_thr = float(dp_sp_c) + ddp
+        on_thr = float(dp_sp_cmd_c) + float(ddp_cmd)
         off_thr = float(on_thr) - hyst
 
         # Raw device request (best effort)
@@ -110,10 +127,12 @@ class VmcPolicy:
         req_water = bool(req_heat or req_cool or (req_dehum and bool(self.cfg.dehum.water_on_for_dehumid)))
 
         return VmcDemand(
-            dp_sp_c=float(dp_sp_c),
+            dp_sp_c=float(dp_sp_cmd_c),
+            ddp_cmd_c=float(ddp_cmd),
             dehum_on_thr_c=float(on_thr),
             dehum_off_thr_c=float(off_thr),
             dehum_feasible=dehum_feasible,
+            dp_sp_raw_c=float(dp_sp_raw_c),
             req_heating=req_heat,
             req_cooling=req_cool,
             req_dehumidif=req_dehum,

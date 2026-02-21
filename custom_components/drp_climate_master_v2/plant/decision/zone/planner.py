@@ -11,6 +11,7 @@ from homeassistant.util import dt as dt_util
 from ....helpers.utils import as_float
 from ....helpers.sensor_aggregator import AggregatedValue
 from ....domain.models.plant import PlantSnapshot, ZoneSnapshot
+from ....domain.enums import HVACOperatingProfile
 
 from .model import ZoneCommand, ZonesDecision
 from .config import ControlConfig, MpcConfig
@@ -56,9 +57,76 @@ class ZoneDecisionPlanner:
 
     cfg: ControlConfig = field(default_factory=ControlConfig)
 
+    def _resolve_mpc_outdoor_temp(self, snapshot: PlantSnapshot) -> tuple[float | None, str]:
+        """Resolve the outdoor temperature used by the RC model.
+
+        Prefer engineered/smoothed weather signals from the season subsystem (when present)
+        to avoid overly pessimistic predictions driven by transient raw sensor noise.
+        Fallback to the aggregated raw outdoor temperature from the plant snapshot.
+        """
+        try:
+            ws = getattr(getattr(snapshot, "season", None), "weather_signals", None)
+            t = as_float(getattr(ws, "t_smooth", None))
+            if t is not None:
+                return float(t), "season.weather_signals.t_smooth"
+            t = as_float(getattr(ws, "t_mean", None))
+            if t is not None:
+                return float(t), "season.weather_signals.t_mean"
+        except Exception:
+            pass  # best-effort only
+
+        av = getattr(snapshot, "global_outdoor_temperature", None)
+        t0 = as_float(getattr(av, "value", None))
+        if t0 is not None:
+            return float(t0), "global_outdoor_temperature"
+
+        return None, "missing"
+
+    def _profile_scaled_mpc(self, snapshot: PlantSnapshot, mpc: MpcConfig) -> tuple[MpcConfig, float]:
+        """Scale MPC weights/slack based on the user preset/profile.
+
+        This mirrors plant-level gating aggressiveness:
+          - BOOST -> tighter comfort, less energy penalty
+          - ECO/SLEEP/AWAY/VACATION -> larger slack, more energy penalty
+        """
+        preset = getattr(snapshot, "climate_preset_mode", None)
+        profile: HVACOperatingProfile | None = None
+
+        if isinstance(preset, HVACOperatingProfile):
+            profile = preset
+        elif preset is not None:
+            s = str(preset).strip()
+            for p in HVACOperatingProfile:
+                if str(p.value).lower() == s.lower() or str(p.name).lower() == s.lower():
+                    profile = p
+                    break
+
+        ctrl_aggr = float(
+            {
+                HVACOperatingProfile.COMFORT: 1.00,
+                HVACOperatingProfile.BOOST: 1.35,
+                HVACOperatingProfile.ECO: 0.85,
+                HVACOperatingProfile.SLEEP: 0.75,
+                HVACOperatingProfile.AWAY: 0.50,
+                HVACOperatingProfile.VACATION: 0.50,
+            }.get(profile, 1.0)
+        )
+        ctrl_eff = max(0.2, ctrl_aggr)
+
+        mpc_eff = replace(
+            mpc,
+            w_comfort=float(mpc.w_comfort) * ctrl_eff,
+            w_energy=float(mpc.w_energy) / ctrl_eff,
+            # Switching penalties are mostly about hydraulics; keep them stable for now.
+            w_switch=float(mpc.w_switch),
+            comfort_slack_c=float(getattr(mpc, "comfort_slack_c", 0.0) or 0.0) / ctrl_eff,
+        )
+        return mpc_eff, ctrl_aggr
+
     def plan(self, *, snapshot: PlantSnapshot, reason: str, comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None) -> ZonesDecision:
         mpc_base = self.cfg.mpc
-        plan = self._plan_once(snapshot=snapshot, reason=reason, mpc=mpc_base, comfort_bands_by_zone=comfort_bands_by_zone, meta_extra={"mpc_retry": False})
+        mpc_eff, ctrl_aggr = self._profile_scaled_mpc(snapshot, mpc_base)
+        plan = self._plan_once(snapshot=snapshot, reason=reason, mpc=mpc_eff, comfort_bands_by_zone=comfort_bands_by_zone, meta_extra={"mpc_retry": False, "mpc_ctrl_aggr": float(ctrl_aggr)})
 
         n = len(plan.zones)
         if n == 0:
@@ -162,14 +230,20 @@ class ZoneDecisionPlanner:
         )
 
         # Outdoor trajectory: first iteration uses a flat profile.
-        t_out0_av: AggregatedValue | None = getattr(snapshot, "global_outdoor_temperature", None)
-        t_out0 = as_float(getattr(t_out0_av, "value", None))
+        t_out0, t_out_src = self._resolve_mpc_outdoor_temp(snapshot)
         if t_out0 is None or (isinstance(t_out0, float) and (math.isnan(t_out0) or math.isinf(t_out0))):
             # fallback: do not attempt predictive control without outdoor context
             plan.warnings.append("missing_outdoor_temperature")
             return plan
-        if t_out0_av is not None and (getattr(t_out0_av, "is_stale", False) or getattr(t_out0_av, "is_insufficient", False)):
-            plan.warnings.append("outdoor_temperature_unreliable")
+
+        # If we had to fall back to the raw aggregated sensor, preserve the reliability warning.
+        t_out0_av: AggregatedValue | None = getattr(snapshot, "global_outdoor_temperature", None)
+        if t_out_src == "global_outdoor_temperature" and t_out0_av is not None:
+            if getattr(t_out0_av, "is_stale", False) or getattr(t_out0_av, "is_insufficient", False):
+                plan.warnings.append("outdoor_temperature_unreliable")
+
+        plan.meta["t_out_mpc_c"] = float(t_out0)
+        plan.meta["t_out_mpc_src"] = str(t_out_src)
 
         t_out_series: list[float] = [float(t_out0)] * int(mpc.horizon_steps)
 

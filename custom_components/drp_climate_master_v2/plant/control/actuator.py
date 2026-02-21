@@ -1,24 +1,14 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Any, Optional
 
 from homeassistant.core import HomeAssistant
-from homeassistant.util import dt as dt_util
 
 from ...devices.eneren_rer020i import EnerenRER020I
-
 from ...devices.aermec_hmi080 import AermecHMI080
-
 from ...domain.models.runtime_schema import RuntimeConfig
 
 from ..decision.contracts import PdcCommand, PlantDecision, VmcCommand
-
-from ...controller.coordinator import ClimateCoordinator
-from ...domain.models.plant import PlantSnapshot
-from ...helpers.utils import slugify
 
 _LOGGER = logging.getLogger(__name__)
 

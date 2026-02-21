@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from custom_components.drp_climate_master_v2.helpers.formatter import fpadstr
+from custom_components.drp_climate_master_v2.plant.decision.context import DecisionDerivedInputs
 
 from .zone.model import ZonesDecision
 
@@ -302,9 +303,25 @@ class PlantDemandSignals:
     vmc_dp_sp_c: Optional[float] = field(
         default=None,
         metadata={
-            "doc": "Computed VMC dew-point setpoint (from psychrometrics or config fallback).",
+            "doc": "Commanded VMC dew-point setpoint (device-effective, possibly adjusted for ΔDP quantization).",
             "unit": "°C",
-            "source": "DemandSignalsBuilder.VmcCluster",
+            "source": "VmcPolicy",
+        },
+    )
+    vmc_ddp_cmd_c: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": "Commanded VMC ΔDP (device step). Used with vmc_dp_sp_c to define ON/OFF thresholds.",
+            "unit": "°C",
+            "source": "VmcPolicy",
+        },
+    )
+    vmc_dp_sp_raw_c: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": "Raw (psychrometric) DP setpoint before ΔDP device-quantization mapping.",
+            "unit": "°C",
+            "source": "VmcPolicy",
         },
     )
     vmc_dehum_on_thr_c: Optional[float] = field(
@@ -742,7 +759,9 @@ class PlantDemandSignals:
         # Cluster: VMC thresholds (debug/trasparenza)
         # -------------------------
         lines += ["VMC thresholds"]
-        emit(lines, "VMC DP sp", "vmc_dp_sp_c", f"{fnum(self.vmc_dp_sp_c)} °C")
+        emit(lines, "VMC DP sp (cmd)", "vmc_dp_sp_c", f"{fnum(self.vmc_dp_sp_c)} °C")
+        emit(lines, "VMC ΔDP (cmd)", "vmc_ddp_cmd_c", f"{fnum(self.vmc_ddp_cmd_c, 0)} °C")
+        emit(lines, "VMC DP sp (raw)", "vmc_dp_sp_raw_c", f"{fnum(self.vmc_dp_sp_raw_c)} °C")
         emit(lines, "VMC dehum ON", "vmc_dehum_on_thr_c", f"{fnum(self.vmc_dehum_on_thr_c)} °C")
         emit(lines, "VMC dehum OFF", "vmc_dehum_off_thr_c", f"{fnum(self.vmc_dehum_off_thr_c)} °C")
 
@@ -850,6 +869,8 @@ class PlantDecision:
     pdc: PdcCommand = field(default_factory=PdcCommand)
     supply: SupplyCommand = field(default_factory=SupplyCommand)
     vmc: VmcCommand = field(default_factory=VmcCommand)
+
+    derived_input: DecisionDerivedInputs = field(default_factory=DecisionDerivedInputs)
 
     # Optional zones MPC plan produced/consumed by the plant-level orchestrator.
     # Kept here to allow a single decision object to carry *both* plant commands

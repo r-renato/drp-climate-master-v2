@@ -137,6 +137,9 @@ class PlantDecisionPlanner:
             t_out = None
 
         derived = self._conf_bands_derived(snapshot=snapshot)
+        if derived is not None:
+            dec.derived_input = derived
+
         comfort_bands_by_zone = derived.comfort_bands_by_zone if derived is not None else None
 
         # --- Extract indoor demand signals
@@ -261,6 +264,8 @@ class PlantDecisionPlanner:
 
         # PlantDemandSignals stores VMC policy outputs flat for logging/backward-compat.
         demand.vmc_dp_sp_c = vmc_dem.dp_sp_c
+        demand.vmc_ddp_cmd_c = getattr(vmc_dem, "ddp_cmd_c", None)
+        demand.vmc_dp_sp_raw_c = getattr(vmc_dem, "dp_sp_raw_c", None)
         demand.vmc_dehum_on_thr_c = vmc_dem.dehum_on_thr_c
         demand.vmc_dehum_off_thr_c = vmc_dem.dehum_off_thr_c
         demand.vmc_dehum_feasible = vmc_dem.dehum_feasible

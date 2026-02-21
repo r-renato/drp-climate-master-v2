@@ -26,7 +26,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 
-from .helpers.formatter import fbool, fnum
+from .helpers.formatter import fbool, fnum, fstr
 
 from .helpers.builders.config_slave_sensors import build_slave_sensor_defs
 from .plant.decision.contracts import PlantMode
@@ -91,6 +91,7 @@ async def async_setup_entry(
                 sensor = TemperatureSensor(
                     hass=hass,
                     coordinator=coordinator,
+                    supervisor=supervisor,
                     entry=entry,
                     name=cfg["name"],
                     area=cfg.get("area"),
@@ -439,6 +440,7 @@ class TemperatureSensor(BaseSensor):
         self,
         hass: HomeAssistant,
         coordinator: DataUpdateCoordinator[dict[str, Any]],
+        supervisor: ClimateSupervisor,
         entry: ConfigEntry,
         name: str,
         sensors: SensorPair,
@@ -455,38 +457,43 @@ class TemperatureSensor(BaseSensor):
             sensor_unit=temperature_unit,
         )
 
+        self._supervisor = supervisor
         self._sensors = sensors
 
     @property
     def extra_state_attributes(self):
         """Return the extra state attributes of the device."""
-        def fnum(x, nd=1):
-            return f"{x:.{nd}f}" if x is not None else "-"
-        def fbool(b, on="on", off="off"):
-            return on if b is True else (off if b is False else "-")
         
         data: dict[str, Any] = super().extra_state_attributes
 
-        # if self._area is not None and self._zone_snapshot is not None and:
-        #     cb = self._zone_snapshot.confort_band
-        #     if cb is not None:
-        #         data[ "air band" ] = (
-        #             f"in band={fbool(cb.v_air_best >= cb.v_air_lo and cb.v_air_best <= cb.v_air_hi, on='yes', off='no')}, "
-        #             f"speed={fnum(cb.speed, 0)}, "
-        #             f"best={fnum(cb.v_air_best, 2)}, "
-        #             f"low={fnum(cb.v_air_lo, 2)}, "
-        #             f"hi={fnum(cb.v_air_hi, 2)}"
-        #             )
-        #         data[ "t band" ] = (
-        #             f"in band={fbool(cb.t_op is not None and cb.t_op >= cb.t_op_min and cb.t_op <= cb.t_op_max, on='yes', off='no')}, "
-        #             f"t_op={fnum(cb.t_op)}, "
-        #             f"t_min={fnum(cb.t_op_min)}, "
-        #             f"t_max={fnum(cb.t_op_max)}, "
-        #             f"[pmv={fnum(cb.pmv)}, ppd={fnum(cb.ppd)}%]"
-        #         )
-        #         data[ "pmv legend" ] = (
-        #             "-3=molto freddo, -2=freddo, -1=leggermente freddo, 0=neutro, +1=leggermente caldo, +2=caldo, +3=molto caldo"
-        #         )
+        last_pd = self._supervisor.last_plant_decision
+        if last_pd is not None and last_pd.derived_input.comfort_bands_by_zone is not None and self._area is not None:
+            comfort_bands = last_pd.derived_input.comfort_bands_by_zone
+            
+            cb = comfort_bands.get(slugify(self._area), None)
+            if cb is not None:
+                data[ "air speed (m/s)" ] = (
+                    f"v_air best={fnum(cb.v_air_best, 3)}, "
+                    f"v_air lo={fnum(cb.v_air_lo, 3)}, "
+                    f"v_air hi={fnum(cb.v_air_hi, 3)}, "
+                    f"v_air draft={fnum(cb.v_air_draft, 3)}"
+                )
+                data[ "comfort band (°C)" ] = (
+                    f"t_op min={fnum(cb.t_op_min, 2)}, "
+                    f"t_op max={fnum(cb.t_op_max, 2)}"
+                )
+                data[ "evaluation" ] = (
+                    f"t_op={fnum(cb.t_op, 2)}, "
+                    f"PMV={fnum(cb.pmv, 2)}, "
+                    f"PPD={fnum(cb.ppd, 2)}, "
+                    f"in band={fbool(cb.ok, "True", "False")}, "
+                )
+                data[ "knobs" ] = (
+                    f"Humidity solve={fstr(cb.humidity_solve_mode)}, "
+                    f"PMV target={fnum(cb.pmv_center, 2)} ± {fnum(cb.pmv_band, 2)}, "
+                    f"met used={fnum(cb.met_used, 2)}, "
+                    f"clo used={fbool(cb.clo_used, "True", "False")}, "
+                )
 
         return data
     

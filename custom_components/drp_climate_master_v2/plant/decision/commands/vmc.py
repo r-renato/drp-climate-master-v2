@@ -57,7 +57,7 @@ class VmcCommandBuilder:
             getattr(demand, "vmc_dp_sp_c", None)
             or self.vmc_policy.compute_dp_setpoint_c_from(t_ref_c, rh_target_pct)
         )
-        ddp_sp_c = float(cfg.vmc.dehum.setpoint_ddp_c)
+        ddp_sp_c = float(getattr(demand, "vmc_ddp_cmd_c", None) or cfg.vmc.dehum.setpoint_ddp_c)
 
         dp_current = getattr(demand, "dp_dehum_c", None) or demand.dp_max_c
         boost_active = bool(demand.vmc_req_heating or demand.vmc_req_cooling or demand.vmc_req_dehumidif)
@@ -124,11 +124,11 @@ class VmcCommandBuilder:
 
         if dp_current_c is not None:
             delta = float(dp_current_c) - float(dp_setpoint_c)
-            if delta > float(self.cfg.vmc.speed.dp_boost_step1_c):
+            if delta >= float(self.cfg.vmc.speed.dp_boost_step1_c):
                 sp += 1
-            if delta > float(self.cfg.vmc.speed.dp_boost_step2_c):
+            if delta >= float(self.cfg.vmc.speed.dp_boost_step2_c):
                 sp += 1
-            if delta > float(self.cfg.vmc.speed.dp_boost_step3_c):
+            if delta >= float(self.cfg.vmc.speed.dp_boost_step3_c):
                 sp += 1
 
         if boost:

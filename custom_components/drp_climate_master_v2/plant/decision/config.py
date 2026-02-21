@@ -519,8 +519,15 @@ class VmcDehumConfig:
         Baseline dew point setpoint (°C).
 
     setpoint_ddp_c:
-        Delta-dew-point target (°C) used by some strategies to define DP_SP
-        relative to measured DP.
+        Delta-dew-point target (°C) used by the *policy* layer to build the
+        dehumidification ON/OFF thresholds around the DP setpoint.
+
+    ddp_device_step_c:
+        Quantization step (°C) supported by the VMC device for ΔDP.
+        Example: if the device only supports integer ΔDP, set this to 1.0.
+        The policy will map the *desired* ΔDP to a device-compatible command
+        by adjusting the commanded DP setpoint so that the effective ON
+        threshold is preserved as closely as possible.
 
     hysteresis_c:
         Hysteresis (°C) applied around dew point thresholds to avoid flapping.
@@ -566,6 +573,7 @@ class VmcDehumConfig:
 
     setpoint_dp_c: float = 12.0
     setpoint_ddp_c: float = 0.3
+    ddp_device_step_c: float = 1.0
     hysteresis_c: float = 0.2
 
     dp_control_percentile: float = 0.8
