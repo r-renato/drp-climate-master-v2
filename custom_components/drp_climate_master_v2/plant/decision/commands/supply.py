@@ -59,9 +59,13 @@ class SupplyCommandBuilder:
         cfg = self.cfg
         s = dec.supply
 
-        # Heuristic: circuito radiante (mix) attivo se stiamo in heating/cooling e almeno una zona è pianificata ON
+        # Heuristic: circuito radiante (mix) attivo se abbiamo almeno una elettrovalvola "ON".
+        # Preferiamo la sorgente unificata `dec.valves` (builder dedicato), altrimenti
+        # ricadiamo su MPC/fallback per retro-compatibilità.
         any_zone_on = False
-        if zones_decision:
+        if getattr(dec, "valves", None) is not None and bool(getattr(dec.valves, "any_open", False)):
+            any_zone_on = True
+        elif zones_decision:
             any_zone_on = any(v.valve_on is True for v in zones_decision.zones.values())
         else:
             # fallback: se c'è deficit/surplus, assumiamo che almeno una zona debba essere aperta

@@ -843,6 +843,29 @@ class SupplyCommand:
 
 
 @dataclass(slots=True)
+class ZoneValvesCommand:
+    """Comandi desiderati per le elettrovalvole di zona (collettori radianti).
+
+    Questo oggetto rappresenta **solo** l'intento logico (zona -> ON/OFF),
+    senza contenere dettagli Home Assistant (entity_id). La mappatura tra
+    zona logica e entity_id è responsabilità del layer di attuazione.
+
+    Note termotecniche
+    ------------------
+    - Le elettrovalvole elettrotermiche hanno tipicamente tempi di apertura
+      dell'ordine di 60-120s: per questo la logica di attuazione può applicare
+      uno staging (valvole -> pompe) senza bloccare il loop.
+    """
+
+    by_zone: Dict[str, bool] = field(default_factory=dict)
+    debug: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def any_open(self) -> bool:
+        return any(bool(v) for v in (self.by_zone or {}).values())
+
+
+@dataclass(slots=True)
 class VmcCommand:
     """Comandi desiderati per la VMC."""
 
@@ -868,6 +891,7 @@ class PlantDecision:
 
     pdc: PdcCommand = field(default_factory=PdcCommand)
     supply: SupplyCommand = field(default_factory=SupplyCommand)
+    valves: ZoneValvesCommand = field(default_factory=ZoneValvesCommand)
     vmc: VmcCommand = field(default_factory=VmcCommand)
 
     derived_input: DecisionDerivedInputs = field(default_factory=DecisionDerivedInputs)
@@ -1054,6 +1078,30 @@ class PlantDecision:
             ]
             if getattr(self.pdc, "debug", None):
                 lines += [f"  Debug              :: {self.pdc.debug}"]
+        else:
+            lines += [f"  -"]
+        lines += [f"------------------------------------------------------------------"]
+
+        # --- Valves (zone electrovalves) ---
+        lines += [f"Valves"]
+        if getattr(self, "valves", None) is not None:
+            try:
+                byz = getattr(self.valves, "by_zone", None) or {}
+                n_z = len(byz)
+                n_on = sum(1 for v in byz.values() if bool(v))
+                items = sorted(byz.items(), key=lambda kv: str(kv[0]))
+                preview = items[:8]
+                more = f" (+{len(items) - 8})" if len(items) > 8 else ""
+                zs = ", ".join(f"{k}={'On' if v else 'Off'}" for k, v in preview)
+                zs = (zs + more) if zs else "-"
+                lines += [
+                    f"  Zones              :: {n_z} (on={n_on}, off={max(0, n_z - n_on)})",
+                    f"  States             :: {zs}",
+                ]
+                if getattr(self.valves, "debug", None):
+                    lines += [f"  Debug              :: {self.valves.debug}"]
+            except Exception:
+                lines += [f"  -"]
         else:
             lines += [f"  -"]
         lines += [f"------------------------------------------------------------------"]

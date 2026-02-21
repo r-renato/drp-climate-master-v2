@@ -251,7 +251,12 @@ class ZoneDecisionPlanner:
             plan.warnings.append("missing_indoor_zones")
             return plan
 
+        skipped_no_valve = 0
         for zone_name, z in snapshot.indoor_zones.items():
+            # Plan only zones that appear to be actuated by a radiant valve.
+            if getattr(z, "radiant_valve", None) is None:
+                skipped_no_valve += 1
+                continue
             zd = self._plan_zone(
                 zone=z,
                 zone_key=zone_name,
@@ -263,6 +268,9 @@ class ZoneDecisionPlanner:
             )
             if zd is not None:
                 plan.zones[zone_name] = zd
+
+        if skipped_no_valve:
+            plan.meta["skipped_no_radiant_valve"] = int(skipped_no_valve)
 
         return plan
 

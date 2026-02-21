@@ -19,6 +19,8 @@ def validate_decision(dec: PlantDecision) -> list[str]:
             w.append("incoherent_off_pumps_on")
         if bool(getattr(dec.vmc, "power", False)):
             w.append("incoherent_off_vmc_power_true")
+        if bool(getattr(getattr(dec, "valves", None), "any_open", False)):
+            w.append("incoherent_off_valves_open")
 
     if dec.mode == PlantMode.VENT_ONLY:
         if bool(getattr(dec.pdc, "power", False)):
@@ -26,6 +28,8 @@ def validate_decision(dec: PlantDecision) -> list[str]:
         # Pumps should generally be off in vent-only (unless architecture requires otherwise)
         if bool(getattr(dec.supply, "adj_pump_on", False)) or bool(getattr(dec.supply, "direct_pump_on", False)):
             w.append("incoherent_vent_only_pumps_on")
+        if bool(getattr(getattr(dec, "valves", None), "any_open", False)):
+            w.append("incoherent_vent_only_valves_open")
 
     if dec.mode == PlantMode.HEATING:
         if getattr(dec.pdc, "mode", None) not in (None, "heating"):

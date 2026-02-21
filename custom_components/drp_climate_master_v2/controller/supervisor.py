@@ -351,7 +351,7 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                         # plan = self._last_zones_decision
 
 
-                        await self._plant_actuator.async_apply(decision=self._last_plant_decision)
+                        await self._plant_actuator.async_apply(snapshot=snap, decision=self._last_plant_decision)
 
                         # dash = build_dashboard(snap, self._last_zones_decision, self._last_plant_decision)
                         # log_debug(_LOGGER, "\n%s", render_dashboard_text(dash))

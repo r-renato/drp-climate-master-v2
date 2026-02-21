@@ -181,7 +181,7 @@ async def set_entity_bool(hass: HomeAssistant, *, entity_id: str, value: bool) -
     else:
         # Se è già nello stato desiderato, non fare nulla
         if cur.state == desired_state:
-            _LOGGER.debug("No-op: %s already %s", entity_id, desired_state)
+            # _LOGGER.debug("No-op: %s already %s", entity_id, desired_state)
             return False
 
         # Se è unknown/unavailable, spesso ha senso provare comunque a comandarla

@@ -27,6 +27,7 @@ from .vmc.policy import VmcPolicy, VmcState
 
 from .commands.pdc import PdcCommandBuilder
 from .commands.supply import SupplyCommandBuilder
+from .commands.valves import ZoneValvesCommandBuilder
 from .commands.vmc import VmcCommandBuilder
 from .mode.resolver import ModeResolver
 from .validation import validate_decision
@@ -85,6 +86,7 @@ class PlantDecisionPlanner:
 
     _mode_resolver: ModeResolver = field(init=False, repr=False)
     _pdc_cmd: PdcCommandBuilder = field(init=False, repr=False)
+    _valves_cmd: ZoneValvesCommandBuilder = field(init=False, repr=False)
     _supply_cmd: SupplyCommandBuilder = field(init=False, repr=False)
     _vmc_cmd: VmcCommandBuilder = field(init=False, repr=False)
 
@@ -107,6 +109,7 @@ class PlantDecisionPlanner:
 
         # Device command builders
         self._pdc_cmd = PdcCommandBuilder(self.cfg)
+        self._valves_cmd = ZoneValvesCommandBuilder(self.cfg)
         self._supply_cmd = SupplyCommandBuilder(self.cfg)
         self._vmc_cmd = VmcCommandBuilder(self.cfg, self._vmc_policy)
 
@@ -197,6 +200,7 @@ class PlantDecisionPlanner:
 
         # --- Build device commands for the chosen mode
         self._pdc_cmd.fill(dec, snapshot, t_out, demand)
+        self._valves_cmd.fill(dec, snapshot, demand, zones_decision, dew_guard=dew_guard)
         self._supply_cmd.fill(dec, snapshot, demand, zones_decision, dew_guard=dew_guard)
         self._vmc_cmd.fill(dec, snapshot, demand)
 

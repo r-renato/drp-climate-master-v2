@@ -21,12 +21,15 @@ class AermecHMI080(HeatPumpDevice):
         self._runtime_cfg = runtime_cfg
         self._heat_pump = runtime_cfg.climate.devices.radiant
 
-    async def async_set_power(self, *, fm_power: Optional[bool] = None, power: Optional[bool] = None) -> None: 
+    async def async_set_power(self, *, fm_power: Optional[bool] = None, power: Optional[bool] = None) -> None:
+        changed_fm = False
         if fm_power is not None and self._heat_pump is not None and self._heat_pump.fm_power is not None:
-            await set_entity_bool(hass=self._hass, entity_id=self._heat_pump.fm_power, value=fm_power)
+            # set_entity_bool returns True only if a service call was actually made (state change)
+            changed_fm = await set_entity_bool(hass=self._hass, entity_id=self._heat_pump.fm_power, value=fm_power)
 
-            if power is not None and self._heat_pump is not None and self._heat_pump.power is not None:
-                await asyncio.sleep(10)
+        # If we had to toggle FM power, give the controller some time before toggling main power.
+        if changed_fm and power is not None and self._heat_pump is not None and self._heat_pump.power is not None:
+            await asyncio.sleep(10)
 
         if power is not None and self._heat_pump is not None and self._heat_pump.power is not None:
             await set_entity_bool(hass=self._hass, entity_id=self._heat_pump.power, value=power)
@@ -62,8 +65,6 @@ class AermecHMI080(HeatPumpDevice):
 
         if dt is not None and self._heat_pump is not None and self._heat_pump.cooling_dt_setpoint is not None:
             await set_entity_number(hass=self._hass, entity_id=self._heat_pump.cooling_dt_setpoint.actuator, value=dt)
-
-
 
 
 
