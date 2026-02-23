@@ -5,7 +5,7 @@ from datetime import date, datetime
 import calendar
 import logging
 
-from ...helpers.timeutils import to_local_date
+from ..timeutils import to_local_date
 from ...domain.models.season import SeasonWindow
 from ...domain.models.season import Seasons
 from ..logger import log_warning

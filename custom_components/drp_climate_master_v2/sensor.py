@@ -743,7 +743,7 @@ class SeasonSensor(BaseSensor):
             weather = season.weather
             
             data["window"] = f"{window.start.isoformat()} - {window.end.isoformat()}"
-            data["window days"] = f"{season.days} passed={season.passed} remaining={season.remaining}"
+            data["days"] = f"{season.days} passed={season.passed} remaining={season.remaining}"
 
             data["weather season"] = (
                 f"{weather.season} [anomaly={weather.anomaly}, score={fnum(weather.anomaly_score)}] "

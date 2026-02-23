@@ -16,8 +16,8 @@ from .coordinator import ClimateCoordinator
 from ..domain.models.season import SeasonState
 from ..domain.models.weather import Forecast, Historical
 
-from ..helpers.season.season_calendar import CalendarSeason
-from ..helpers.season.season_weather import MeteoContiguousSeasonModel, forecast_legacy_to_native
+from ..helpers.season.season_weather_calendar import CalendarSeason
+from ..helpers.season.season_weather_forecast import MeteoContiguousSeasonModel, forecast_legacy_to_native
 from ..helpers.logger import log_debug, log_exception, log_info, log_warning
 from ..helpers.timeutils import as_iso_local
 from ..helpers.cache import JsonObject, Codec, PersistentCache
@@ -364,10 +364,25 @@ class WeatherCoordinator(IntervalGatedSchedulerBase):
     # -----------------------------
 
     async def _async_season_detect(self) -> None:
-        today = date.today()
+        today = dt_util.now().date()
 
-        season_calendar = CalendarSeason()
-        current_season = (season_calendar.windows())[season_calendar.season_for(today)]
+        season_calendar = CalendarSeason(hemisphere="north")
+
+        current_window = None
+        for y in (today.year - 1, today.year, today.year + 1):
+            wins = season_calendar.with_year(y).windows()
+            current_window = next((w for w in wins.values() if w.contains(today)), None)
+            if current_window:
+                break
+
+        if current_window is None:
+            year = today.year + (1 if today.month == 12 else 0)
+
+            season_calendar = CalendarSeason(year=year, hemisphere="north")
+            current_window = season_calendar.windows()[season_calendar.season_for(today)] # fallback
+
+        # current_window è un SeasonWindow corretto (start/end e season coerenti con today)
+        current_season = current_window
 
         historical = await self._cache.async_dump()
 
