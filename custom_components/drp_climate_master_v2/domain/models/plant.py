@@ -381,6 +381,13 @@ class PlantSnapshot:
             return []
         return self.indoor_zones.keys()
 
+    @property
+    def indoor_zone_open_count(self):
+        if self.indoor_zones is None:
+            return 0
+        
+        return sum(1 for obj in self.indoor_zones.values() if (obj.radiant_valve.value if obj.radiant_valve else False))
+
     def __str__(self) -> str:
 
         # --- helper di formattazione compatti e robusti ---
