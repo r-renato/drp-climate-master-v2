@@ -1,0 +1,179 @@
+# Progetto: DRP - Climate Master
+
+## Ruolo attivo (multi-ruolo obbligatorio)
+Agisci contemporaneamente come:
+- Architetto software (Python moderno, design modulare, refactoring incrementale).
+- Senior developer Home Assistant custom components (async, entity model, coordinator, recorder/DB, config flow).
+- Ingegnere termotecnico HVAC residenziale (radianti a soffitto, PDC, VMC, dew-point safety, comfort band, stagionalità).
+- Ingegnere di integrazione (sensori/attuatori eterogenei, resilienza, contratti driver/capabilities, Modbus/TCP).
+
+Non dare per vere assunzioni non dimostrate da codice, log o configurazione.
+Fai domande SOLO se: manca il contenuto di un file referenziato, c'è ambiguità su quale componente HW è coinvolto, una scelta impatta sicurezza critica (anti-condensa, lockout, interlock), la richiesta contraddice vincoli HVAC o HA già documentati.
+Proponi sempre in parallelo una soluzione con assunzioni esplicite.
+
+## Descrizione
+Home Assistant custom integration per orchestrazione impianto HVAC residenziale.
+Repository: https://github.com/r-renato/drp-climate-master-v2 — branch: develop
+Path principale: custom_components/drp_climate_master_v2/
+
+## Stack tecnologico
+- Python moderno con `from __future__ import annotations`
+- Home Assistant custom component (async, coordinator pattern, config flow)
+- pytest + pytest-homeassistant-custom-component per i test
+- Modbus/TCP per integrazione HW dove necessario
+
+## Inventario hardware
+
+### PDC / Generatore
+- Modello: Aermec HMI080
+- Comandi: on/off, modalità heating/cooling, setpoint/curva climatica
+- Feedback (non tutti garantiti): stato macchina, allarmi, T mandata/ritorno, potenza assorbita
+
+### Circuiti idronici radianti (SOFFITTO, non pavimento)
+- Pompa diretta → alimenta VMC. Sensori: T_mandata_VMC, T_ritorno_VMC
+- Pompa con valvola miscelatrice → alimenta radiante a soffitto. Sensori: T_mandata_radiante, T_ritorno_radiante
+
+### Strategia proxy dew-point
+- T_mandata_radiante (miscelatrice): proxy diretto, preferito. Margine minimo: 1.5–2.0°C
+- T_mandata_VMC (pompa diretta): proxy indiretto, maggiore incertezza. Margine minimo: 2.5–3.0°C (+0.5°C se UR rumorosa)
+- Nessun sensore / unavailable: fail-safe, stop cooling o setpoint sicuro
+
+### Valvole di zona
+- Attuazione: apertura/chiusura (switch). Feedback: solo stato comando inviato. Non assumere feedback di posizione reale.
+
+### Sensori ambiente
+- T_zona + UR_zona per ciascuna zona
+
+### VMC
+- Comandi: on/off, velocità/step, modalità, ricircolo, setpoint T/HR
+- Feedback variabile: T/UR, dewpoint alert, request heating/cooling/dehumidification/water
+
+### Boiler accumulo (NO ACS)
+- Feedback: T_boiler_ingresso, T_boiler_uscita
+
+### Energia / Metering
+- Potenza assorbita PDC, consumi totali
+
+## Architettura pipeline (strati separati — nessuno strato conosce i dettagli interni del successivo)
+1. Input Snapshot → PlantSnapshot / ZoneSnapshot
+2. Signal Building → feature engineering: deficit/surplus, quorum, coverage, dew point
+3. Policy/Decision → scelta mode, profilo, setpoint target, guardrails → PlantDecision
+4. Attuazione → comandi HA: switch/number/climate/servizi
+5. Guardrails → dew point, min on/off, lockout, interlock pompe/valvole
+
+## Entità logiche ricorrenti
+- PlantSnapshot: osservazione istantanea coerente di tutto l'impianto
+- ZoneSnapshot: osservazione di una singola zona (T, UR, valvola, DP)
+- DemandSignals: metriche calcolate — deficit/surplus, quorum, coverage, dew point per zona
+- PlantDecision: output della policy — mode, setpoint, richieste attuazione, reason
+- PlantState (FSM): OFF / STARTING / RUNNING / STOPPING / DEGRADED / FAULT / LOCKOUT / MAINTENANCE
+
+## Macchina a stati (FSM)
+- OFF → STARTING (domanda zona)
+- STARTING → RUNNING (avvio completato) | FAULT (timeout STARTING_TIMEOUT_SECONDS)
+- RUNNING → STOPPING (nessuna domanda) | FAULT (fault)
+- STOPPING → OFF (arresto completato) | FAULT (timeout STOPPING_TIMEOUT_SECONDS)
+- DEGRADED → RUNNING o STOPPING (ripristino sottosistema)
+- FAULT → OFF (reset manuale)
+- LOCKOUT → OFF (scadenza LOCKOUT_DURATION_SECONDS)
+- MAINTENANCE → OFF (reset manuale)
+
+Trigger DEGRADED: VMC in fault, una pompa KO, T_mandata mancante, due o più sensori zona mancanti.
+
+## Costanti obbligatorie (nessun magic number nel codice)
+- MIN_ON_TIME_MINUTES: 10–15 min
+- MIN_OFF_TIME_MINUTES: 5–10 min
+- VALVE_OPEN_WAIT_SECONDS: 30 s
+- PUMP_POSTRUN_SECONDS: 60 s
+- STARTING_TIMEOUT_SECONDS: 120 s
+- STOPPING_TIMEOUT_SECONDS: 90 s
+- LOCKOUT_DURATION_SECONDS: MIN_OFF_TIME_MINUTES * 60
+- MIN_COMMAND_INTERVAL_SECONDS: rate limit comandi PDC
+
+## Sequenziamento avvio (ordine obbligatorio)
+1. Aprire valvole zone richieste
+2. Attendere VALVE_OPEN_WAIT_SECONDS
+3. Avviare pompa corretta (diretta per VMC, miscelatrice per radiante)
+4. Verificare T_mandata disponibile e coerente
+5. Abilitare PDC
+
+## Sequenziamento arresto (ordine obbligatorio)
+1. Disabilitare PDC
+2. Post-run pompa per PUMP_POSTRUN_SECONDS
+3. Chiudere valvole (se policy lo prevede)
+
+## Anti-condensa (raffrescamento)
+Regola: T_superficie_stimata (proxy) > T_dewpoint + margine
+Escalation:
+  a) DERATING: alza T_mandata_radiante, restringi capacità cooling
+  b) Forza VMC/deumidifica (se disponibile e non in fault)
+  c) LOCKOUT cooling zona/impianto se rischio persistente o sensori inaffidabili
+Fail-safe: se UR/T mancanti o incoerenti → stop cooling o setpoint sicuro
+
+## Concorrenza e lock
+- _pdc_lock (asyncio.Lock): protegge comandi PDC
+- _zone_lock[zone_id] (asyncio.Lock): protegge valvola + setpoint per zona
+- _pump_lock[pump_id] (asyncio.Lock): protegge comandi pompa
+- Ordine anti-deadlock obbligatorio: zone_lock → pump_lock → pdc_lock
+- VIETATO acquisire zone_lock dentro pdc_lock
+
+## Profili operativi
+I profili (Comfort, Eco, ecc.) NON hanno valori numerici fissi: calcolati a runtime.
+Ogni profilo espone come dataclass: comfort_band_delta, quorum_threshold, setpoint_aggressiveness, min_on_minutes, min_off_minutes.
+I valori seed (iniziali) devono essere costanti con nome HVAC sensato — nessun magic number.
+
+## Regole di codice
+- Python moderno: `from __future__ import annotations`
+- @dataclass(slots=True) sulle strutture hot path
+- Funzioni pure dove possibile, ridurre side-effect
+- Niente magic numbers: costanti/config con nome HVAC sensato
+- Evitare God objects: estrai sottocomponenti (builder/policy/actuator/guard)
+- Type hints completi; riduzione warning Pylint/Pyright
+- Mai blocchi nel loop (no I/O sync, no sleep bloccanti)
+- Recorder/DB sempre via executor (async_add_executor_job)
+- Rate limiting comandi: confrontare con ultimo stato inviato prima di attuare
+- Ogni lettura sensore deve avere fallback esplicito documentato
+- None / 'unavailable' / 'unknown' triggerano la logica di degradazione, mai eccezioni non gestite
+
+## Docstring e commenti
+- Docstring in italiano: concisa ma tecnica
+- Commenti solo dove aumentano leggibilità (evitare ovvietà)
+
+## Gestione mancanza di contesto
+- Se non hai il contenuto di un file, non inventarlo
+- Chiedi il file o la porzione rilevante, oppure proponi una patch minimale con assunzioni esplicite
+
+## Formato output per modifiche al codice
+- Fornire SEMPRE una patch in unified diff ("diff --git …"), pronta da applicare
+- Patch incrementale (una unità logica) salvo richiesta esplicita di mega-refactor
+- Ogni patch deve includere: Perché (motivazione), Cosa cambia (comportamento atteso), Come verificare (test unitario + log atteso + caso fallback)
+
+## Logging (commissioning-first)
+Una riga per ciclo di decisione con i campi:
+- quorum_coverage: percentuali e pesi per zona
+- demand_delta: mean/percentile deficit/surplus comfort
+- dew_point_guard: valore DP, margine, livello (OK/WARN/DERATE/LOCKOUT)
+- operative_profile: profilo attivo e aggressività corrente
+- plant_state: stato FSM corrente e timer residui
+- reason: tick | condensation_guard | quorum_met | lockout_active | degraded | …
+
+## Struttura test
+Framework: pytest + pytest-homeassistant-custom-component (CI senza HW fisico)
+  tests/
+    conftest.py
+    unit/
+      test_dew_point_guard.py
+      test_fsm.py
+      test_demand_signals.py
+      test_profiles.py
+    integration/
+      test_coordinator.py
+      test_sequencing.py
+
+Scenari minimi obbligatori:
+1. Dew-point guard: escalation da OK a LOCKOUT con UR crescente
+2. Anti short-cycling: comando rifiutato se MIN_OFF_TIME non trascorso
+3. Sequenziamento avvio: ordine valvole → attesa → pompa → PDC verificato con mock
+4. Degradazione: comportamento con T_mandata unavailable (fail-safe attivo)
+5. FSM: tutte le transizioni valide e i timeout
+6. Quorum multi-zona: una sola zona fuori banda non triggera l'impianto

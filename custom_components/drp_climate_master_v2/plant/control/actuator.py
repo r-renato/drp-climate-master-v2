@@ -22,18 +22,11 @@ from ...domain.models.runtime_schema import RuntimeConfig
 from ..decision.contracts import PdcCommand, PlantDecision, VmcCommand
 
 from .config import PlantActuatorConfig
-from .logic import (
-    compute_current_plant_phase,
-    compute_supply_plan,
-    compute_operation_plant_t_ready_ref_c,
-    compute_best_plant_t_target_c,
-    compute_zone_valves_plan,
-    desired_zone_valves,
-    fsm_step,
-    mode_value,
-    pdc_requested_on,
-    update_boiler_ready,
-)
+from .signals import build_control_context
+from .readiness import update_boiler_ready
+from .fsm import PlantFsmConfig, PlantFsmInputs, fsm_step
+from .plans import compute_supply_plan, compute_zone_valves_plan
+from .observed_phase import estimate_observed_phase
 from .model import PlantActuatorStatus, StagingState
 
 _LOGGER = logging.getLogger(__name__)
@@ -152,59 +145,41 @@ class PlantActuator:
             await self._supply_pumps.async_set_mix_adj_setpoints(value=float(mv_applied))
 
     # ------------------------- orchestrator -------------------------
-
     async def async_apply(self, snapshot: PlantSnapshot, decision: PlantDecision) -> None:
         """Applica una `PlantDecision` allo stato reale dell'impianto.
 
-        Sequenza:
-        1) Comandi immediati PDC + VMC
-        2) Calcoli puri (readiness, desired valves, FSM)
-        3) Attuazione valvole/pompe secondo piani calcolati
+        Sequenza (leggibile, a blocchi)
+        -------------------------------
+        1) Deriva contesto tipizzato (requested vs observed)
+        2) Comandi immediati PDC + VMC
+        3) Aggiorna boiler readiness (isteresi)
+        4) FSM passata #1 (valves_ready=False) -> gating valvole
+        5) Piano valvole + attuazione
+        6) FSM passata #2 (con valves_ready) -> gating pompe
+        7) Piano pompe/miscelatrice + attuazione
+        8) Log strutturato per commissioning
         """
-
         async with self._apply_lock:
             self._snapshot = snapshot
-            current_phase = self._stage.fsm.phase
+            now = self._now()
 
-            current_plant_phase = compute_current_plant_phase(snapshot=snapshot, decision=decision)
+            # 1) Derivazione contesto (single source of truth per le variabili locali).
+            ctx = build_control_context(now=now, snapshot=snapshot, decision=decision, cfg=self._cfg)
 
-            pdc_command = decision.pdc
-            vmc_command = decision.vmc
+            # Stima *osservata* (solo diagnostica, non influenza la FSM).
+            observed = estimate_observed_phase(snapshot, ctx)
 
-            # --- Step 1: immediate devices
-            await self._async_pdc_actuator(pdc_command)
-            await self._async_vmc_actuator(vmc_command)
+            # 2) Step dispositivi immediati (non dipendono da staging).
+            await self._async_pdc_actuator(decision.pdc)
+            await self._async_vmc_actuator(decision.vmc)
 
-            # --- Input signals
-            pdc_req_power_on = pdc_requested_on(pdc_command)
-            compressor_sta_on: Optional[bool] = (
-                self._snapshot.pdc.sensor_compressor_state
-                if (self._snapshot and self._snapshot.pdc)
-                else None
-            )
-            t_boiler_supply_sta: Optional[float] = (
-                as_float(self._snapshot.supply_unit.sensor_boiler_temp_system_supply)
-                if (self._snapshot and self._snapshot.supply_unit)
-                else None
-            )
-
-            mode_req = mode_value(decision)
-            t_control_target_req = compute_best_plant_t_target_c(decision)
-            t_plant_ready_ref = compute_operation_plant_t_ready_ref_c(
-                mode=mode_req,
-                t_control_target_c=t_control_target_req,
-                heat_bias_c=self._cfg.boiler_ready_heat_bias_c,
-                cool_bias_c=self._cfg.boiler_ready_cool_bias_c,
-            )
-            boiler_signal_available = bool(t_boiler_supply_sta is not None and t_plant_ready_ref is not None)
-
-            # --- Boiler readiness
+            # 3) Boiler readiness (isteresi)
             prev_ready = self._stage.boiler_ready
             boiler_update = update_boiler_ready(
                 self._stage,
-                mode=mode_req,
-                t_boiler_supply=t_boiler_supply_sta,
-                t_target=t_plant_ready_ref,
+                mode=ctx.mode,
+                t_boiler_supply=ctx.boiler.t_supply_c,
+                t_target=ctx.boiler.t_ready_ref_c,
                 on_margin_c=self._cfg.boiler_ready_on_margin_c,
                 off_margin_c=self._cfg.boiler_ready_off_margin_c,
             )
@@ -214,50 +189,42 @@ class PlantActuator:
             if prev_ready != boiler_ready:
                 log_info(
                     _LOGGER,
-                    "Boiler_ready changed: %s -> %s (mode=%s t=%.2f target=%s)",
+                    "Boiler_ready changed: %s -> %s (mode=%s t=%s target_ready=%s)",
                     prev_ready,
                     boiler_ready,
-                    mode_req,
-                    t_boiler_supply_sta if t_boiler_supply_sta is not None else float("nan"),
-                    f"{t_control_target_req:.2f}" if t_control_target_req is not None else "-",
+                    ctx.mode,
+                    f"{ctx.boiler.t_supply_c:.2f}" if ctx.boiler.t_supply_c is not None else "-",
+                    f"{ctx.boiler.t_ready_ref_c:.2f}" if ctx.boiler.t_ready_ref_c is not None else "-",
                 )
 
-            # --- Desired valves + request derivation
-            desired_valves = desired_zone_valves(decision)
-            supply_cmd = getattr(decision, "supply", None)
-            direct_desired = bool(getattr(supply_cmd, "direct_pump_on", False)) if supply_cmd is not None else False
-            adj_desired = bool(getattr(supply_cmd, "adj_pump_on", False)) if supply_cmd is not None else False
+            # Energia "credibile": stesso criterio per FSM e pompe.
+            energy_ok = bool(boiler_ready) if ctx.boiler.available else bool(ctx.pdc.effective_on)
 
-            request_on = bool(pdc_req_power_on or direct_desired or adj_desired or desired_valves.any_open)
-
-            # PDC considerata ON se richiesta o compressore ON
-            pdc_on = bool(pdc_req_power_on or compressor_sta_on is True)
-
-            now = self._now()
-            needs_valves = bool(adj_desired and desired_valves.any_open)
-
-            # --- FSM (prima passata)
-            fsm = fsm_step(
-                self._stage,
-                now=now,
-                request_on=request_on,
-                pdc_on=pdc_on,
-                compressor_on=compressor_sta_on,
-                boiler_ready=boiler_ready,
-                boiler_signal_available=boiler_signal_available,
-                valves_ready=False,
-                needs_valves=needs_valves,
+            fsm_cfg = PlantFsmConfig(
                 min_on_s=self._cfg.fsm_min_on_s,
                 min_off_s=self._cfg.fsm_min_off_s,
                 start_timeout_s=self._cfg.fsm_start_timeout_s,
                 stop_timeout_s=self._cfg.fsm_stop_timeout_s,
             )
 
-            # --- Zone valves plan + apply
+            # 4) FSM (prima passata) -> gating valvole
+            fsm_inp = PlantFsmInputs(
+                now=now,
+                request_on=ctx.request_on,
+                pdc_effective_on=ctx.pdc.effective_on,
+                compressor_on=ctx.pdc.compressor_on,
+                boiler_ready=boiler_ready,
+                boiler_signal_available=ctx.boiler.available,
+                valves_ready=False,
+                needs_valves=ctx.needs_valves,
+            )
+            fsm = fsm_step(self._stage, inp=fsm_inp, cfg=fsm_cfg)
+
+            # 5) Piano valvole + apply
             valves_plan = compute_zone_valves_plan(
                 self._stage,
                 runtime_areas=self._runtime.climate.areas or [],
-                desired=desired_valves,
+                desired=ctx.desired_valves,
                 allow_valves=fsm.allow_valves,
                 force_close_valves=fsm.force_close_valves,
                 now=now,
@@ -267,33 +234,26 @@ class PlantActuator:
             valves_ready = valves_plan.result.ready
             valves_stats = valves_plan.result.stats
 
-            # --- FSM (seconda passata con valves_ready)
-            fsm = fsm_step(
-                self._stage,
+            # 6) FSM (seconda passata con valves_ready) -> gating pompe
+            fsm_inp = PlantFsmInputs(
                 now=now,
-                request_on=request_on,
-                pdc_on=pdc_on,
-                compressor_on=compressor_sta_on,
+                request_on=ctx.request_on,
+                pdc_effective_on=ctx.pdc.effective_on,
+                compressor_on=ctx.pdc.compressor_on,
                 boiler_ready=boiler_ready,
-                boiler_signal_available=boiler_signal_available,
+                boiler_signal_available=ctx.boiler.available,
                 valves_ready=valves_ready,
-                needs_valves=needs_valves,
-                min_on_s=self._cfg.fsm_min_on_s,
-                min_off_s=self._cfg.fsm_min_off_s,
-                start_timeout_s=self._cfg.fsm_start_timeout_s,
-                stop_timeout_s=self._cfg.fsm_stop_timeout_s,
+                needs_valves=ctx.needs_valves,
             )
+            fsm = fsm_step(self._stage, inp=fsm_inp, cfg=fsm_cfg)
 
-            # --- Supply plan + apply
+            # 7) Piano pompe/miscelatrice + apply
             supply_plan = compute_supply_plan(
                 decision,
                 supply_configured=self._supply_cfg is not None,
                 allow_pumps=fsm.allow_pumps,
                 force_pumps_off=fsm.force_pumps_off,
-                pdc_on=pdc_on,
-                compressor_on=compressor_sta_on,
-                boiler_ready=boiler_ready,
-                boiler_signal_available=boiler_signal_available,
+                energy_ok=energy_ok,
                 valves_ready=valves_ready,
             )
             if self._supply_cfg is not None:
@@ -303,22 +263,24 @@ class PlantActuator:
                     mv_applied=supply_plan.mix_valve_pct_applied,
                 )
 
-            # Costruisce uno snapshot tipizzato dello staging (per log/commissioning).
+            # 8) Snapshot tipizzato (per log/commissioning).
             status = PlantActuatorStatus(
                 timestamp=now,
-                phase=getattr(getattr(fsm, "phase", None), "value", str(getattr(fsm, "phase", "-"))),
-                mode=mode_req,
-                request_on=bool(request_on),
-                pdc_req_on=bool(pdc_req_power_on),
-                direct_desired=bool(direct_desired),
-                adj_desired=bool(adj_desired),
-                needs_valves=bool(needs_valves),
-                compressor_on=compressor_sta_on,
-                pdc_on=bool(pdc_on),
-                boiler_signal_available=bool(boiler_signal_available),
-                t_boiler_supply_c=t_boiler_supply_sta,
-                target_ctrl_c=t_control_target_req,
-                target_ready_c=t_plant_ready_ref,
+                fsm_phase=getattr(getattr(fsm, "phase", None), "value", str(getattr(fsm, "phase", "-"))),
+                observed_phase=getattr(getattr(observed, "phase", None), "value", str(getattr(observed, "phase", "-"))),
+                mode=ctx.mode,
+                request_on=bool(ctx.request_on),
+                pdc_req_on=bool(ctx.pdc.requested_on),
+                direct_desired=bool(ctx.supply.direct_desired),
+                adj_desired=bool(ctx.supply.adjustable_desired),
+                needs_valves=bool(ctx.needs_valves),
+                compressor_on=ctx.pdc.compressor_on,
+                pdc_effective_on=bool(ctx.pdc.effective_on),
+                pdc_effective_known=bool(ctx.pdc.effective_known),
+                boiler_signal_available=bool(ctx.boiler.available),
+                t_boiler_supply_c=ctx.boiler.t_supply_c,
+                target_ctrl_c=ctx.boiler.t_control_target_c,
+                target_ready_c=ctx.boiler.t_ready_ref_c,
                 boiler_ready=bool(boiler_ready),
                 on_thr_c=boiler_dbg.on_thr_c,
                 off_thr_c=boiler_dbg.off_thr_c,
@@ -328,7 +290,7 @@ class PlantActuator:
                 valves_requested_at=valves_stats.requested_at,
                 valves_elapsed_s=valves_stats.elapsed_s,
                 valves_opening_transition=bool(valves_stats.opening_transition),
-                desired_by_zone=dict(getattr(desired_valves, "by_zone", {}) or {}),
+                desired_by_zone=dict(getattr(ctx.desired_valves, "by_zone", {}) or {}),
                 allow_valves=bool(getattr(fsm, "allow_valves", False)),
                 allow_pumps=bool(getattr(fsm, "allow_pumps", False)),
                 force_close_valves=bool(getattr(fsm, "force_close_valves", False)),
@@ -339,20 +301,23 @@ class PlantActuator:
                 reasons=[],
             )
 
-            # --- Debug log
+            # --- Debug/reasons
             reasons: list[str] = []
-            reasons.extend(fsm.reasons)
-            if not request_on:
+            reasons.extend(getattr(fsm, "reasons", []) or [])
+
+            if not ctx.request_on:
                 reasons.append("req_off")
-            if request_on and not pdc_on:
-                reasons.append("pdc_not_on")
-            if request_on and pdc_on and boiler_signal_available and not boiler_ready:
+
+            if ctx.request_on and ctx.boiler.available and not boiler_ready:
                 reasons.append("boiler_not_ready")
-            if request_on and pdc_on and needs_valves and not valves_ready:
+
+            if ctx.request_on and ctx.needs_valves and not valves_ready:
                 reasons.append("valves_not_ready")
-            if compressor_sta_on is None and self._pdc_compressor_state_ent:
-                reasons.append("compressor_state_unavailable")
+
+            if ctx.request_on and not ctx.pdc.effective_known:
+                reasons.append("pdc_state_unavailable")
 
             status.reasons = reasons
-            log_debug(_LOGGER, "%s", current_plant_phase)
+
+            log_debug(_LOGGER, "Observed phase: %s (%s)", status.observed_phase, " | ".join(getattr(observed, "reasons", []) or []))
             log_debug(_LOGGER, "%s", status)

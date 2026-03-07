@@ -259,7 +259,7 @@ Nota termotecnica: la VMC non è solo “ventilazione”, è un attore attivo ch
 * aiutare il comfort estivo (togliendo umidità)
 * rendere possibile il raffrescamento radiante (riducendo il rischio condensa)
 
-## 2 Logica di controllo termotecnico
+## 2 Logica di controllo impianto
 
 ### 2.1 Obiettivi e vincoli
 

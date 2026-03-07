@@ -18,7 +18,7 @@ class PlantActuatorConfig:
     valve_open_delay_s: float = 95.0
     boiler_ready_on_margin_c: float = 0.5
     boiler_ready_off_margin_c: float = 1.5
-    boiler_ready_heat_bias_c: float = 7.0
+    boiler_ready_heat_bias_c: float = -7.0
     boiler_ready_cool_bias_c: float = -1.5
     fsm_min_on_s: float = 180.0
     fsm_min_off_s: float = 120.0

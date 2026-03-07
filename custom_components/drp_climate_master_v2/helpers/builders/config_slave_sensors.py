@@ -169,7 +169,7 @@ def build_slave_sensor_defs(runtime_config: RuntimeConfig) -> list[dict[str, Any
     defs.append(
         {
             "type": "SeasonSensor",
-            "name": f"{sensor_prefix} Season",
+            "name": f"{sensor_prefix} Weather Season",
             "category": EntityCategory.DIAGNOSTIC,
         }
     )

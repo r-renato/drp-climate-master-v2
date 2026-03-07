@@ -159,10 +159,16 @@ class PlantActuatorStatus:
     - Evitare log assemblati a mano dentro `actuator.py`
     - Rendere stabile e tipizzato il contenuto diagnostico
     - Centralizzare la formattazione in `__str__` per log multi-linea leggibili
+
+    Nota concettuale
+    ----------------
+    - `fsm_phase`: fase *decisa* dalla FSM (fonte di verità per l'attuazione)
+    - `observed_phase`: fase *stimata* da stati osservati (solo diagnostica)
     """
 
     timestamp: datetime
-    phase: str
+    fsm_phase: str
+    observed_phase: str
     mode: str
 
     request_on: bool
@@ -170,8 +176,10 @@ class PlantActuatorStatus:
     direct_desired: bool
     adj_desired: bool
     needs_valves: bool
+
     compressor_on: Optional[bool]
-    pdc_on: bool
+    pdc_effective_on: bool
+    pdc_effective_known: bool
 
     boiler_signal_available: bool
     t_boiler_supply_c: Optional[float]
@@ -240,7 +248,8 @@ class PlantActuatorStatus:
             "",
             "Plant staging",
             f"  Timestamp          :: {ts}",
-            f"  Phase              :: {fstr(self.phase)}",
+            f"  FSM phase          :: {fstr(self.fsm_phase)}",
+            f"  Observed phase     :: {fstr(self.observed_phase)}",
             f"  Mode               :: {fstr(self.mode)}",
             "------------------------------------------------------------------",
             "Requests / inputs",
@@ -250,7 +259,8 @@ class PlantActuatorStatus:
             f"  adj_desired        :: {fbool(self.adj_desired)}",
             f"  needs_valves       :: {fbool(self.needs_valves)}",
             f"  compressor_on      :: {fbool(self.compressor_on)}",
-            f"  pdc_on             :: {fbool(self.pdc_on)}",
+            f"  pdc_effective_on   :: {fbool(self.pdc_effective_on)}",
+            f"  pdc_effective_known:: {fbool(self.pdc_effective_known)}",
             "------------------------------------------------------------------",
             "Boiler readiness",
             f"  signal_available   :: {fbool(self.boiler_signal_available)}",

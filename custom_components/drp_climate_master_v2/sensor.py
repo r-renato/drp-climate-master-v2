@@ -584,52 +584,6 @@ class DewpointSensor(BaseSensor):
         
         return self._slave_update_from_aggregator(entity_type=self.DWP_NAME_POSTFIX, entity_id=self._sensors.dew_point)
 
-    # def _slave_update(self) -> bool:
-    #     """
-    #     Valore nativo del sensore (dew point).
-
-    #     Ritorna:
-    #         float | None: dew point nella stessa unità dichiarata dall'entità.
-    #                       None se mancano i dati o non sono validi.
-    #     """
-    #     # Recupero valori grezzi dal registry interno dell’integrazione
-    #     raw_t = self._entities_state.get(self._sensors.temperature)
-    #     raw_rh = self._entities_state.get(self._sensors.humidity)
-
-    #     t_c = as_float(raw_t)
-    #     rh = as_float(raw_rh)
-
-    #     if t_c is None or rh is None:
-    #         self._attr_available = False
-    #         return True
-
-    #     # dew_point_celsius richiede T in °C e RH in percento
-    #     try:
-    #         dp_c = dew_point_celsius(t_c, rh)
-    #     except Exception as ex:  # noqa: BLE001
-    #         log_debug(_LOGGER, "Impossibile calcolare il dew point: %s", ex)
-    #         self._attr_available = False
-    #         return True
-
-    #     # Conversione nell'unità richiesta dall'entità
-    #     if self._target_temp_unit == UnitOfTemperature.FAHRENHEIT:
-    #         dp_val = celsius_to_fahrenheit(dp_c)
-    #     else:
-    #         dp_val = dp_c
-
-    #     # Aggiorna la rolling window (lista) e calcola media con stdlib
-    #     self._data_series.append(dp_val)
-    #     if len(self._data_series) > self._window_size:
-    #         self._data_series = self._data_series[-self._window_size:]
-
-    #     avg = fmean(self._data_series) if self._data_series else dp_val
-
-    #     attr_native_old_value = self._attr_native_value
-    #     self._attr_native_value = avg
-    #     self._attr_available = True
-
-    #     return attr_native_old_value != self._attr_native_value
-
 class HeatIndexSensor(BaseSensor):
     """
     Sensore di **Heat Index** (Indice di calore).
@@ -742,8 +696,8 @@ class SeasonSensor(BaseSensor):
             window = season.window
             weather = season.weather
             
-            data["window"] = f"{window.start.isoformat()} - {window.end.isoformat()}"
-            data["days"] = f"{season.days} passed={season.passed} remaining={season.remaining}"
+            data["calendar window"] = f"{window.start.isoformat()} - {window.end.isoformat()}"
+            data["calendar days"] = f"{season.days} passed={season.passed} remaining={season.remaining}"
 
             data["weather season"] = (
                 f"{weather.season} [anomaly={weather.anomaly}, score={fnum(weather.anomaly_score)}] "
@@ -773,7 +727,7 @@ class SeasonSensor(BaseSensor):
         if self._coordinator.plant_snapshot is not None and self._coordinator.plant_snapshot.season is not None:
             season = self._coordinator.plant_snapshot.season
 
-            self._attr_native_value = season.window.season.value
+            self._attr_native_value = season.weather.season.value
             self._attr_available = True
         else:
             self._attr_available = False

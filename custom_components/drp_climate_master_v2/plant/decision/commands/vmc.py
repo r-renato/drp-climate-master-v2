@@ -62,7 +62,13 @@ class VmcCommandBuilder:
         dp_current = getattr(demand, "dp_dehum_c", None) or demand.dp_max_c
         boost_active = bool(demand.vmc_req_heating or demand.vmc_req_cooling or demand.vmc_req_dehumidif)
 
-        air_speed = self._compute_air_speed(snapshot, dp_current, dp_sp_c, boost_active)
+        # Use the ON threshold as speed-boost reference (not the device-adjusted setpoint).
+        # dp_sp_c is shifted down by quantization compensation (e.g. 10.4 → 9.7°C), which
+        # artificially inflates the delta and causes extra speed steps to fire.
+        # The ON threshold (dp_sp_cmd + ddp_cmd) is the semantically correct boundary:
+        # it measures "how far above the dehumidification trigger we currently are".
+        dp_speed_ref_c = float(getattr(demand, "vmc_dehum_on_thr_c", None) or dp_sp_c)
+        air_speed = self._compute_air_speed(snapshot, dp_current, dp_speed_ref_c, boost_active)
 
         if demand.vmc_req_heating:
             t_sp = float(cfg.vmc.boost.setpoint_heat_c)
