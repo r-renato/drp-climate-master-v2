@@ -135,7 +135,7 @@ class PlantActuator:
     async def _async_apply_zone_valves(self, commands) -> None:
         """Esegue i comandi valvole calcolati dalla logica."""
         for cmd in commands:
-            await self._electrovalve.async_set_circuit_open(area_name=cmd.area_name, state=cmd.state)
+            await self._electrovalve.async_set_circuit_open(valve_switch=cmd.valve_switch, area_name=cmd.area_name, state=cmd.state)
 
     async def _async_apply_supply(self, *, direct_on: bool, adj_on: bool, mv_applied: Optional[float]) -> None:
         """Esegue i comandi pompe/miscelatrice calcolati dalla logica."""

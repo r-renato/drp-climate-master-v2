@@ -9,7 +9,9 @@ from dataclasses import fields, replace
 from typing import Any, Dict
 from datetime import datetime, timezone
 
-import psychrolib
+# psychrolib non viene importato qui: SetUnitSystem(SI) è gestito a livello
+# di modulo in helpers/psychrometric.py all'import time. Vedere la docstring
+# di quel modulo per la motivazione (problema global state multi-entry).
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import CALLBACK_TYPE, Event, EventStateChangedData, HomeAssistant, State, callback
@@ -99,11 +101,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # self._policy_layer: ComfortPolicyLayer = build_policy_layer()
         # self._confort_bands = ComfortBandCalculator()
 
-        self._plant_snapshot: PlantSnapshot | None = None 
-
-        # Psychrolib unit system: impostazione globale (attenzione: globale nel processo)
-        # Se più entry con unit diverse coesistono, questa è una criticità.
-        psychrolib.SetUnitSystem(psychrolib.SI if self._runtime.climate.units == "si" else psychrolib.IP)
+        self._plant_snapshot: PlantSnapshot | None = None
 
         # Flags / subscriptions
         self._init_complete = False

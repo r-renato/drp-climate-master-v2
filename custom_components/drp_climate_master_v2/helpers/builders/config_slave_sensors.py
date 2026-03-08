@@ -6,7 +6,7 @@ from typing import Any
 from homeassistant.const import PERCENTAGE, EntityCategory
 
 from ...const import CONF_CEILING, CONF_INDOOR, CONF_RADIANT, NAME_AREA_HOME
-from ...domain.models.runtime_schema import SensorPair, RuntimeConfig
+from ...domain.models.runtime_schema import SensorPair, RuntimeConfig, is_active_radiant_zone
 
 from ...helpers.builders.config_aggregate_sensors import GLOBAL, FieldSuffix
 from ...helpers.utils import slugify
@@ -22,7 +22,7 @@ def build_slave_sensor_defs(runtime_config: RuntimeConfig) -> list[dict[str, Any
 
     for area in getattr(runtime_config.climate, "areas", []) or []:
         # i tuoi AreaConfig potrebbero essere dataclass: manteniamo getattr flessibile
-        if getattr(area, CONF_INDOOR, False) and getattr(area, CONF_RADIANT, False) and getattr(area, CONF_CEILING, False):
+        if is_active_radiant_zone(area):
             sensors = getattr(area, "sensors", None)
             if not sensors:
                 continue

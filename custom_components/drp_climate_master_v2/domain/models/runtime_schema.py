@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 from homeassistant.util.unit_system import UnitSystem
 
@@ -15,19 +15,85 @@ class SensorPair:
     dew_point: Optional[str] = None
     heat_index: Optional[str] = None
 
+
+@dataclass(frozen=True, slots=True)
+class RadiantSurface:
+    """Una singola superficie radiante con la propria valvola di zona.
+
+    Una AreaConfig può avere zero, una o più RadiantSurface.
+    Ogni superficie ha la propria elettrovalvola (entity_id dello switch HA)
+    e la propria estensione in m².
+
+    Esempio: Living + Foyer condividono i sensori T/RH (stessa AreaConfig)
+    ma hanno due circuiti radianti indipendenti — si modellano come due
+    RadiantSurface distinte nella stessa area.
+    """
+    valve_switch: str       # entity_id dello switch HA (elettrovalvola)
+    surface_m2: float = 0.0  # superficie in m² (0.0 se non nota)
+
+
 @dataclass(frozen=True)
 class AreaConfig:
+    """Configurazione di un'area ambientale (zona fisica).
+
+    Un'area ha un set di sensori T/RH condivisi e zero o più superfici
+    radianti indipendenti (RadiantSurface). Questo modello rimpiazza il
+    vecchio schema flat (thermal_collector_valve_switch + radiant_surface)
+    che permetteva una sola valvola per area.
+
+    Retrocompatibilità YAML
+    -----------------------
+    Il parser (config_entries.py) converte automaticamente il vecchio formato:
+        thermal_collector_valve_switch: switch.xxx
+        radiant_surface: 9.0
+    nel nuovo:
+        radiant_surfaces:
+          - valve_switch: switch.xxx
+            surface_m2: 9.0
+
+    ceiling : Optional[float]
+        Peso dell'area negli aggregati globali ponderati (global.indoor_temperature,
+        global.mrt). Tipicamente uguale alla somma delle superfici radianti oppure
+        alla superficie planimetrica della zona. None = area esclusa dagli aggregati
+        globali (non entra nel pipeline radiante).
+        ceiling=0.0 → area partecipa al pipeline (ha valvole da comandare,
+        condensation_margin calcolato) ma non contribuisce ai global aggregate.
+    """
     name: str
     indoor: bool
     radiant: bool
     sensors: SensorPair
-    thermal_collector_valve_switch: Optional[str] = None
+    radiant_surfaces: Tuple[RadiantSurface, ...] = ()
     ceiling: Optional[float] = None
-    radiant_surface: Optional[float] = None
 
     @staticmethod
     def find_area(areas: list[AreaConfig], name: str) -> Optional[AreaConfig]:
         return next((a for a in areas if a.name == name), None)
+
+    def valve_switches(self) -> Tuple[str, ...]:
+        """Restituisce tutti gli entity_id delle valvole di questa area."""
+        return tuple(s.valve_switch for s in self.radiant_surfaces)
+
+    def total_surface_m2(self) -> float:
+        """Superficie radiante totale dell'area in m²."""
+        return sum(s.surface_m2 for s in self.radiant_surfaces)
+
+
+def is_active_radiant_zone(area: AreaConfig) -> bool:
+    """Vero se l'area partecipa alla pipeline radiante.
+
+    Un'area è attiva se è indoor, ha superfici radianti configurate (ceiling
+    is not None) ed è marcata come radiant. Usare questo helper al posto del
+    guard inline ``area.indoor and area.radiant and area.ceiling is not None``
+    per centralizzare il contratto: quando il modello cambia, basta aggiornare
+    qui.
+
+    ceiling=0.0 è considerato attivo: l'area ha valvole da comandare e superfici
+    da proteggere dalla condensa, anche se non contribuisce agli aggregati globali.
+    """
+    return area.indoor and area.radiant and area.ceiling is not None
+
+
 # ---- Supply units -------------------------------------------------------
 @dataclass(frozen=True)
 class SupplyUnitSensors:

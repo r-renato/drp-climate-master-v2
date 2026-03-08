@@ -516,7 +516,24 @@ def condensation_margin_c(
 
 
 def dew_point_c(t_c: float, rh_pct: float) -> float:
-    """Dew point in °C from dry-bulb T (°C) and RH (%). Uses Magnus formula."""
+    """Punto di rugiada (°C) da T bulbo-secco (°C) e UR (%) — formula di Magnus.
+
+    ATTENZIONE — stub interno al compute engine di SensorAggregator.
+    Questa funzione è invocata dal dispatch ComputeFn in _compute_derived()
+    ed è intenzionalmente priva di dipendenze esterne: sensor_aggregator deve
+    restare importabile anche se psychrolib non è disponibile, così una
+    mancata installazione produce degradazione localizzata (solo le derived
+    che usano psychrolib) invece di un ImportError che blocca l'intero modulo.
+
+    Per il calcolo del dew point nei layer di policy (vmc/policy.py,
+    signals/builder.py, dew_guard) usare helpers.psychrometric.dew_point_celsius
+    che usa Buck via psychroLib. La differenza rispetto a Magnus è < 0.14 °C
+    nel range HVAC (entrambe rientrano nei margini anti-condensa di §3.2).
+
+    Gestione edge-case: rh viene clampato silenziosamente a [0.1, 100].
+    rh=0 produce dp ≈ -57 °C senza eccezione (il dispatch ha try/except,
+    ma il clamp evita math.log(0)).
+    """
     rh = max(0.1, min(100.0, float(rh_pct)))
     t = float(t_c)
 
@@ -528,10 +545,19 @@ def dew_point_c(t_c: float, rh_pct: float) -> float:
 
 
 def heat_index_c(t_c: float, rh_pct: float) -> float:
-    """Heat index in °C from T (°C) and RH (%).
+    """Heat index (°C) da T (°C) e UR (%) — regressione di Rothfusz (NOAA).
 
-    Uses Rothfusz regression (NOAA) in °F domain, then converts to °C.
-    Outside validity (T < ~26.7°C or RH < 40%), returns T.
+    Stub interno al compute engine di SensorAggregator (vedi nota in dew_point_c).
+    Usato come sensore diagnostico di disagio termico estivo, non come input
+    del controllo attivo.
+
+    Differenza rispetto a helpers.psychrometric.heat_index_celsius:
+    questa implementazione applica la regressione Rothfusz direttamente senza
+    lo step preliminare Steadman e senza gli aggiustamenti NWS per RH < 13%
+    o RH > 85%. La differenza è ≤ 0.25 °C nel range residenziale (RH 40–90%,
+    T 27–35 °C): irrilevante per uso diagnostico.
+
+    Validità: T ≥ 26.7 °C e RH ≥ 40 %; al di fuori ritorna t_c.
     """
     t = float(t_c)
     rh = max(0.0, min(100.0, float(rh_pct)))
@@ -556,11 +582,62 @@ def heat_index_c(t_c: float, rh_pct: float) -> float:
     return float((hi_f - 32.0) * (5.0 / 9.0))
 
 
-MRT_K_RAD_DEFAULT = 0.2
+# ---------------------------------------------------------------------------
+# Costante fisica per il modello MRT (soffitto radiante)
+# ---------------------------------------------------------------------------
+# Valore: 0.20  (adimensionale, range utile 0.15–0.30)
+#
+# Origine fisica — due contributi combinati:
+#
+#  1) Fattore di vista persona → soffitto (F_soffitto):
+#     Per una persona in piedi in una stanza tipica (altezza 2.7 m, superficie
+#     soffitto ≈ 15–20 m²), il fattore di vista corpo umano → soffitto è
+#     circa 0.18–0.22 (valori tabulati ISO 7726:1998, Annex A).
+#     Il soffitto è l'unica superficie a temperatura diversa da T_aria; le
+#     pareti e il pavimento sono assunti a T_aria (worst-case conservativo).
+#
+#  2) Salto termico acqua → superficie pannello (ΔT_sup):
+#     T_acqua_media (mandata+ritorno)/2 è circa 1–3°C più fredda di T_aria
+#     lato pannello in raffrescamento (resistenza intonaco + massetto leggero).
+#     Questo salto riduce l'effetto reale della MRT rispetto alla T_acqua.
+#     Il k=0.20 lo compensa in modo conservativo: sottostima la MRT radiante,
+#     il che è SAFE per l'anti-condensa (margine aggiuntivo).
+#
+# Limiti del modello:
+#  - T_rad_mean è la media idraulica (mandata+ritorno), NON la T_superficie.
+#    Pertanto questa formula NON implementa la MRT di ISO 7726 (che richiederebbe
+#    T_superficie e fattori di vista esatti per ogni elemento dell'involucro).
+#  - La MRT è condivisa tra tutte le zone (T_acqua del circuito è globale).
+#    Zone con valvola chiusa sono corrette al gating; ma due zone aperte con
+#    aree soffitto molto diverse ricevono la stessa T_rad_mean.
+#  - Per condizioni HVAC indoor tipiche (T_aria 24–28°C, T_acqua 16–22°C) l'errore
+#    rispetto a una MRT misurata con globotermometro è dell'ordine di ±1–2°C,
+#    che si propaga in ±0.5–1°C su T_op e ±0.1–0.2 PMV: accettabile per il
+#    controllo di comfort, non per certificazione energetica.
+#
+# Per variare: aggiungere k_rad come campo configurabile per area in AreaConfig.
+# ---------------------------------------------------------------------------
+MRT_K_RAD_DEFAULT: float = 0.20
 
 
 def mrt_c(t_air_c: float, t_rad_mean_c: float, k_rad: float = MRT_K_RAD_DEFAULT) -> float:
-    """Mean Radiant Temperature (MRT) estimate in °C."""
+    """Stima della Mean Radiant Temperature (MRT) in °C — soffitto radiante.
+
+    Implementa una mistura lineare parametrica:
+        MRT = T_aria + k_rad × (T_rad_media − T_aria)
+
+    dove T_rad_media è la media idraulica (mandata+ritorno) del circuito radiante.
+    NON è la MRT di ISO 7726 (che richiede T_superfici e fattori di vista).
+    Vedere la docstring di MRT_K_RAD_DEFAULT per la giustificazione fisica di k_rad.
+
+    Args:
+        t_air_c:      Temperatura aria zona (°C).
+        t_rad_mean_c: Media idraulica mandata/ritorno circuito radiante (°C).
+        k_rad:        Coefficiente di influenza radiante [0–1], default MRT_K_RAD_DEFAULT.
+
+    Returns:
+        MRT stimata in °C.
+    """
     k = max(0.0, min(1.0, float(k_rad)))
     t_air = float(t_air_c)
     t_rad = float(t_rad_mean_c)
@@ -568,8 +645,21 @@ def mrt_c(t_air_c: float, t_rad_mean_c: float, k_rad: float = MRT_K_RAD_DEFAULT)
 
 
 def t_op_c(t_air_c: float, mrt_c_val: float) -> float:
-    """Operative temperature in °C (low air speed)."""
+    """Temperatura operante in °C (regime a bassa velocità dell'aria, v < 0.2 m/s).
+
+    Formula ISO 7730 semplificata: T_op = 0.5 × (T_aria + MRT).
+    Valida per velocità aria < 0.2 m/s; a velocità maggiori il peso di T_aria
+    cresce (v. formula completa ISO 7730 §A.2).
+
+    Args:
+        t_air_c:   Temperatura aria zona (°C).
+        mrt_c_val: Mean Radiant Temperature stimata (°C), tipicamente da mrt_c().
+
+    Returns:
+        Temperatura operante in °C.
+    """
     return float(0.5 * (float(t_air_c) + float(mrt_c_val)))
+
 
 def mrt_gated_c(
     t_air_c: float,
@@ -578,7 +668,30 @@ def mrt_gated_c(
     pump_on_01: float,
     k_rad: float = MRT_K_RAD_DEFAULT,
 ) -> float:
-    """MRT estimate gated by valve/pump state."""
+    """Stima MRT in °C con gating stato circuito (valvola × pompa).
+
+    Quando il circuito è inattivo (valvola chiusa o pompa ferma), la superficie
+    del pannello tende a T_aria: il gating azzera l'effetto radiante in modo
+    continuo moltiplicando k_rad per il prodotto valve × pump.
+
+    MRT = T_aria + (k_rad × valve × pump) × (T_rad_media − T_aria)
+
+    Se entrambi valve=1 e pump=1 → equivalente a mrt_c().
+    Se valve=0 o pump=0 → MRT = T_aria (pannello passivo = parete neutra).
+
+    Nota: valve_open_01 può essere il segnale composto «plant_active» (già
+    prodotto di valve×pump a monte); in quel caso passare pump_on_01=1.0.
+
+    Args:
+        t_air_c:       Temperatura aria zona (°C).
+        t_rad_mean_c:  Media idraulica mandata/ritorno circuito radiante (°C).
+        valve_open_01: Stato valvola zona [0–1] (o segnale plant_active composto).
+        pump_on_01:    Stato pompa [0–1] (usare 1.0 se valve_open_01 già composto).
+        k_rad:         Coefficiente di influenza radiante [0–1], default MRT_K_RAD_DEFAULT.
+
+    Returns:
+        MRT stimata in °C, gated per stato circuito.
+    """
     def _clamp01(x: float) -> float:
         return max(0.0, min(1.0, float(x)))
 

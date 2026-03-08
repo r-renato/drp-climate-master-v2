@@ -7,9 +7,10 @@ from typing import List
 from ..utils import slugify
 
 from ...domain.models.runtime_schema import (
-    AreaConfig, 
-    ClimateConfig, 
-    SupplyUnitsConfig
+    AreaConfig,
+    ClimateConfig,
+    SupplyUnitsConfig,
+    is_active_radiant_zone,
 )
 from ..sensor_aggregator import (
     AggregationMethod,
@@ -43,11 +44,15 @@ class FieldSuffix(StrEnum):
     
     CONDENSATION_MARGIN = "condensation_margin"
     MRT = "mrt"
-    T_OPT = "t_op"
+    T_OP = "t_op"  # era T_OPT: typo nel nome enum (valore "t_op" era già corretto)
 
     ADJ_SUPPLY_TEMPERATURE = "adj_supply_temperature"
     ADJ_RETURN_TEMPERATURE = "adj_return_temperature"
     ADJ_SUPPLY_ON = "adj_supply_on"
+
+    # Circuito DIRETTO (pompa VMC). Non entra nei calcoli MRT né condensation_margin.
+    DIRECT_SUPPLY_TEMPERATURE = "direct_supply_temperature"
+    DIRECT_RETURN_TEMPERATURE = "direct_return_temperature"
 
     WATER_MEAN_TEMPERATURE = "water_mean_temperature"
     PLANT_ACTIVE = "plant_active"
@@ -103,62 +108,87 @@ def _build_indoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
     for area in areas:
         name = slugify(area.name)
         if area.indoor:
-            if area.radiant and area.thermal_collector_valve_switch:
+            if area.radiant and area.radiant_surfaces:
+                # Costruisce un GroupSpec per ogni superficie radiante (valvola).
+                # Il nome include l'indice per disambiguare quando ci sono più
+                # superfici nella stessa area (es. Living: valve_0, valve_1).
+                valve_specs = tuple(
+                    GroupSpec(
+                        name=f"{FieldSuffix.RADIANT_VALVE_OPEN}_{idx}",
+                        sensors=(SensorSpec(surf.valve_switch, weight=1.0, filters=switch_filters),),
+                        method=AggregationMethod.WEIGHTED_MEAN,
+                        cross_outlier_method=CrossOutlierMethod.NONE,
+                        min_sources=1,
+                        clamp_min=0.0,
+                        clamp_max=1.0,
+                    )
+                    for idx, surf in enumerate(area.radiant_surfaces)
+                )
+                # RADIANT_VALVE_OPEN senza indice: OR logico tra tutte le valvole
+                # dell'area — usato da plant_active e condensation_margin.
+                # Se almeno una valvola è aperta, l'area è attiva.
+                valve_any_spec = GroupSpec(
+                    name=FieldSuffix.RADIANT_VALVE_OPEN,
+                    sensors=tuple(
+                        SensorSpec(surf.valve_switch, weight=1.0, filters=switch_filters)
+                        for surf in area.radiant_surfaces
+                    ),
+                    method=AggregationMethod.WEIGHTED_MEAN,
+                    cross_outlier_method=CrossOutlierMethod.NONE,
+                    min_sources=1,
+                    clamp_min=0.0,
+                    clamp_max=1.0,
+                )
                 variables = (
-                        GroupSpec(
-                            name=FieldSuffix.INDOOR_TEMPERATURE,
-                            sensors=(SensorSpec(area.sensors.temperature, weight=1.0, filters=indoor_temp_filters),),
-                            method=AggregationMethod.WEIGHTED_MEAN,
-                            cross_outlier_method=CrossOutlierMethod.NONE,
-                            min_sources=1,
-                            clamp_min=5.0,
-                            clamp_max=35.0 if area.radiant else 60.0,
-                        ),
-                        GroupSpec(
-                            name=FieldSuffix.INDOOR_HUMIDITY,
-                            sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=indoor_rh_filters),),
-                            method=AggregationMethod.WEIGHTED_MEAN,
-                            cross_outlier_method=CrossOutlierMethod.NONE,
-                            min_sources=1,
-                            clamp_min=1.0,
-                            clamp_max=100.0,
-                        ),
-                        GroupSpec(
-                            name=FieldSuffix.RADIANT_VALVE_OPEN,
-                            sensors=(SensorSpec(area.thermal_collector_valve_switch,weight=1.0,filters=switch_filters,),),
-                            method=AggregationMethod.WEIGHTED_MEAN,
-                            cross_outlier_method=CrossOutlierMethod.NONE,
-                            min_sources=1,
-                            clamp_min=0.0,
-                            clamp_max=1.0,
-                        ),
+                    GroupSpec(
+                        name=FieldSuffix.INDOOR_TEMPERATURE,
+                        sensors=(SensorSpec(area.sensors.temperature, weight=1.0, filters=indoor_temp_filters),),
+                        method=AggregationMethod.WEIGHTED_MEAN,
+                        cross_outlier_method=CrossOutlierMethod.NONE,
+                        min_sources=1,
+                        clamp_min=5.0,
+                        clamp_max=35.0 if area.radiant else 60.0,
+                    ),
+                    GroupSpec(
+                        name=FieldSuffix.INDOOR_HUMIDITY,
+                        sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=indoor_rh_filters),),
+                        method=AggregationMethod.WEIGHTED_MEAN,
+                        cross_outlier_method=CrossOutlierMethod.NONE,
+                        min_sources=1,
+                        clamp_min=1.0,
+                        clamp_max=100.0,
+                    ),
+                    valve_any_spec,
+                    *valve_specs,
                 )
             else:
                 variables = (
-                        GroupSpec(
-                            name=FieldSuffix.INDOOR_TEMPERATURE.value,
-                            sensors=(SensorSpec(area.sensors.temperature, weight=1.0, filters=indoor_temp_filters),),
-                            method=AggregationMethod.WEIGHTED_MEAN,
-                            cross_outlier_method=CrossOutlierMethod.NONE,
-                            min_sources=1,
-                            clamp_min=5.0,
-                            clamp_max=35.0 if area.radiant else 60.0,
-                        ),
-                        GroupSpec(
-                            name=FieldSuffix.INDOOR_HUMIDITY.value,
-                            sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=indoor_rh_filters),),
-                            method=AggregationMethod.WEIGHTED_MEAN,
-                            cross_outlier_method=CrossOutlierMethod.NONE,
-                            min_sources=1,
-                            clamp_min=1.0,
-                            clamp_max=100.0,
-                        ),
+                    GroupSpec(
+                        name=FieldSuffix.INDOOR_TEMPERATURE,
+                        sensors=(SensorSpec(area.sensors.temperature, weight=1.0, filters=indoor_temp_filters),),
+                        method=AggregationMethod.WEIGHTED_MEAN,
+                        cross_outlier_method=CrossOutlierMethod.NONE,
+                        min_sources=1,
+                        clamp_min=5.0,
+                        clamp_max=35.0 if area.radiant else 60.0,
+                    ),
+                    GroupSpec(
+                        name=FieldSuffix.INDOOR_HUMIDITY,
+                        sensors=(SensorSpec(area.sensors.humidity, weight=1.0, filters=indoor_rh_filters),),
+                        method=AggregationMethod.WEIGHTED_MEAN,
+                        cross_outlier_method=CrossOutlierMethod.NONE,
+                        min_sources=1,
+                        clamp_min=1.0,
+                        clamp_max=100.0,
+                    ),
                 )
 
             zones.append(
                 ZoneConfig(
                     zone=name,
-                    weight=area.ceiling or 0.0,
+                    # ceiling è Optional[float]: None → area senza superfici radianti → peso 0.
+                    # ceiling=0.0 → area presente nel pipeline, peso nullo negli aggregati globali.
+                    weight=area.ceiling if area.ceiling is not None else 0.0,
                     variables=variables,
                 )
             )
@@ -207,7 +237,6 @@ def _build_outdoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
                             name=FieldSuffix.OUTDOOR_TEMPERATURE,
                             sensors=(
                                 SensorSpec(area.sensors.temperature, weight=1.0, filters=outdoor_temp_filters),
-                                SensorSpec("sensor.hmi080_outdoor_temperature", weight=1.0, filters=outdoor_temp_filters),
                             ),
                             method=AggregationMethod.WEIGHTED_MEAN,
                             cross_outlier_method=CrossOutlierMethod.NONE,
@@ -231,7 +260,19 @@ def _build_outdoor_zones(areas: List[AreaConfig]) -> tuple[ZoneConfig, ...]:
     return tuple(zones)
 
 def _build_plant_radiant(supply_units: SupplyUnitsConfig) -> tuple[ZoneConfig, ...]:
-    
+    """Costruisce i GroupSpec per i circuiti idronici della centrale.
+
+    Produce UNA ZoneConfig con weight=0 (non contribuisce ai global zone-weighted
+    aggregates) contenente:
+      - adj_supply_temperature / adj_return_temperature: circuito MISCELATO (radiante a soffitto).
+        Usato da condensation_margin (proxy anti-condensa) e da water_mean_temperature (MRT).
+      - adj_supply_on: stato pompa circuito miscelato (gating MRT via plant_active).
+      - direct_supply_temperature / direct_return_temperature: circuito DIRETTO (pompa VMC).
+        Non entra nei calcoli MRT né condensation_margin, ma è esposto per:
+          * monitoraggio commissioning (T mandata/ritorno VMC)
+          * proxy secondario anti-condensa VMC (margine +0.5°C rispetto al miscelato, §3.2)
+    """
+
     radiant_water_filters = FilterConfig(
         max_age=timedelta(minutes=10),
         hold_last_good=timedelta(minutes=5),
@@ -300,14 +341,56 @@ def _build_plant_radiant(supply_units: SupplyUnitsConfig) -> tuple[ZoneConfig, .
                         clamp_min=0.0,
                         clamp_max=1.0,
                     ),
+                    # Circuito diretto (pompa VMC): monitoraggio T mandata/ritorno.
+                    # Non usato da MRT né condensation_margin (circuito miscelato è il proxy
+                    # corretto per il soffitto radiante). Esposto per commissioning e per
+                    # il proxy secondario anti-condensa VMC (§3.2: margine +0.5°C).
+                    GroupSpec(
+                        name=FieldSuffix.DIRECT_SUPPLY_TEMPERATURE,
+                        sensors=(
+                            SensorSpec(
+                                supply_units.sensors.direct_temp_system_supply,
+                                weight=1.0,
+                                filters=radiant_water_filters,
+                            ),
+                        ),
+                        method=AggregationMethod.WEIGHTED_MEAN,
+                        cross_outlier_method=CrossOutlierMethod.NONE,
+                        min_sources=1,
+                        clamp_min=5.0,
+                        clamp_max=60.0,
+                    ),
+                    GroupSpec(
+                        name=FieldSuffix.DIRECT_RETURN_TEMPERATURE,
+                        sensors=(
+                            SensorSpec(
+                                supply_units.sensors.direct_temp_system_return,
+                                weight=1.0,
+                                filters=radiant_water_filters,
+                            ),
+                        ),
+                        method=AggregationMethod.WEIGHTED_MEAN,
+                        cross_outlier_method=CrossOutlierMethod.NONE,
+                        min_sources=1,
+                        clamp_min=5.0,
+                        clamp_max=60.0,
+                    ),
                 ),
             ),
     )
 
 def _build_plant_water_derived() -> tuple[DerivedSpec, ...]:
-    """
-    Plant water proxy (NOT MRT):
-    - water_mean_temperature is an hydraulic mean (supply/return) and must NOT be used as MRT directly.
+    """Proxy idraulico temperatura acqua circuito radiante (NON è la MRT).
+
+    Calcola la media aritmetica (mandata + ritorno) / 2 del circuito radiante.
+
+    ATTENZIONE — questa grandezza NON deve essere usata come MRT direttamente:
+    - È la temperatura del fluido, non la temperatura superficiale del pannello.
+    - Il salto termico acqua → superficie è tipicamente 1–3°C in raffrescamento
+      (resistenza intonaco + massetto leggero), in funzione del flusso idronico.
+    - La conversione a MRT avviene in _build_mrt_derived() tramite mrt_gated_c()
+      con il coefficiente MRT_K_RAD_DEFAULT, che compensa entrambi gli effetti
+      (salto termico e fattore di vista soffitto → persona).
     """
     return (
         DerivedSpec(
@@ -331,7 +414,7 @@ def _build_psychro_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
 
     for area in areas:
         name = slugify(area.name)
-        if area.indoor and area.radiant and area.ceiling:
+        if is_active_radiant_zone(area):
             psychro_derived.append(
                 DerivedSpec(
                     name=FieldSuffix.INDOOR_DEW_POINT(name),
@@ -408,7 +491,7 @@ def _build_actuation_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]
 
     for area in areas:
         name = slugify(area.name)
-        if area.indoor and area.radiant and area.ceiling:
+        if is_active_radiant_zone(area):
             out.append(
                 DerivedSpec(
                     name=FieldSuffix.PLANT_ACTIVE(name),
@@ -430,12 +513,32 @@ def _build_actuation_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]
     return tuple(out)
 
 def _build_mrt_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
-    """Mean Radiant Temperature"""
+    """Costruisce i DerivedSpec per MRT e temperatura operante (T_op) per zona.
+
+    Pipeline per ogni area con indoor=True, radiant=True, ceiling=True:
+
+        T_aria_zona  ──┐
+        T_acqua_media ─┼──→ mrt_gated_c(k_rad=MRT_K_RAD_DEFAULT) ──→ MRT_zona
+        plant_active ──┘                                               │
+                                                                       ↓
+        T_aria_zona ───────────────────────────────────────────→ t_op_c() ──→ T_op_zona
+
+    Limiti noti del modello:
+    - T_acqua_media è una grandezza GLOBALE (stesso circuito per tutte le zone).
+      Due zone con valvola aperta ricevono la stessa T_rad_mean anche se hanno
+      superfici soffitto diverse; il gating corregge solo le zone con valvola
+      chiusa (plant_active ≈ 0).
+    - MRT_K_RAD_DEFAULT (0.20) incorpora sia il fattore di vista soffitto→persona
+      (~0.18–0.22) sia il salto termico acqua→superficie (~1–3°C). È conservativo
+      in raffrescamento (sottostima l'effetto freddo → margine anti-condensa).
+    - Solo le zone con area.ceiling=True partecipano: le zone senza soffitto
+      radiante non producono MRT derivata.
+    """
     mrt_derived: list[DerivedSpec] = []
 
     for area in areas:
         name = slugify(area.name)
-        if area.indoor and area.radiant and area.ceiling:
+        if is_active_radiant_zone(area):
             mrt_derived.append(
                 DerivedSpec(
                     name=FieldSuffix.MRT(name),
@@ -456,7 +559,7 @@ def _build_mrt_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
 
             mrt_derived.append(
                 DerivedSpec(
-                    name=FieldSuffix.T_OPT(name),
+                    name=FieldSuffix.T_OP(name),
                     kind=DerivedKind.COMPUTE,
                     compute=ComputeFn.T_OP_C,
                     inputs=(
@@ -483,7 +586,7 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
 
     for area in areas:
         name = slugify(area.name)
-        if area.indoor and area.radiant and area.ceiling:
+        if is_active_radiant_zone(area):
             indoor_temp_inputs.append((FieldSuffix.INDOOR_TEMPERATURE(name), area.ceiling))
             indoor_rh_inputs.append((FieldSuffix.INDOOR_HUMIDITY(name), 1.0))
             indoor_dp_inputs.append((FieldSuffix.INDOOR_DEW_POINT(name), 1.0))
@@ -586,7 +689,7 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         ),
         # (B) Global operative temperature uses indoor air + true MRT (NOT hydraulic temps)
         DerivedSpec(
-            name=FieldSuffix.T_OPT(GLOBAL),
+            name=FieldSuffix.T_OP(GLOBAL),
             kind=DerivedKind.COMPUTE,
             compute=ComputeFn.T_OP_C,
             inputs=(

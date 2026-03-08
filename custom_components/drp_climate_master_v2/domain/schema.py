@@ -76,6 +76,9 @@ from ..const import (
     CONF_PROVIDER,
     CONF_RADIANT,
     CONF_RADIANT_SURFACE,
+    CONF_RADIANT_SURFACES,
+    CONF_SURFACE_M2,
+    CONF_VALVE_SWITCH,
     CONF_REQUESTS,
     CONF_SCENARIOS,
     CONF_WINDOWS,
@@ -134,9 +137,21 @@ AREAS_SCHEMA = vol.Schema(
                 vol.Required(CONF_HUMIDITY): cv.entity_id,
             }
         ),
+        # Nuovo formato: lista di superfici radianti indipendenti.
+        vol.Optional(CONF_RADIANT_SURFACES): vol.All(
+            cv.ensure_list,
+            [vol.Schema({
+                vol.Required(CONF_VALVE_SWITCH): cv.entity_id,
+                vol.Optional(CONF_SURFACE_M2, default=0.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0)
+                ),
+            })]
+        ),
+        # Vecchio formato flat — mantenuto per retrocompatibilità YAML.
+        # Il parser (config_entries.py) converte automaticamente in radiant_surfaces.
         vol.Optional(CONF_TCOLLECTOR): cv.entity_id,
-        vol.Optional(CONF_CEILING): vol.All(vol.Coerce(float), vol.Range(min=0)),
         vol.Optional(CONF_RADIANT_SURFACE): vol.All(vol.Coerce(float), vol.Range(min=0)),
+        vol.Optional(CONF_CEILING): vol.All(vol.Coerce(float), vol.Range(min=0)),
     }
 )
 

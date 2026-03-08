@@ -44,6 +44,12 @@ class CalendarSeason:
         hemisphere: _Hemisphere = NORTH,
     ) -> None:
         # ATTENZIONE: teniamo un default per compatibilità, ma in HA è meglio passare year esplicitamente.
+        if year is None:
+            log_warning(
+                _LOGGER,
+                "CalendarSeason: year non fornito, uso anno corrente come fallback. "
+                "Preferisci CalendarSeason.for_date(d) per evitare ambiguità DJF.",
+            )
         self._year: int = year if year is not None else date.today().year
 
         hemi = (hemisphere or NORTH).lower()
@@ -57,6 +63,19 @@ class CalendarSeason:
 
     def with_hemisphere(self, hemisphere: _Hemisphere) -> "CalendarSeason":
         return CalendarSeason(self._year, hemisphere=hemisphere)
+
+    @classmethod
+    def for_date(cls, d: "date | datetime", *, hemisphere: _Hemisphere = NORTH) -> "CalendarSeason":
+        """Factory: crea un CalendarSeason con l'anno corretto rispetto a `d`.
+
+        Convenzione DJF (emisfero nord):
+            Dicembre appartiene all'inverno dell'anno successivo (year+1).
+            Tutti gli altri mesi usano d.year.
+        Per l'emisfero sud la logica è analoga (dicembre → estate year+1).
+        """
+        dd = d.date() if isinstance(d, datetime) else d
+        year = dd.year + 1 if dd.month == 12 else dd.year
+        return cls(year=year, hemisphere=hemisphere)
 
     # ---- API -----------------------------------------------------------------
     def windows(self) -> Mapping[Seasons, "SeasonWindow"]:

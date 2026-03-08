@@ -125,6 +125,11 @@ CONF_TCOLLECTOR: Final[str] = "thermal_collector_valve_switch"
 CONF_CEILING: Final[str] = "ceiling"
 CONF_RADIANT_SURFACE: Final[str] = "radiant_surface"
 
+# Nuovo schema multi-superficie (radiant_surfaces list)
+CONF_RADIANT_SURFACES: Final[str] = "radiant_surfaces"
+CONF_VALVE_SWITCH: Final[str] = "valve_switch"
+CONF_SURFACE_M2: Final[str] = "surface_m2"
+
 # ======================================================
 # DEVICES
 # ======================================================

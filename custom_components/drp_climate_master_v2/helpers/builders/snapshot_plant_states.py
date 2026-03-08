@@ -27,6 +27,7 @@ from ...domain.models.runtime_schema import (
     RuntimeConfig,
     SupplyUnitsConfig,
     VMCConfig,
+    is_active_radiant_zone,
 )
 from ...domain.models.season import SeasonState
 from ..utils import as_bool, as_float, as_int, make_class, slugify
@@ -59,7 +60,7 @@ async def async_build_plant_states_snapshot(
                 timestamp=ts
                 name=slugify(area.name)
 
-                if area.indoor and area.radiant and area.ceiling:
+                if is_active_radiant_zone(area):
                     condensation_margin: AggregatedValue = sensor_aggr.get(name=f"{name}.condensation_margin")
                     indoor_dew_point: AggregatedValue = sensor_aggr.get(name=f"{name}.indoor_dew_point")
                     indoor_heat_index: AggregatedValue = sensor_aggr.get(name=f"{name}.indoor_heat_index")
@@ -85,6 +86,7 @@ async def async_build_plant_states_snapshot(
                                     mrt=mrt,
                                     condensation_margin=condensation_margin,
                                     radiant_valve=radiant_valve_open,
+                                    weight=area.ceiling if area.ceiling is not None else 1.0,
                 )
 
                 zone_snapshots[name] = zone_snapshot

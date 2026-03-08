@@ -13,7 +13,7 @@ from homeassistant.util import dt as dt_util
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
 from .coordinator import ClimateCoordinator
-from ..domain.models.season import SeasonState
+from ..domain.models.season import SeasonState, Seasons
 from ..domain.models.weather import Forecast, Historical
 
 from ..helpers.season.season_weather_calendar import CalendarSeason
@@ -366,23 +366,9 @@ class WeatherCoordinator(IntervalGatedSchedulerBase):
     async def _async_season_detect(self) -> None:
         today = dt_util.now().date()
 
-        season_calendar = CalendarSeason(hemisphere="north")
-
-        current_window = None
-        for y in (today.year - 1, today.year, today.year + 1):
-            wins = season_calendar.with_year(y).windows()
-            current_window = next((w for w in wins.values() if w.contains(today)), None)
-            if current_window:
-                break
-
-        if current_window is None:
-            year = today.year + (1 if today.month == 12 else 0)
-
-            season_calendar = CalendarSeason(year=year, hemisphere="north")
-            current_window = season_calendar.windows()[season_calendar.season_for(today)] # fallback
-
-        # current_window è un SeasonWindow corretto (start/end e season coerenti con today)
-        current_season = current_window
+        _cal = CalendarSeason.for_date(today, hemisphere="north")
+        calendar_season: Seasons = _cal.season_for(today)
+        current_window = _cal.windows()[calendar_season]
 
         historical = await self._cache.async_dump()
 
@@ -397,7 +383,7 @@ class WeatherCoordinator(IntervalGatedSchedulerBase):
         info = model.day(today)
         source = "segmented"
         if info is None:
-            info = model.infer(today)
+            info = model.infer(today, expected_season=calendar_season)
             source = "inferred" if info is not None else "missing"
 
         if info is None:
@@ -413,7 +399,7 @@ class WeatherCoordinator(IntervalGatedSchedulerBase):
 
         season_state = SeasonState(
             as_of=today,
-            window=current_season,
+            window=current_window,
             weather=info.replace_windows(model.windows()),
             detect_model=source,
         )

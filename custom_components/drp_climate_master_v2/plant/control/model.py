@@ -85,6 +85,7 @@ class ValveCommand:
 
     area_name: str
     zone_key: str
+    valve_switch: str
     state: bool
 
 

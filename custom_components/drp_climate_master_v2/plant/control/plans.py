@@ -36,9 +36,20 @@ def compute_zone_valves_plan(
     Lo spegnimento/chiusura forzata e gestito da `force_close_valves` (fail-safe).
     """
 
-    areas = [a for a in (runtime_areas or []) if getattr(a, "thermal_collector_valve_switch", None)]
+    # Costruisce lista piatta (area_name, zone_key, valve_switch) da radiant_surfaces.
+    # Per aree con una sola superficie: zone_key = slugify(area.name).
+    # Per aree con più superfici: zone_key = slugify(area.name)_{idx} per unicità.
+    valve_areas: list[tuple[str, str, str]] = []
+    for a in (runtime_areas or []):
+        surfs = getattr(a, "radiant_surfaces", ()) or ()
+        n = len(surfs)
+        for idx, surf in enumerate(surfs):
+            vs = getattr(surf, "valve_switch", None)
+            if vs:
+                zkey = slugify(a.name) if n == 1 else f"{slugify(a.name)}_{idx}"
+                valve_areas.append((a.name, zkey, vs))
 
-    if not areas:
+    if not valve_areas:
         stage.valves_open_request_ts = None
         stage.last_valves_desired = {}
         desired_empty = ZoneValvesDesired(by_zone={})
@@ -52,6 +63,8 @@ def compute_zone_valves_plan(
         res = ZoneValvesActuationResult(ready=True, desired=desired_empty, stats=stats)
         return ZoneValvesPlan(result=res, commands=[])
 
+    areas = valve_areas  # alias per leggibilità nei blocchi sotto
+
     if force_close_valves:
         allow_valves = False
 
@@ -61,11 +74,10 @@ def compute_zone_valves_plan(
     # Caso: non consentito -> chiudi tutte (fail-safe).
     if not allow_valves:
         closed_map: dict[str, bool] = {}
-        for area in areas:
-            zkey = slugify(area.name)
-            closed_map[zkey] = False
-            if last.get(zkey) is not False:
-                commands.append(ValveCommand(area_name=area.name, zone_key=zkey, state=False))
+        for area_name, zone_key, valve_switch in areas:
+            closed_map[valve_switch] = False
+            if last.get(valve_switch) is not False:
+                commands.append(ValveCommand(area_name=area_name, zone_key=zone_key, valve_switch=valve_switch, state=False))
 
         stage.valves_open_request_ts = None
         stage.last_valves_desired = closed_map
@@ -83,16 +95,15 @@ def compute_zone_valves_plan(
 
     # Caso: consentito -> applica desiderato per zona.
     desired_map: dict[str, bool] = {}
-    for area in areas:
-        zkey = slugify(area.name)
-        desired_map[zkey] = bool(desired.by_zone.get(zkey, False))
-        if last.get(zkey) != desired_map[zkey]:
-            commands.append(ValveCommand(area_name=area.name, zone_key=zkey, state=desired_map[zkey]))
+    for area_name, zone_key, valve_switch in areas:
+        desired_map[valve_switch] = bool(desired.by_zone.get(zone_key, False))
+        if last.get(valve_switch) != desired_map[valve_switch]:
+            commands.append(ValveCommand(area_name=area_name, zone_key=zone_key, valve_switch=valve_switch, state=desired_map[valve_switch]))
 
     on_cnt = sum(1 for v in desired_map.values() if v)
     any_open = on_cnt > 0
 
-    opening_transition = any(desired_map.get(z, False) and not last.get(z, False) for z in desired_map)
+    opening_transition = any(desired_map.get(vs, False) and not last.get(vs, False) for vs in desired_map)
 
     if any_open:
         if stage.valves_open_request_ts is None or opening_transition:
@@ -107,13 +118,15 @@ def compute_zone_valves_plan(
     ready = bool(elapsed is not None and elapsed >= float(valve_open_delay_s))
 
     stats = ZoneValvesStats(
-        zones_total=len(desired_map),
+        zones_total=len(areas),
         zones_on=on_cnt,
         requested_at=ts,
         elapsed_s=elapsed,
         opening_transition=opening_transition,
     )
-    res = ZoneValvesActuationResult(ready=ready, desired=ZoneValvesDesired(by_zone=desired_map), stats=stats)
+    # desired restituisce zone_key → bool (per il decision layer e diagnostica)
+    zone_desired_map = {zone_key: desired_map[vs] for _, zone_key, vs in areas if vs in desired_map}
+    res = ZoneValvesActuationResult(ready=ready, desired=ZoneValvesDesired(by_zone=zone_desired_map), stats=stats)
     return ZoneValvesPlan(result=res, commands=commands)
 
 

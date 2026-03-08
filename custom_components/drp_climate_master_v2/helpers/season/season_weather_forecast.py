@@ -12,6 +12,7 @@ from ...domain.models.weather import Forecast, Historical
 
 from ..logger import log_warning
 from ...domain.models.season import Seasons
+from .season_weather_calendar import CalendarSeason
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -95,6 +96,19 @@ class MeteoSeasonConfig:
     # se anno troppo incompleto, viene ignorato dalla segmentazione (stabilità)
     min_days_per_year: int = 300
 
+    # inferenza live: prior meteorologico e isteresi (ex-getattr con fallback hardcoded)
+    prior_penalty: float = 0.75
+    expected_margin: float = 0.35
+    switch_gap_min: float = 0.25
+
+    def __post_init__(self) -> None:
+        if self.prior_penalty < 0:
+            raise ValueError("prior_penalty must be >= 0")
+        if self.expected_margin < 0:
+            raise ValueError("expected_margin must be >= 0")
+        if self.switch_gap_min < 0:
+            raise ValueError("switch_gap_min must be >= 0")
+
 # ----------------------------- main model ------------------------------------
 
 
@@ -177,17 +191,9 @@ class MeteoContiguousSeasonModel:
             return None
 
         # ---------------- expected season ----------------
-        # Se non fornita, mapping meteorologico classico (DJF/MAM/JJA/SON)
+        # Se non fornita, delega a CalendarSeason (DJF/MAM/JJA/SON, corretta per Dicembre)
         if expected_season is None:
-            m = dd.month
-            if m in (12, 1, 2):
-                expected_season = Seasons.WINTER
-            elif m in (3, 4, 5):
-                expected_season = Seasons.SPRING
-            elif m in (6, 7, 8):
-                expected_season = Seasons.SUMMER
-            else:
-                expected_season = Seasons.AUTUMN
+            expected_season = CalendarSeason.for_date(dd).season_for(dd)
 
         # ---------------- candidates ----------------
         candidates: List[Seasons] = list(self._CYCLE)
@@ -205,14 +211,9 @@ class MeteoContiguousSeasonModel:
                     candidates.append(expected_season)
 
         # ---------------- tunables ----------------
-        # prior_penalty: quanto spingiamo verso expected quando i costi sono vicini
-        prior_penalty = float(getattr(self._cfg, "prior_penalty", 0.75))
-
-        # expected_margin: tie-break -> scegli expected se è quasi a pari col best
-        expected_margin = float(getattr(self._cfg, "expected_margin", 0.35))
-
-        # isteresi: evita cambio se il vantaggio è minuscolo, MA SOLO se expected==prev
-        switch_gap_min = float(getattr(self._cfg, "switch_gap_min", 0.25))
+        prior_penalty = self._cfg.prior_penalty
+        expected_margin = self._cfg.expected_margin
+        switch_gap_min = self._cfg.switch_gap_min
 
         # ---------------- score ----------------
         # total_cost = raw_cost + prior (prior = 0 se season==expected)
@@ -612,31 +613,47 @@ class MeteoContiguousSeasonModel:
 
     # ------------------------- segmentation ----------------------------------
 
-    def _years_present(self) -> List[int]:
+    @staticmethod
+    def _meteo_year_bounds(y: int) -> Tuple[date, date]:
+        """Anno meteorologico y: da Dicembre (y-1) a Novembre (y) inclusi."""
+        return date(y - 1, 12, 1), date(y, 11, 30)
+
+    def _meteo_years_present(self) -> List[int]:
+        """Anni meteorologici con almeno un giorno di segnali.
+
+        Convenzione: Dicembre del giorno d appartiene all'anno meteorologico d.year+1.
+        """
         if not self._signals:
             return []
-        return sorted({d.year for d in self._signals})
+        meteo_years: set[int] = set()
+        for d in self._signals:
+            meteo_years.add(d.year + 1 if d.month == 12 else d.year)
+        return sorted(meteo_years)
+
+    def _meteo_year_days(self, y: int) -> List[date]:
+        """Giorni di segnale nell'anno meteorologico y (Dic Y-1 → Nov Y)."""
+        lo, hi = self._meteo_year_bounds(y)
+        return sorted(d for d in self._signals if lo <= d <= hi)
 
     def _segment_all_years(self) -> Dict[date, WeatherSeason]:
         out: Dict[date, WeatherSeason] = {}
-        for y in self._years_present():
-            year_days = [d for d in sorted(self._signals) if d.year == y]
+        for y in self._meteo_years_present():
+            year_days = self._meteo_year_days(y)
             if len(year_days) < self._cfg.min_days_per_year:
-                # anno troppo incompleto: evitiamo etichette instabili.
-                # inferenza live coprirà eventuali giorni richiesti.
+                # anno meteorologico troppo incompleto: inferenza live coprirà.
                 continue
             if len(year_days) > self._cfg.max_days_per_year:
                 year_days = year_days[: self._cfg.max_days_per_year]
 
             try:
-                seg = self._segment_one_year(year_days)
+                seg = self._segment_one_year(year_days, meteo_year=y)
             except Exception as e:  # noqa: BLE001
-                log_warning(_LOGGER, "Year segmentation failed for %s: %r", y, e)
+                log_warning(_LOGGER, "Year segmentation failed for meteo year %s: %r", y, e)
                 continue
             out.update(seg)
         return out
 
-    def _segment_one_year(self, days: List[date]) -> Dict[date, WeatherSeason]:
+    def _segment_one_year(self, days: List[date], *, meteo_year: Optional[int] = None) -> Dict[date, WeatherSeason]:
         """Trova 3 breakpoints che minimizzano il costo intra-segmento.
 
         Vincoli:
@@ -760,6 +777,19 @@ class MeteoContiguousSeasonModel:
             autumn_i: Seasons.AUTUMN,
         }
 
+        # Post-labeling consistency check: in anno meteorologico Nord (Dic→Nov),
+        # l'ordine atteso è approssimativamente WINTER < SPRING < SUMMER < AUTUMN.
+        # Un SUMMER prima di WINTER o un WINTER dopo SUMMER suggerisce inversione.
+        season_positions = {label_map[i]: i for i in range(4)}
+        if season_positions[Seasons.SUMMER] < season_positions[Seasons.WINTER]:
+            log_warning(
+                _LOGGER,
+                "Segmentation consistency warning (meteo_year=%s): SUMMER (seg %d) before WINTER (seg %d) – check input data.",
+                meteo_year,
+                season_positions[Seasons.SUMMER],
+                season_positions[Seasons.WINTER],
+            )
+
         # regime mediano per segmento (in z-space)
         seg_regime_med: List[List[float]] = []
         for a, b in seg_idx:
@@ -799,8 +829,9 @@ class MeteoContiguousSeasonModel:
                 anomaly = score >= self._cfg.anomaly_z
                 regime_hint = self._regime_hint(sig)
 
+                my_label = f"meteo_year={meteo_year}" if meteo_year is not None else f"year={dd.year}"
                 reason = (
-                    f"year={dd.year} seg={seg_no} [{days[a]}..{days[b]}] "
+                    f"{my_label} seg={seg_no} [{days[a]}..{days[b]}] "
                     f"t_mean_seg={seg_stats[seg_no]['t_mean']:.2f} tr_mean_seg={seg_stats[seg_no]['tr_mean']:.2f} "
                     f"score={score:.2f}{'; anomaly' if anomaly else ''}"
                 )

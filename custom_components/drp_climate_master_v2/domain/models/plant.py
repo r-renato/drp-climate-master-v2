@@ -59,9 +59,17 @@ class ZoneSnapshot:
     condensation_margin: Optional[AggregatedValue] = None
 
     radiant_valve: Optional[AggregatedValue] = None
-    
+
     flow_t: Optional[float] = None
     return_t: Optional[float] = None
+
+    weight: float = 1.0
+    """Peso della zona nelle metriche aggregate di domanda (quorum/coverage).
+    Corrisponde a AreaConfig.ceiling espresso in m². Default 1.0 per
+    retrocompatibilità con zone senza ceiling configurato.
+    Una zona con weight=0.0 è visibile al planner (valvola comandata,
+    dew-point guard attivo) ma non pesa nel calcolo quorum/coverage globale.
+    """
 
 
 @dataclass(slots=True)

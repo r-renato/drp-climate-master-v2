@@ -32,6 +32,7 @@ from ...domain.models.runtime_schema import (
     PlantCapabilities,
     RadiantConfig,
     RadiantSensors,
+    RadiantSurface,
     RuntimeConfig,
     ScenariosConfig,
     SeasonConfig,
@@ -79,6 +80,9 @@ from ...const import (
     CONF_PROVIDER,
     CONF_RADIANT,
     CONF_RADIANT_SURFACE,
+    CONF_RADIANT_SURFACES,
+    CONF_SURFACE_M2,
+    CONF_VALVE_SWITCH,
     CONF_REQUESTS,
     CONF_SCENARIOS,
     CONF_SEASON,
@@ -242,19 +246,44 @@ def build_runtime_config(entry: ConfigEntry) -> RuntimeConfig:
     if not isinstance(areas_cfg, list):
         raise ConfigEntryNotReady(f"Invalid '{CONF_AREAS}': expected list.")
 
-    areas = [
-        AreaConfig(
+    areas = []
+    for a in areas_cfg:
+        if not isinstance(a, Mapping):
+            continue
+
+        # ── Risoluzione radiant_surfaces ────────────────────────────────
+        # Nuovo formato: radiant_surfaces è una lista di {valve_switch, surface_m2}.
+        # Vecchio formato flat: thermal_collector_valve_switch + radiant_surface.
+        # Se entrambi presenti, il nuovo formato ha precedenza.
+        raw_surfaces = a.get(CONF_RADIANT_SURFACES)
+        if raw_surfaces:
+            radiant_surfaces = tuple(
+                RadiantSurface(
+                    valve_switch=s[CONF_VALVE_SWITCH],
+                    surface_m2=float(s.get(CONF_SURFACE_M2, 0.0)),
+                )
+                for s in raw_surfaces
+                if isinstance(s, Mapping) and s.get(CONF_VALVE_SWITCH)
+            )
+        elif a.get(CONF_TCOLLECTOR):
+            # Retrocompatibilità: converte formato flat → RadiantSurface singola.
+            radiant_surfaces = (
+                RadiantSurface(
+                    valve_switch=a[CONF_TCOLLECTOR],
+                    surface_m2=float(a.get(CONF_RADIANT_SURFACE, 0.0)),
+                ),
+            )
+        else:
+            radiant_surfaces = ()
+
+        areas.append(AreaConfig(
             name=a[CONF_AREA],
             indoor=a.get(CONF_INDOOR, True),
             radiant=a.get(CONF_RADIANT, True),
             sensors=SensorPair(**a[CONF_SENSORS]),
-            thermal_collector_valve_switch=a.get(CONF_TCOLLECTOR, None),
+            radiant_surfaces=radiant_surfaces,
             ceiling=a.get(CONF_CEILING, None),
-            radiant_surface=a.get(CONF_RADIANT_SURFACE, None),
-        )
-        for a in areas_cfg
-        if isinstance(a, Mapping)
-    ]
+        ))
 
     # --- Devices (required for your runtime logic) ---
     dev_cfg = _require_mapping(climate_cfg, CONF_DEVICES, "climate config")
@@ -424,13 +453,14 @@ def collect_entity_ids_for_state_changes(runtime: "RuntimeConfig") -> list[str]:
     if not climate:
         return out
 
-    # --- AREE: sensori T/H + interruttore valvola collettore termico
+    # --- AREE: sensori T/H + tutte le elettrovalvole delle superfici radianti
     for area in getattr(climate, "areas", []) or []:
         sensors = getattr(area, "sensors", None)
         if sensors:
             _add(getattr(sensors, "temperature", None))
             _add(getattr(sensors, "humidity", None))
-        _add(getattr(area, "thermal_collector_valve_switch", None))
+        for vs in getattr(area, "valve_switches", lambda: ())():
+            _add(vs)
 
     # --- SUPPLY UNITS: attuatori + TUTTI i sensori
     su = getattr(getattr(climate, "devices", None), "supply_units", None)
