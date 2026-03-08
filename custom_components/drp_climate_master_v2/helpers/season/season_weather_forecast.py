@@ -554,15 +554,76 @@ class MeteoContiguousSeasonModel:
         i = cycle.index(s)
         return cycle[(i + 1) % len(cycle)]
 
+    @staticmethod
+    def _djf_buckets_for_year(
+        y: int,
+        signals: "Dict[date, WeatherDaySignals]",
+    ) -> "Dict[Seasons, List[date]]":
+        """Giorni del meteo-year y assegnati ai confini DJF canonici (emisfero nord).
+
+        I confini sono fissi e non dipendono dalla segmentazione DP:
+          WINTER : [1 Dic (y-1) .. ultimo Feb (y)]
+          SPRING : [1 Mar (y)   .. 31 Mag (y)]
+          SUMMER : [1 Giu (y)   .. 31 Ago (y)]
+          AUTUMN : [1 Set (y)   .. 30 Nov (y)]
+
+        Usato da _fit_infer_prototypes per ancorare i prototipi live ai regimi
+        climatologici DJF indipendentemente da dove il DP ha posizionato i breakpoints.
+        """
+        import calendar as _cal
+        feb_last = _cal.monthrange(y, 2)[1]
+        windows_djf: Dict[Seasons, Tuple[date, date]] = {
+            Seasons.WINTER: (date(y - 1, 12, 1), date(y, 2, feb_last)),
+            Seasons.SPRING: (date(y, 3, 1),       date(y, 5, 31)),
+            Seasons.SUMMER: (date(y, 6, 1),       date(y, 8, 31)),
+            Seasons.AUTUMN: (date(y, 9, 1),       date(y, 11, 30)),
+        }
+        out: Dict[Seasons, List[date]] = {s: [] for s in Seasons}
+        for s, (lo, hi) in windows_djf.items():
+            out[s] = [d for d in signals if lo <= d <= hi]
+        return out
+
     def _fit_infer_prototypes(self) -> None:
-        """Stima prototipi robusti per inferenza live usando i giorni etichettati."""
+        """Prototipi per inferenza live ancorati ai confini DJF/MAM/JJA/SON canonici.
+
+        Usa i segnali nei confini stagionali fissi (DJF/MAM/JJA/SON) di ogni
+        meteo-year segmentato, ignorando dove il DP ha posizionato i breakpoints.
+        Questo rende i prototipi stabili anche quando il DP allarga il segmento
+        WINTER oltre Febbraio (es. Dicembre mite + Marzo fresco sullo stesso cluster).
+
+        Fallback: se un bucket DJF ha meno di 20 giorni di segnale, si usa il
+        bucket etichettato dal DP (comportamento precedente).
+        """
+        # --- bucket DJF canonici da tutti i meteo-year segmentati ---
         buckets: Dict[Seasons, List[List[Optional[float]]]] = {s: [] for s in self._CYCLE}
 
-        for dd, ds in self._out.items():
-            v = self._vec(ds.weather_day_signals)
-            if v is None:
+        meteo_years = self._meteo_years_present()
+        djf_used = False
+        for y in meteo_years:
+            lo, hi = self._meteo_year_bounds(y)
+            # solo anni effettivamente segmentati (presenti in self._out)
+            if not any(lo <= dd <= hi for dd in self._out):
                 continue
-            buckets[ds.season].append(v)
+            day_buckets = self._djf_buckets_for_year(y, self._signals)
+            for s, days in day_buckets.items():
+                for dd in days:
+                    if dd not in self._signals:
+                        continue
+                    v = self._vec(self._signals[dd])
+                    if v is not None:
+                        buckets[s].append(v)
+                        djf_used = True
+
+        # fallback: se nessun dato DJF disponibile, usa etichette DP (caso degenere)
+        if not djf_used:
+            log_warning(
+                _LOGGER,
+                "_fit_infer_prototypes: nessun dato DJF disponibile, fallback su etichette DP.",
+            )
+            for dd, ds in self._out.items():
+                v = self._vec(ds.weather_day_signals)
+                if v is not None:
+                    buckets[ds.season].append(v)
 
         for season in self._CYCLE:
             vs = buckets[season]
