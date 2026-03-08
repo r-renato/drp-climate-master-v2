@@ -17,6 +17,7 @@ class IntegrationMeta(NamedTuple):
     domain: str
     name: str
     version: str
+    build: str
     manufacturer: str
     issue_url: str
 
@@ -26,7 +27,7 @@ def load_integration_meta(pkg: str = __package__ or "const") -> IntegrationMeta:
     Legge manifest.json come risorsa del pacchetto (portabile anche con zipimport).
     Ritorna fallback sicuri se mancante/corrotto.
     """
-    default = IntegrationMeta("N/A", "Unknown Integration", "N/A", "N/A", "N/A")
+    default = IntegrationMeta("N/A", "Unknown Integration", "N/A", "N/A", "N/A", "N/A")
     try:
         text = (files(pkg) / "manifest.json").read_text(encoding="utf-8")
         data = json.loads(text)
@@ -34,6 +35,7 @@ def load_integration_meta(pkg: str = __package__ or "const") -> IntegrationMeta:
             data.get("domain", default.domain),
             data.get("name", default.name),
             data.get("version", default.version),
+            data.get("build", default.build),
             data.get("manufacturer", default.manufacturer),
             data.get("issue_tracker") or data.get("issue_url") or default.issue_url,
         )
@@ -42,18 +44,21 @@ def load_integration_meta(pkg: str = __package__ or "const") -> IntegrationMeta:
         return default
 
 def make_startup_banner(meta: IntegrationMeta) -> str:
-    return (
-        "-------------------------------------------------------------------\n"
-        f"{meta.name}\n"
-        f"Version: {meta.version}\n"
-        "This is a custom integration!\n"
-        "If you have any issues with this you need to open an issue here:\n"
-        f"{meta.issue_url}\n"
-        "-------------------------------------------------------------------"
-    )
+    return "\n".join(
+            [
+                "",
+                "-------------------------------------------------------------------",
+                f"{meta.name}",
+                "",
+                f"Version: {meta.version} build {meta.build}",
+                "This is a custom integration!",
+                "If you have any issues with this you need to open an issue here:",
+                f"{meta.issue_url}",
+                "-------------------------------------------------------------------"
+            ])
 
 _META = load_integration_meta()   # __package__ punta a custom_components.<domain>
-DOMAIN, INTEGRATION_NAME, INTEGRATION_VERSION, INTEGRATION_MANUFACTURER, INTEGRATION_ISSUE_URL = _META
+DOMAIN, INTEGRATION_NAME, INTEGRATION_VERSION, INTEGRATION_BUILD, INTEGRATION_MANUFACTURER, INTEGRATION_ISSUE_URL = _META
 STARTUP_MESSAGE = make_startup_banner(_META)
 
 # --- Identità integrazione ----------------------------------------------------

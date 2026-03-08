@@ -6,6 +6,9 @@ cd "$(dirname "$0")/.."
 echo "Deploy custom component from $(pwd)"
 
 IMAGE_ID=$(sudo docker ps -a | grep homeassistant | awk '{ print $1 }')
+MANIFEST_FILE="custom_components/drp_climate_master_v2/manifest.json"
+
+sed -i "s/\"build\": \"[0-9]*/\"build\": \"$(($(sed -n 's/.*"build": "\([0-9]*\)".*/\1/p' $MANIFEST_FILE) + 1))/" $MANIFEST_FILE
 
 sudo docker stop $IMAGE_ID && sleep 5 
 sudo rm -Rf /home/drp/platform/homeassistant/custom_components/drp_climate_master_v2

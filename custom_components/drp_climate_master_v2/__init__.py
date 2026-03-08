@@ -14,7 +14,7 @@ from homeassistant.helpers.reload import async_integration_yaml_config
 from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.typing import ConfigType
 
-from .const import COORDINATOR, DOMAIN, ENTITIES_STATE, PLATFORMS, SUPERVISOR, WEATHER_COORDINATOR
+from .const import STARTUP_MESSAGE, COORDINATOR, DOMAIN, ENTITIES_STATE, PLATFORMS, SUPERVISOR, WEATHER_COORDINATOR
 from .controller.coordinator import ClimateCoordinator
 from .controller.supervisor import ClimateSupervisor
 from .controller.weather_coordinator import WeatherCoordinator
@@ -145,6 +145,8 @@ async def _run_import_flow(hass: HomeAssistant, hub_cfg: dict[str, Any], key: st
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up from YAML (sync-to-ConfigEntries)."""
 
+    log_info(_LOGGER, f"{STARTUP_MESSAGE}")
+    
     domain_cfg = config.get(DOMAIN)
     if domain_cfg is None:
         return True
