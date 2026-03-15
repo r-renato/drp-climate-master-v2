@@ -342,9 +342,9 @@ class SeasonState:
                 f"                      :: dew    = {self.weather.weather_day_signals.dew} °C",
                 f"                      :: wind   = {self.weather.weather_day_signals.wind} km/h",
                 f"                      :: cloud  = {((self.weather.weather_day_signals.cloud or 0) * 100):.1f} %",
-                f"                      :: t_smooth (engineered )   = {self.weather.weather_day_signals.t_smooth:.1f} °C",
-                f"                      :: dew_smooth (engineered ) = {self.weather.weather_day_signals.dew_smooth:.1f} °C",
-                f"                      :: trend (engineered )      = {self.weather.weather_day_signals.trend:.1f}",
+                f"                      :: t_smooth (engineered )   = {f'{self.weather.weather_day_signals.t_smooth:.1f}' if self.weather.weather_day_signals.t_smooth is not None else '-'} °C",
+                f"                      :: dew_smooth (engineered ) = {f'{self.weather.weather_day_signals.dew_smooth:.1f}' if self.weather.weather_day_signals.dew_smooth is not None else '-'} °C",
+                f"                      :: trend (engineered )      = {f'{self.weather.weather_day_signals.trend:.1f}' if self.weather.weather_day_signals.trend is not None else '-'}",
                 f"Detect model          :: {self.weather_detect_model}",
                 "-" * 60,
             ]

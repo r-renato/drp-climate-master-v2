@@ -16,7 +16,7 @@ from ...devices.caleffi_pumps import CaleffiSupplyPumps
 from ...devices.eneren_rer020i import EnerenRER020I
 from ...devices.eurotherm import EurothermElectrovalve
 
-from ...domain.models.plant import PlantSnapshot
+from ...plant.monitor.plant import PlantSnapshot
 from ...domain.models.runtime_schema import RuntimeConfig
 
 from ..decision.contracts import PdcCommand, PlantDecision, VmcCommand

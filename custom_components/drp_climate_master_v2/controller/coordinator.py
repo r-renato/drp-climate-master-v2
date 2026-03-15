@@ -21,10 +21,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 from homeassistant.const import EntityCategory, CONF_NAME, EVENT_HOMEASSISTANT_STARTED, PERCENTAGE
 
-from ..domain.models.plant import PlantSnapshot
+from ..plant.monitor.plant import PlantSnapshot
 
 from ..domain.enums import HVACOperatingProfile
-from ..helpers.builders.snapshot_plant_states import async_build_plant_states_snapshot
+from ..plant.monitor.builder import async_build_plant_states_snapshot
 from ..helpers.timeutils import now_utc
 
 from ..domain.models.season import OperativeSeason, SeasonState, Seasons

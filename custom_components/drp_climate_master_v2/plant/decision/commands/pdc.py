@@ -7,7 +7,7 @@ from typing import Optional
 
 from ....helpers.utils import clamp
 from ....domain.enums import HVACOperatingProfile
-from ....domain.models.plant import PlantSnapshot
+from ....plant.monitor.plant import PlantSnapshot
 
 from ..config import PlantPlannerConfig
 from ..contracts import PlantDecision, PlantDemandSignals, PlantMode

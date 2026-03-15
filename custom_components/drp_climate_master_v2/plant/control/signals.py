@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from ...domain.models.plant import PlantSnapshot
+from ...plant.monitor.plant import PlantSnapshot
 from ...helpers.utils import as_float
 
 from ..decision.contracts import PdcCommand, PlantDecision

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from ....domain.models.plant import PlantSnapshot
+from ....plant.monitor.plant import PlantSnapshot
 from ....helpers.utils import as_float, slugify
 
 from ..config import PlantPlannerConfig

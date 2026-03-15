@@ -5,7 +5,7 @@ import math
 from typing import Optional
 
 from ....domain.enums import HVACOperatingProfile
-from ....domain.models.plant import PlantSnapshot
+from ....plant.monitor.plant import PlantSnapshot
 from ....helpers.psychrometric import dew_point_celsius
 from ....helpers.utils import as_float, clamp
 

@@ -10,7 +10,7 @@ from homeassistant.util import dt as dt_util
 
 from ...helpers.logger import log_debug, log_exception
 from ...helpers.utils import as_float, as_int
-from ...domain.models.plant import PlantSnapshot
+from ...plant.monitor.plant import PlantSnapshot
 from ...domain.enums import HVACOperatingProfile
 
 from .zone.model import ZonesDecision

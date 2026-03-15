@@ -6,7 +6,7 @@ from typing import Mapping, Optional
 
 from homeassistant.components.climate.const import HVACMode
 
-from .....domain.models.plant import PlantSnapshot
+from .....plant.monitor.plant import PlantSnapshot
 
 from ...config import ZonesMpcConfig
 from ..model import ZonesDecision

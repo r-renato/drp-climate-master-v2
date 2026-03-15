@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ....helpers.utils import as_float, clamp
-from ....domain.models.plant import PlantSnapshot
+from ....plant.monitor.plant import PlantSnapshot
 
 from ..config import PlantPlannerConfig
 from ..contracts import PlantDecision, PlantDemandSignals, PlantMode
@@ -58,6 +58,14 @@ class SupplyCommandBuilder:
     ) -> None:
         cfg = self.cfg
         s = dec.supply
+
+        # Legge la temperatura di mandata radiante misurata direttamente (proxy preferito §3.2).
+        # Disponibile solo quando la pompa è già avviata; None durante starting è normale.
+        t_adj_supply_now: float | None = None
+        if snapshot.supply_unit:
+            t_adj_supply_now = as_float(
+                getattr(snapshot.supply_unit, "sensor_adjustable_temp_system_supply", None)
+            )
 
         # Heuristic: circuito radiante (mix) attivo se abbiamo almeno una elettrovalvola "ON".
         # Preferiamo la sorgente unificata `dec.valves` (builder dedicato), altrimenti
@@ -125,16 +133,42 @@ class SupplyCommandBuilder:
                     }
                 )
             else:
-                s.rad_supply_target_c = float(dew_guard.radiant_target_c) if dew_guard.radiant_target_c is not None else None
-                s.debug.update(
-                    {
-                        "dew_guard_dp_max_c": dew_guard.dp_max_c,
-                        "dew_guard_required_c": dew_guard.safe_required_c,
-                        "dew_guard_max_c": dew_guard.max_allowed_c,
-                        "dew_guard_action": "set_radiant_target",
-                        "dew_guard_reason": dew_guard.reason,
-                    }
-                )
+                # Livello 2 (misura diretta): anche se la policy stima radiant_allowed=True,
+                # verifica che la T acqua effettivamente misurata al circuito radiante
+                # sia sopra la soglia di sicurezza anticondensa.
+                # Questo cattura deviazioni tra setpoint calcolato e temperatura reale
+                # (inerzia idraulica, errori di miscelazione, deriva valvola).
+                if (
+                    t_adj_supply_now is not None
+                    and dew_guard.safe_required_c is not None
+                    and float(t_adj_supply_now) < float(dew_guard.safe_required_c)
+                ):
+                    dec.warnings.append("dew_guard_adj_supply_below_safe")
+                    s.adj_pump_on = False
+                    s.rad_supply_target_c = None
+                    s.debug.update(
+                        {
+                            "dew_guard_action": "disable_adj_pump_measured",
+                            "dew_guard_reason": "adj_supply_below_safe",
+                            "dew_guard_adj_supply_c": float(t_adj_supply_now),
+                            "dew_guard_safe_required_c": float(dew_guard.safe_required_c),
+                            "dew_guard_dp_max_c": dew_guard.dp_max_c,
+                        }
+                    )
+                else:
+                    # Nessuna violazione misurata: il target rimane invariato.
+                    s.rad_supply_target_c = (
+                        float(dew_guard.radiant_target_c)
+                        if dew_guard.radiant_target_c is not None
+                        else None
+                    )
+                    s.debug.update(
+                        {
+                            "dew_guard_action": "set_radiant_target",
+                            "dew_guard_reason": dew_guard.reason,
+                            "dew_guard_adj_supply_c": float(t_adj_supply_now) if t_adj_supply_now is not None else None,
+                        }
+                    )
 
         s.debug["any_zone_on"] = any_zone_on
 

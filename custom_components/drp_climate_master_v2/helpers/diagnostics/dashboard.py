@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from homeassistant.util import dt as dt_util
 
 from ...helpers.utils import as_float
-from ...domain.models.plant import PlantSnapshot
+from ...plant.monitor.plant import PlantSnapshot
 
 
 def _iso(ts: Optional[datetime]) -> str:

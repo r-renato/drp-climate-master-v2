@@ -10,7 +10,7 @@ from homeassistant.util import dt as dt_util
 
 from ....helpers.utils import as_float
 from ....helpers.sensor_aggregator import AggregatedValue
-from ....domain.models.plant import PlantSnapshot, ZoneSnapshot
+from ....plant.monitor.plant import PlantSnapshot, ZoneSnapshot
 from ....domain.enums import HVACOperatingProfile
 
 from .model import ZoneCommand, ZonesDecision

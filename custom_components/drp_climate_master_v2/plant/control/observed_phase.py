@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ...domain.models.plant import PlantSnapshot
+from ...plant.monitor.plant import PlantSnapshot
 
 from .model import PlantPhase
 from .signals import PlantControlContext

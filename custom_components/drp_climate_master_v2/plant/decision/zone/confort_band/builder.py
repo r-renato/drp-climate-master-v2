@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone, time
 from typing import Dict
 
-from custom_components.drp_climate_master_v2.domain.models.plant import ZoneSnapshot
+from ....monitor.plant import ZoneSnapshot
 
 from .....domain.enums import HVACOperatingProfile
 from .....helpers.utils import slugify

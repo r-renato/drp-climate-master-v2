@@ -76,7 +76,7 @@ from ..plant.decision.context import DecisionDerivedInputs
 from ..plant.decision.zone.confort_band.builder import build_comfort_engine, build_confort_zones
 
 from ..const import DOMAIN
-from ..helpers.logger import log_debug, log_exception, log_info
+from ..helpers.logger import log_debug, log_exception, log_info, log_warning
 from ..helpers.diagnostics.dashboard import build_dashboard, render_dashboard_text
 from ..helpers.scheduler import IntervalGatedSchedulerBase
 from ..helpers.utils import as_float, as_int
@@ -310,30 +310,6 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                 if snap is not None:
                     try:
                         log_debug(_LOGGER, "PlantSnapshot %s", snap)
-                        
-                        # derived: DecisionDerivedInputs | None = None
-                        # try:
-                        #     # Compute comfort-band per zone as *derived decision input*.
-                        #     # The comfort band is not part of PlantSnapshot by design.
-                        #     if snap.indoor_zones and snap.season is not None:
-                        #         vmc_speed = as_int(getattr(getattr(snap, "vmc", None), "spare_setpoint", None), default=0, min_value=0, max_value=5) or 0
-                        #         t_out = as_float(getattr(getattr(snap, "global_outdoor_temperature", None), "value", None))
-                        #         preset = getattr(snap, "climate_preset_mode", None) or HVACOperatingProfile.COMFORT
-                        #         bands = build_confort_zones(
-                        #             now=snap.timestamp,
-                        #             runtime_config=self._coordinator.runtime_config,
-                        #             season_state=snap.season,
-                        #             indoor_zones=snap.indoor_zones,
-                        #             vmc_speed=int(vmc_speed),
-                        #             outdoor_temp=t_out,
-                        #             preset_mode=preset,
-                        #             policy_cfg=self._comfort_policy_cfg,
-                        #             policy_layer=self._comfort_policy_layer,
-                        #         )
-                        #         derived = DecisionDerivedInputs(comfort_bands_by_zone=bands)
-                        # except Exception as e:
-                        #     # Comfort-band failures must not break the plant tick.
-                        #     log_exception(_LOGGER, "Comfort-band computation failed: %s", e)
 
                         self._last_plant_decision = self._plant_decision_planner.plan(
                             snapshot=snap,
@@ -341,15 +317,6 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                             # derived=derived,
                         )
                         log_debug(_LOGGER, "PlantDecision %s", self._last_plant_decision)
-
-                        # # Zones MPC plan may be produced by the plant planner.
-                        # self._last_zones_decision = getattr(self._last_plant_decision, "zones", None)
-                        # if self._last_zones_decision is not None:
-                        #     log_debug(_LOGGER, "ZonesDecision %s", self._last_zones_decision)
-
-                        # # Expose zones plan to UI logic below
-                        # plan = self._last_zones_decision
-
 
                         await self._plant_actuator.async_apply(snapshot=snap, decision=self._last_plant_decision)
 
@@ -363,7 +330,9 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                         log_exception(_LOGGER, "Plant control decision failed: %s", e)
                         self._last_plant_decision = None
 
-                # plan = await self._engine.async_run_once(reason=reason)
+                else:
+                    log_warning(_LOGGER, "No PlantSnapshot available, skipping plant decision (reason=%s)", reason)
+                
             except asyncio.CancelledError:
                 return
 

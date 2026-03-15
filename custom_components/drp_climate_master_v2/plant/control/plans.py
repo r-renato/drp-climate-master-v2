@@ -36,18 +36,23 @@ def compute_zone_valves_plan(
     Lo spegnimento/chiusura forzata e gestito da `force_close_valves` (fail-safe).
     """
 
-    # Costruisce lista piatta (area_name, zone_key, valve_switch) da radiant_surfaces.
-    # Per aree con una sola superficie: zone_key = slugify(area.name).
-    # Per aree con più superfici: zone_key = slugify(area.name)_{idx} per unicità.
-    valve_areas: list[tuple[str, str, str]] = []
+    # Costruisce lista piatta (area_name, area_slug, zone_key, valve_switch) da radiant_surfaces.
+    # area_slug  = slugify(area.name)        → chiave logica (= chiave del decision layer)
+    # zone_key   = area_slug | area_slug_{idx} → chiave diagnostica/comandi (unica per valvola)
+    #
+    # Invariante: desired.by_zone usa SEMPRE area_slug come chiave, mai zone_key indicizzato.
+    # Il zone_key indicizzato serve solo per log e statistiche; non viene mai usato in lookup.
+    valve_areas: list[tuple[str, str, str, str]] = []  # (area_name, area_slug, zone_key, valve_switch)
     for a in (runtime_areas or []):
         surfs = getattr(a, "radiant_surfaces", ()) or ()
         n = len(surfs)
+        area_slug = slugify(a.name)
         for idx, surf in enumerate(surfs):
             vs = getattr(surf, "valve_switch", None)
             if vs:
-                zkey = slugify(a.name) if n == 1 else f"{slugify(a.name)}_{idx}"
-                valve_areas.append((a.name, zkey, vs))
+                # zone_key indicizzato solo quando N>1 per evitare duplicati nel log.
+                zkey = area_slug if n == 1 else f"{area_slug}_{idx}"
+                valve_areas.append((a.name, area_slug, zkey, vs))
 
     if not valve_areas:
         stage.valves_open_request_ts = None
@@ -74,7 +79,7 @@ def compute_zone_valves_plan(
     # Caso: non consentito -> chiudi tutte (fail-safe).
     if not allow_valves:
         closed_map: dict[str, bool] = {}
-        for area_name, zone_key, valve_switch in areas:
+        for area_name, area_slug, zone_key, valve_switch in areas:
             closed_map[valve_switch] = False
             if last.get(valve_switch) is not False:
                 commands.append(ValveCommand(area_name=area_name, zone_key=zone_key, valve_switch=valve_switch, state=False))
@@ -95,8 +100,11 @@ def compute_zone_valves_plan(
 
     # Caso: consentito -> applica desiderato per zona.
     desired_map: dict[str, bool] = {}
-    for area_name, zone_key, valve_switch in areas:
-        desired_map[valve_switch] = bool(desired.by_zone.get(zone_key, False))
+    for area_name, area_slug, zone_key, valve_switch in areas:
+        # Lookup SEMPRE su area_slug (chiave logica del decision layer).
+        # zone_key indicizzato non è mai prodotto dal decision layer (ZoneDecisionPlanner
+        # itera snapshot.indoor_zones che usa slugify(area.name) senza indice).
+        desired_map[valve_switch] = bool(desired.by_zone.get(area_slug, False))
         if last.get(valve_switch) != desired_map[valve_switch]:
             commands.append(ValveCommand(area_name=area_name, zone_key=zone_key, valve_switch=valve_switch, state=desired_map[valve_switch]))
 
@@ -124,8 +132,8 @@ def compute_zone_valves_plan(
         elapsed_s=elapsed,
         opening_transition=opening_transition,
     )
-    # desired restituisce zone_key → bool (per il decision layer e diagnostica)
-    zone_desired_map = {zone_key: desired_map[vs] for _, zone_key, vs in areas if vs in desired_map}
+    # desired restituisce zone_key → bool per diagnostica (zone_key può essere indicizzato)
+    zone_desired_map = {zone_key: desired_map[vs] for _, _, zone_key, vs in areas if vs in desired_map}
     res = ZoneValvesActuationResult(ready=ready, desired=ZoneValvesDesired(by_zone=zone_desired_map), stats=stats)
     return ZoneValvesPlan(result=res, commands=commands)
 

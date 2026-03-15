@@ -16,7 +16,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 
-from custom_components.drp_climate_master_v2.domain.models.plant import PlantSnapshot
+from custom_components.drp_climate_master_v2.plant.monitor.plant import PlantSnapshot
 
 from .controller.coordinator import ClimateCoordinator
 

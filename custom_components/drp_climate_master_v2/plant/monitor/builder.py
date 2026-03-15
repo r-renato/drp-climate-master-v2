@@ -8,13 +8,13 @@ from homeassistant.components.climate.const import HVACMode
 from homeassistant.core import HomeAssistant, State
 
 from ...domain.enums import HVACOperatingProfile
-from ..sensor_aggregator import AggregatedValue, SensorAggregator
+from ...helpers.sensor_aggregator import AggregatedValue, SensorAggregator
 
-from ..logger import log_debug, log_exception, log_warning
+from ...helpers.logger import log_debug, log_exception, log_warning
 
-from ..ha import get_entity_value, async_time_in_states
+from ...helpers.ha import get_entity_value, async_time_in_states
 
-from ...domain.models.plant import (
+from .plant import (
     PDCSnapshot,
     PlantSnapshot,
     SupplyUnitSnapshot,
@@ -30,7 +30,7 @@ from ...domain.models.runtime_schema import (
     is_active_radiant_zone,
 )
 from ...domain.models.season import SeasonState
-from ..utils import as_bool, as_float, as_int, make_class, slugify
+from ...helpers.utils import as_bool, as_float, as_int, make_class, slugify
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -57,8 +57,8 @@ async def async_build_plant_states_snapshot(
 
         try:
             for area in areas:
-                timestamp=ts
-                name=slugify(area.name)
+                timestamp = ts
+                name = slugify(area.name)
 
                 if is_active_radiant_zone(area):
                     condensation_margin: AggregatedValue = sensor_aggr.get(name=f"{name}.condensation_margin")
@@ -349,10 +349,31 @@ async def async_build_plant_states_snapshot(
         supply_unit: SupplyUnitSnapshot | None = _build_supply_unit_snapshot(runtime_config, timestamp)
 
         runtime_windows=runtime_config.climate.windows
+        windows_close_state=False
+        windows_close_minutes_off: Optional[float] = None
         if runtime_windows:
             windows_close_state=as_bool(get_entity_value(entities_state, runtime_windows.closed_state)) or False
-        else:
-            windows_close_state=False
+
+            if not windows_close_state:
+
+                def _key_bool(st: State) -> Optional[bool]:
+                    if st.state in ("unknown", "unavailable", None):
+                        return None
+                    try:
+                        v = bool(st.state)
+                    except (TypeError, ValueError):
+                        return None
+                    return v
+                windows_close_in_state_times = await async_time_in_states(
+                    hass,
+                    runtime_windows.closed_state,
+                    timestamp,                 # UTC aware
+                    window="last_24h",
+                    key_fn=_key_bool,
+                    include_unknown=False,
+                )
+                windows_close_minutes_off = windows_close_in_state_times.current_key_age_min
+
         presence_vacation=as_bool(get_entity_value(entities_state, runtime_config.climate.scenarios.vacation)) or False
         presence_nobodysin=as_bool(get_entity_value(entities_state, runtime_config.climate.scenarios.nobodysin)) or False
         
@@ -373,7 +394,7 @@ async def async_build_plant_states_snapshot(
             return_t=supply_unit.sensor_adjustable_temp_system_return if supply_unit else None
         )
 
-        return make_class(
+        plant_snapshot = make_class(
             PlantSnapshot,
             timestamp=timestamp,
             season=season,
@@ -386,6 +407,7 @@ async def async_build_plant_states_snapshot(
             supply_unit=supply_unit,
 
             windows_close_state=windows_close_state,
+            windows_close_minutes_off=windows_close_minutes_off,
             presence_vacation=presence_vacation,
             presence_nobodysin=presence_nobodysin,
 
@@ -405,6 +427,9 @@ async def async_build_plant_states_snapshot(
             climate_hvac_mode=climate_hvac_mode,
             climate_preset_mode=climate_preset_mode,
         )
+
+        log_debug(_LOGGER, "Built PlantSnapshot %s", plant_snapshot)
+        return plant_snapshot
     except TypeError as ex:
         # Parametri mancanti/extra o mismatch firma costruttore
         log_warning( _LOGGER, "Error creating PlantSnapshot %s", ex, exc_info=True)

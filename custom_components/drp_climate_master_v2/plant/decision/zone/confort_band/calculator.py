@@ -20,7 +20,7 @@ from typing import Dict, Optional, Tuple
 from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
 
-from .....domain.models.plant import SeasonState, ZoneSnapshot
+from .....plant.monitor.plant import SeasonState, ZoneSnapshot
 from .....domain.models.season import OperativeSeason, Seasons
 from .....domain.models.runtime_schema import RuntimeConfig
 

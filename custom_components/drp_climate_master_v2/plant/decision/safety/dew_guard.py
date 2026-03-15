@@ -21,6 +21,9 @@ class DewGuardResult:
     - reason: short machine-readable reason string (diagnostic).
     """
 
+    # Livello 1: stima basata su dp_max + margine (decision-time)
+    # Livello 2: verifica sulla misura diretta adj_supply (actuation-time, opzionale)
+    # Se adj_supply_c è presente e < safe_required_c → adj_pump_safe = False
     dp_max_c: float | None
     safe_required_c: float | None
     max_allowed_c: float
@@ -28,6 +31,9 @@ class DewGuardResult:
     radiant_target_c: float | None
     suggested_mode: PlantMode | None
     reason: str | None = None
+    # Verifica misura diretta (popolata da SupplyCommandBuilder dopo lettura snapshot)
+    adj_supply_c: float | None = None
+    adj_pump_safe: bool = True  # False se adj_supply misurato < safe_required_c
 
 
 class DewGuardPolicy:

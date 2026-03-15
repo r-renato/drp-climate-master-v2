@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 from ....helpers.num import quantile_linear
 
 from ..contracts import MetricBasis, PlantDemandSignals
-from ....domain.models.plant import PlantSnapshot
+from ....plant.monitor.plant import PlantSnapshot
 from ....helpers.psychrometric import dew_point_celsius
 from ....helpers.utils import as_float
 

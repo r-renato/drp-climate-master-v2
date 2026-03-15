@@ -7,7 +7,7 @@ from homeassistant.components.climate.const import HVACMode
 
 from ....helpers.utils import as_float
 from ....domain.enums import HVACOperatingProfile
-from ....domain.models.plant import PlantSnapshot
+from ....plant.monitor.plant import PlantSnapshot
 
 from ..config import PlantPlannerConfig
 from ..contracts import PlantDemandSignals, PlantMode
