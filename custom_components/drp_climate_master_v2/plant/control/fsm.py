@@ -7,6 +7,34 @@ from typing import Optional
 from .model import PlantFsmOutput, PlantPhase, StagingState
 
 
+def fsm_valve_gate(phase: PlantPhase) -> tuple[bool, bool]:
+    """Query pura: restituisce (allow_valves, force_close_valves) per la fase corrente.
+
+    Non muta alcuno stato. Sostituisce la prima chiamata a fsm_step nel ciclo
+    di attuazione: il gating valvole dipende unicamente dalla fase FSM corrente.
+
+    Regola: le valvole sono consentite in STARTING e RUNNING.
+    In STOPPING, OFF e FAULT → chiusura forzata (fail-safe).
+    """
+    allow = phase in (PlantPhase.STARTING, PlantPhase.RUNNING)
+    force_close = not allow
+    return allow, force_close
+
+
+def fsm_pump_gate(phase: PlantPhase) -> tuple[bool, bool]:
+    """Query pura: restituisce (allow_pumps, force_pumps_off) per la fase corrente.
+
+    Non muta alcuno stato. Sostituisce la seconda chiamata a fsm_step nel ciclo
+    di attuazione: il gating pompe dipende unicamente dalla fase FSM già aggiornata,
+    non da una seconda esecuzione della macchina a stati.
+
+    Regola: le pompe sono consentite esclusivamente in RUNNING.
+    In qualsiasi altra fase (STARTING, STOPPING, FAULT, OFF) → pompe bloccate.
+    """
+    allow = phase == PlantPhase.RUNNING
+    return allow, not allow
+
+
 @dataclass(slots=True, frozen=True)
 class PlantFsmConfig:
     """Parametri della FSM (anti-chatter e timeout)."""
@@ -117,8 +145,12 @@ def fsm_step(stage: StagingState, *, inp: PlantFsmInputs, cfg: PlantFsmConfig) -
             transition(PlantPhase.OFF)
 
     elif st.phase == PlantPhase.FAULT:
-        # Recupero solo quando richiesta OFF e dwell minimo.
-        if not inp.request_on and elapsed_s() >= float(cfg.min_off_s):
+        # Recupero automatico dopo dwell minimo: il FAULT da timeout di avvio
+        # non è un guasto hardware — è un cold-start lento o una condizione
+        # transitoria. Si tenta il riavvio a prescindere da request_on.
+        # Un FAULT da allarme hardware esplicito deve essere gestito a livello
+        # superiore (faults_present nel snapshot) PRIMA di chiamare fsm_step.
+        if elapsed_s() >= float(cfg.min_off_s):
             transition(PlantPhase.OFF)
 
     st.last_request_on = bool(inp.request_on)

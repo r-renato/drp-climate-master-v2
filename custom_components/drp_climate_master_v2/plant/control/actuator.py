@@ -24,7 +24,7 @@ from ..decision.contracts import PdcCommand, PlantDecision, VmcCommand
 from .config import PlantActuatorConfig
 from .signals import build_control_context
 from .readiness import update_boiler_ready
-from .fsm import PlantFsmConfig, PlantFsmInputs, fsm_step
+from .fsm import PlantFsmConfig, PlantFsmInputs, fsm_step, fsm_valve_gate, fsm_pump_gate
 from .plans import compute_supply_plan, compute_zone_valves_plan
 from .observed_phase import estimate_observed_phase
 from .model import PlantActuatorStatus, StagingState
@@ -153,9 +153,9 @@ class PlantActuator:
         1) Deriva contesto tipizzato (requested vs observed)
         2) Comandi immediati PDC + VMC
         3) Aggiorna boiler readiness (isteresi)
-        4) FSM passata #1 (valves_ready=False) -> gating valvole
+        4) Query pura fsm_valve_gate -> gating valvole (no mutazione stato)
         5) Piano valvole + attuazione
-        6) FSM passata #2 (con valves_ready) -> gating pompe
+        6) FSM (unica passata, valves_ready reale) -> avanza stato + gating pompe
         7) Piano pompe/miscelatrice + attuazione
         8) Log strutturato per commissioning
         """
@@ -207,26 +207,17 @@ class PlantActuator:
                 stop_timeout_s=self._cfg.fsm_stop_timeout_s,
             )
 
-            # 4) FSM (prima passata) -> gating valvole
-            fsm_inp = PlantFsmInputs(
-                now=now,
-                request_on=ctx.request_on,
-                pdc_effective_on=ctx.pdc.effective_on,
-                compressor_on=ctx.pdc.compressor_on,
-                boiler_ready=boiler_ready,
-                boiler_signal_available=ctx.boiler.available,
-                valves_ready=False,
-                needs_valves=ctx.needs_valves,
-            )
-            fsm = fsm_step(self._stage, inp=fsm_inp, cfg=fsm_cfg)
+            # 4) Gating valvole: query pura sulla fase FSM corrente (no mutazione).
+            # allow_valves=True in STARTING e RUNNING; force_close in tutti gli altri stati.
+            allow_valves, force_close_valves = fsm_valve_gate(self._stage.fsm.phase)
 
             # 5) Piano valvole + apply
             valves_plan = compute_zone_valves_plan(
                 self._stage,
                 runtime_areas=self._runtime.climate.areas or [],
                 desired=ctx.desired_valves,
-                allow_valves=fsm.allow_valves,
-                force_close_valves=fsm.force_close_valves,
+                allow_valves=allow_valves,
+                force_close_valves=force_close_valves,
                 now=now,
                 valve_open_delay_s=self._cfg.valve_open_delay_s,
             )
@@ -234,7 +225,8 @@ class PlantActuator:
             valves_ready = valves_plan.result.ready
             valves_stats = valves_plan.result.stats
 
-            # 6) FSM (seconda passata con valves_ready) -> gating pompe
+            # 6) FSM: unica chiamata con valves_ready reale.
+            # Può avanzare STARTING->RUNNING se energy_ok e valves_ready entrambi True.
             fsm_inp = PlantFsmInputs(
                 now=now,
                 request_on=ctx.request_on,
@@ -246,13 +238,14 @@ class PlantActuator:
                 needs_valves=ctx.needs_valves,
             )
             fsm = fsm_step(self._stage, inp=fsm_inp, cfg=fsm_cfg)
+            allow_pumps, force_pumps_off = fsm_pump_gate(fsm.phase)
 
             # 7) Piano pompe/miscelatrice + apply
             supply_plan = compute_supply_plan(
                 decision,
                 supply_configured=self._supply_cfg is not None,
-                allow_pumps=fsm.allow_pumps,
-                force_pumps_off=fsm.force_pumps_off,
+                allow_pumps=allow_pumps,
+                force_pumps_off=force_pumps_off,
                 energy_ok=energy_ok,
                 valves_ready=valves_ready,
             )
@@ -291,10 +284,10 @@ class PlantActuator:
                 valves_elapsed_s=valves_stats.elapsed_s,
                 valves_opening_transition=bool(valves_stats.opening_transition),
                 desired_by_zone=dict(getattr(ctx.desired_valves, "by_zone", {}) or {}),
-                allow_valves=bool(getattr(fsm, "allow_valves", False)),
-                allow_pumps=bool(getattr(fsm, "allow_pumps", False)),
-                force_close_valves=bool(getattr(fsm, "force_close_valves", False)),
-                force_pumps_off=bool(getattr(fsm, "force_pumps_off", False)),
+                allow_valves=bool(allow_valves),
+                allow_pumps=bool(allow_pumps),
+                force_close_valves=bool(force_close_valves),
+                force_pumps_off=bool(force_pumps_off),
                 direct_on=bool(supply_plan.direct_on),
                 adj_on=bool(supply_plan.adj_on),
                 mix_valve_pct_applied=supply_plan.mix_valve_pct_applied,
