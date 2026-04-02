@@ -93,6 +93,23 @@ class MeteoSeasonConfig:
     # anomalie: distanza robusta dal regime del segmento (storico) o dal prototipo (live)
     anomaly_z: float = 2.8
 
+    # cold_snap: deviazione intra-stagionale firmata di t_smooth rispetto al prototipo.
+    #
+    # Formula: (μ_season[t] - z_t) / σ_season[t]
+    #   Positivo = t_smooth è SOTTO il prototipo stagionale → giorno freddo per la stagione.
+    #   Negativo = t_smooth è SOPRA il prototipo → giorno caldo per la stagione.
+    #
+    # Soglia 0.0  → metà fredda della distribuzione stagionale (50° percentile dal lato freddo).
+    # Soglia 0.5  → top ~25% giorni freddi della stagione (evento moderato).
+    # Soglia 1.0  → top ~5–10% (cold snap chiaro, come una settimana di Marzo con T<10°C a Roma).
+    # Soglia 1.5  → solo eventi severi (~2% dei giorni stagionali).
+    #
+    # NOTA: cold_snap_z è molto più bassa di anomaly_z (2.8) perché misura
+    # un concetto diverso: non "siamo in una stagione sbagliata" ma
+    # "siamo nel lato freddo della stagione corretta".
+    # Calibrazione consigliata su dati storici reali con calibrate_cold_snap.py.
+    cold_snap_z: float = 0.0
+
     # se anno troppo incompleto, viene ignorato dalla segmentazione (stabilità)
     min_days_per_year: int = 300
 
@@ -108,6 +125,10 @@ class MeteoSeasonConfig:
             raise ValueError("expected_margin must be >= 0")
         if self.switch_gap_min < 0:
             raise ValueError("switch_gap_min must be >= 0")
+        # cold_snap_z può essere negativa (cattura anche il lato caldo, utile per debug),
+        # ma valori < -3.0 sarebbero semanticamente privi di senso.
+        if self.cold_snap_z < -3.0:
+            raise ValueError("cold_snap_z must be >= -3.0")
 
 # ----------------------------- main model ------------------------------------
 
@@ -160,6 +181,10 @@ class MeteoContiguousSeasonModel:
 
         # prototipi per inferenza live (usa i giorni già etichettati)
         self._fit_infer_prototypes()
+
+        # post-pass: calcola cold_snap per tutti i giorni segmentati.
+        # Deve essere DOPO _fit_infer_prototypes() perché richiede _infer_mu/_infer_sig.
+        self._out = self._apply_cold_snap(self._out)
         return self
 
     def day(self, d: DateLike) -> Optional[WeatherSeason]:
@@ -254,13 +279,20 @@ class MeteoContiguousSeasonModel:
 
         regime_hint = self._regime_hint(sig)
 
+        # cold_snap: deviazione intra-stagionale rispetto al prototipo della stagione scelta.
+        # Calcolato dopo aver scelto best_season, non prima (per coerenza).
+        cs_score = self._cold_snap_score(best_season, sig)
+        cold_snap = cs_score >= self._cfg.cold_snap_z
+
         cand_str = ", ".join(
             f"{(s.value if hasattr(s,'value') else s)}:raw={raw:.2f},tot={tot:.2f}"
             for (tot, raw, s) in scored
         )
         reason = (
             f"infer: expected={expected_season} chosen={best_season} raw={best_raw:.2f} tot={best_total:.2f} "
-            f"candidates=[{cand_str}]" + ("; anomaly" if anomaly else "")
+            f"candidates=[{cand_str}]"
+            + ("; anomaly" if anomaly else "")
+            + (f"; cold_snap={cs_score:+.2f}" if cold_snap else f"; cs={cs_score:+.2f}")
         )
 
         return WeatherSeason(
@@ -270,6 +302,8 @@ class MeteoContiguousSeasonModel:
             reason=reason,
             regime_hint=regime_hint,
             weather_day_signals=sig,
+            cold_snap=cold_snap,
+            cold_snap_score=max(0.0, cs_score),
         )
 
 
@@ -671,6 +705,76 @@ class MeteoContiguousSeasonModel:
                 continue
             cost += w[i] * abs((x - mu[i]) / sd[i])
         return cost
+
+    def _cold_snap_score(self, season: Seasons, sig: WeatherDaySignals) -> float:
+        """Deviazione firmata di t_smooth rispetto al prototipo stagionale.
+
+        Ritorna:
+          Positivo  → t_smooth è SOTTO il prototipo → cold snap.
+          Negativo  → t_smooth è SOPRA il prototipo → giorno caldo per la stagione.
+          0.0       → prototipi non disponibili (fail-safe conservativo).
+
+        Formula: (μ_season[t] - z_t) / σ_season[t]
+          μ_season[t]: mediana z-space di t_smooth per la stagione (in z-space globale).
+          z_t:         z-score globale di t_smooth del giorno in esame.
+          σ_season[t]: scala robusta intra-stagionale di t_smooth.
+
+        IMPORTANTE: richiede che _fit_infer_prototypes() sia già stato eseguito.
+        Non chiamare durante _segment_all_years() (prototipi non ancora disponibili).
+        """
+        v = self._vec(sig)
+        if v is None:
+            return 0.0
+        vz = self._z(v)
+        z_t = vz[0]  # dimensione 0 = t_smooth
+        if math.isnan(z_t):
+            return 0.0
+        mu = self._infer_mu.get(season)
+        sd = self._infer_sig.get(season)
+        if not mu or not sd:
+            return 0.0
+        sig_t = max(sd[0], 0.1)  # clamp: evita divisione per valori degeneri
+        # positivo → z_t < μ_season → t_smooth sotto il prototipo → più freddo del tipico
+        return float((mu[0] - z_t) / sig_t)
+
+    def _apply_cold_snap(
+        self,
+        out: "Dict[date, WeatherSeason]",
+    ) -> "Dict[date, WeatherSeason]":
+        """Post-pass: arricchisce ogni WeatherSeason segmentato con cold_snap.
+
+        Chiamato da fit() DOPO _fit_infer_prototypes() perché richiede i prototipi.
+        Usa dataclasses.replace() per preservare l'immutabilità.
+
+        Semantica cold_snap_score:
+          - Positivo → il giorno è più freddo del prototipo stagionale.
+          - Negativo → il giorno è più caldo del prototipo.
+          cold_snap = True  iff  cold_snap_score >= cold_snap_z  (default 0.0).
+
+        cold_snap_score nel WeatherSeason è sempre >= 0 (saturato a zero se negativo)
+        per evitare confusione nella lettura del campo: un valore "assente" è 0.0,
+        non un negativo che potrebbe essere frainteso come errore.
+        Il segno informativo rimane accessibile solo attraverso il reason string.
+        """
+        from dataclasses import replace as _dc_replace
+
+        result: Dict[date, WeatherSeason] = {}
+        for dd, ws in out.items():
+            cs = self._cold_snap_score(ws.season, ws.weather_day_signals)
+            cold_snap = cs >= self._cfg.cold_snap_z
+            # Aggiorna reason solo se cold_snap è True (evita verbosità inutile)
+            reason = ws.reason
+            if cold_snap:
+                reason = f"{reason}; cold_snap={cs:+.2f}"
+            elif cs < 0:
+                reason = f"{reason}; cs={cs:+.2f}"
+            result[dd] = _dc_replace(
+                ws,
+                cold_snap=cold_snap,
+                cold_snap_score=max(0.0, cs),
+                reason=reason,
+            )
+        return result
 
     # ------------------------- segmentation ----------------------------------
 

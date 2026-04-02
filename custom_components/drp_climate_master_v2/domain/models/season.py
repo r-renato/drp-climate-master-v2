@@ -136,12 +136,20 @@ class WeatherDaySignals:
     
 @dataclass(frozen=True, slots=True)
 class WeatherSeason:
-    """Weather-based seasonal classification and diagnostics.
+    """Classificazione e diagnostica stagionale basata sul meteo.
 
-    Notes:
-      - `anomaly_score` is expected to be >= 0.
-      - `anomaly` is a boolean diagnostic flag; if you want strict consistency
-        between calendar season and weather season, compute it in SeasonState.
+    Campi principali:
+      - ``season``: stagione classificata (WINTER/SPRING/SUMMER/AUTUMN).
+      - ``anomaly`` / ``anomaly_score``: il giorno appartiene a una stagione
+        diversa da quella classificata? (distanza dal centroide in z-space).
+        Soglia tipica: anomaly_z=2.8. Anomalia di *classificazione*.
+      - ``cold_snap`` / ``cold_snap_score``: il giorno è più freddo del
+        tipico per la stagione assegnata? (deviazione intra-stagionale firmata).
+        Positivo = più freddo del prototipo; negativo = più caldo.
+        Soglia default: cold_snap_z=0.0 (metà fredda della distribuzione).
+        Indipendente da ``anomaly``: una primavera fresca ha anomaly=False,
+        cold_snap=True.
+      - ``regime_hint``: classificazione termica grezza (cold/mild/hot).
     """
 
     season: Seasons
@@ -153,6 +161,12 @@ class WeatherSeason:
     weather_day_signals: WeatherDaySignals
 
     windows: Optional[List[Tuple[date, date, Seasons]]] = None
+    # Deviazione termica intra-stagionale (firmata, in z-space robusto).
+    # Positivo = più freddo del prototipo stagionale (cold snap).
+    # Negativo = più caldo del prototipo.
+    # Valorizzato da MeteoContiguousSeasonModel dopo _fit_infer_prototypes().
+    cold_snap: bool = False
+    cold_snap_score: float = 0.0
 
     def __post_init__(self) -> None:
         if self.anomaly_score < 0:
@@ -276,6 +290,16 @@ class SeasonState:
     def weather_detect_model(self) -> str:
         return self.detect_model if self.detect_model is not None else "unknown"
 
+    @property
+    def weather_cold_snap(self) -> bool:
+        """True se il giorno è più freddo del prototipo stagionale (cold snap intra-stagionale)."""
+        return self.weather.cold_snap
+
+    @property
+    def weather_cold_snap_score(self) -> float:
+        """Deviazione intra-stagionale in z-space (positivo=freddo, negativo=caldo)."""
+        return self.weather.cold_snap_score
+
     # -------------------------------------------------------------------------
     # Helpers
     # -------------------------------------------------------------------------
@@ -318,6 +342,8 @@ class SeasonState:
             "weather_reason": self.weather_reason,
             "weather_regime_hint": self.weather_regime_hint,
             "weather_detect_model": self.weather_detect_model,
+            "weather_cold_snap": self.weather_cold_snap,
+            "weather_cold_snap_score": round(self.weather_cold_snap_score, 3),
         }
 
     def __str__(self) -> str:  # pragma: no cover
@@ -335,6 +361,7 @@ class SeasonState:
                 f"Weather season        :: {self.weather_season.value}",
                 f"Weather anomaly       :: {self.weather_anomaly}",
                 f"Anomaly score         :: {self.weather_anomaly_score:.3f}",
+                f"Cold snap             :: {self.weather_cold_snap}  (score={self.weather_cold_snap_score:+.3f})",
                 f"Weather reason        :: {self.weather_reason}",
                 f"Regime hint           :: {self.weather_regime_hint}",
                 f"Weather signals       :: t_low  = {self.weather.weather_day_signals.t_low} °C",
