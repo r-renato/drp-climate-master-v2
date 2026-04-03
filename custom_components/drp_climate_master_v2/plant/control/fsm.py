@@ -4,19 +4,30 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-from .model import PlantFsmOutput, PlantPhase, StagingState
+from .model import PlantFsmOutput, PlantFsmState, PlantPhase, StagingState
 
 
-def fsm_valve_gate(phase: PlantPhase) -> tuple[bool, bool]:
+def fsm_valve_gate(fsm_state: "PlantFsmState") -> tuple[bool, bool]:
     """Query pura: restituisce (allow_valves, force_close_valves) per la fase corrente.
 
     Non muta alcuno stato. Sostituisce la prima chiamata a fsm_step nel ciclo
-    di attuazione: il gating valvole dipende unicamente dalla fase FSM corrente.
+    di attuazione.
 
-    Regola: le valvole sono consentite in STARTING e RUNNING.
+    Regola base: le valvole sono consentite in STARTING e RUNNING.
     In STOPPING, OFF e FAULT → chiusura forzata (fail-safe).
+
+    Eccezione stall_triggered_restart:
+        Se la FSM è in STARTING dopo uno stall energetico (PDC/boiler non
+        disponibili), le valvole rimangono chiuse finché energy_ok non torna
+        True e fsm_step azzera il flag. Questo previene il ciclo apri/chiudi
+        elettrovalvole che si verificherebbe con PDC spenta (BUG-3).
     """
+    phase = fsm_state.phase
     allow = phase in (PlantPhase.STARTING, PlantPhase.RUNNING)
+    # In STARTING dopo uno stall energetico: sopprimi apertura valvole.
+    # Le valvole non servono finché la PDC non è pronta ad erogare energia.
+    if phase == PlantPhase.STARTING and fsm_state.stall_triggered_restart:
+        allow = False
     force_close = not allow
     return allow, force_close
 
@@ -106,6 +117,8 @@ def fsm_step(stage: StagingState, *, inp: PlantFsmInputs, cfg: PlantFsmConfig) -
         st.start_deadline = None
         st.stop_deadline = None
         st.energy_stall_since = None  # reset ad ogni cambio di fase
+        # stall_triggered_restart NON viene azzerato qui: persiste
+        # attraverso STOPPING→OFF→STARTING finché energy_ok non torna.
         if new_phase == PlantPhase.STARTING:
             st.start_deadline = now + timedelta(seconds=float(cfg.start_timeout_s))
         if new_phase == PlantPhase.STOPPING:
@@ -132,6 +145,14 @@ def fsm_step(stage: StagingState, *, inp: PlantFsmInputs, cfg: PlantFsmConfig) -
                 transition(PlantPhase.FAULT)
                 reasons.append("start_timeout")
             else:
+                if st.stall_triggered_restart:
+                    if energy_ok:
+                        # Energia tornata disponibile: rimuovi la soppressione
+                        # valvole e riprendi il normale sequenziamento di avvio.
+                        st.stall_triggered_restart = False
+                        reasons.append("stall_restart_energy_ok")
+                    else:
+                        reasons.append("stall_restart_wait_energy")
                 ready_to_run = bool(energy_ok and (not inp.needs_valves or inp.valves_ready))
                 if ready_to_run:
                     transition(PlantPhase.RUNNING)
@@ -164,7 +185,10 @@ def fsm_step(stage: StagingState, *, inp: PlantFsmInputs, cfg: PlantFsmConfig) -
                 # Stall energetico persistente: forza STOPPING per ripristinare
                 # il ciclo di avvio. Quando BUG-3 sarà risolto (comando PDC
                 # attivo), il ciclo si stabilizzerà normalmente in RUNNING.
+                # Marca il restart come stall-triggered: in STARTING successivo
+                # le valvole resteranno chiuse finché energy_ok non torna.
                 transition(PlantPhase.STOPPING)
+                st.stall_triggered_restart = True
                 reasons.append(f"energy_stall:{stall_s:.0f}s")
             else:
                 reasons.append(f"energy_stall_wait:{stall_s:.0f}s/{cfg.energy_stall_timeout_s:.0f}s")

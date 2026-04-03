@@ -210,7 +210,7 @@ class PlantActuator:
 
             # 4) Gating valvole: query pura sulla fase FSM corrente (no mutazione).
             # allow_valves=True in STARTING e RUNNING; force_close in tutti gli altri stati.
-            allow_valves, force_close_valves = fsm_valve_gate(self._stage.fsm.phase)
+            allow_valves, force_close_valves = fsm_valve_gate(self._stage.fsm)
 
             # 5) Piano valvole + apply
             valves_plan = compute_zone_valves_plan(

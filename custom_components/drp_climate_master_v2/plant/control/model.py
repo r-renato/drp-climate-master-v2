@@ -131,6 +131,13 @@ class PlantFsmState:
     # e forzare la transizione a STOPPING dopo energy_stall_timeout_s.
     # None se energy_ok=True o se siamo fuori da RUNNING.
     energy_stall_since: Optional[datetime] = None
+    # Flag impostato quando la transizione RUNNING→STOPPING è causata da energy_stall
+    # (non da una richiesta utente). Indica che il restart è dovuto a mancanza di
+    # energia (tipicamente BUG-3: PDC non comandata) e non a una domanda soddisfatta.
+    # Effetto in STARTING: sopprime l'apertura valvole finché energy_ok non torna True.
+    # Questo previene il ciclo apri/chiudi valvole con PDC spenta.
+    # Si azzera quando energy_ok diventa True in STARTING, o al raggiungimento di RUNNING.
+    stall_triggered_restart: bool = False
 
 
 @dataclass(slots=True)
