@@ -37,12 +37,20 @@ def fsm_pump_gate(phase: PlantPhase) -> tuple[bool, bool]:
 
 @dataclass(slots=True, frozen=True)
 class PlantFsmConfig:
-    """Parametri della FSM (anti-chatter e timeout)."""
+    """Parametri della FSM (anti-chatter e timeout).
+
+    energy_stall_timeout_s:
+        Timeout stall energetico in RUNNING (secondi).
+        Se energy_ok=False persiste oltre questo valore, la FSM forza la
+        transizione a STOPPING per ripristinare il ciclo di avvio.
+        Deve essere < start_timeout_s (validato in PlantActuatorConfig).
+    """
 
     min_on_s: float
     min_off_s: float
     start_timeout_s: float
     stop_timeout_s: float
+    energy_stall_timeout_s: float = 600.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -97,6 +105,7 @@ def fsm_step(stage: StagingState, *, inp: PlantFsmInputs, cfg: PlantFsmConfig) -
         st.entered_at = now
         st.start_deadline = None
         st.stop_deadline = None
+        st.energy_stall_since = None  # reset ad ogni cambio di fase
         if new_phase == PlantPhase.STARTING:
             st.start_deadline = now + timedelta(seconds=float(cfg.start_timeout_s))
         if new_phase == PlantPhase.STOPPING:
@@ -128,11 +137,41 @@ def fsm_step(stage: StagingState, *, inp: PlantFsmInputs, cfg: PlantFsmConfig) -
                     transition(PlantPhase.RUNNING)
 
     elif st.phase == PlantPhase.RUNNING:
+        # Ordine di priorità:
+        # 1) request_on=False → STOPPING (sempre prioritario, anche senza energia)
+        # 2) energy_ok=False  → stall tracking → STOPPING dopo timeout
+        # 3) tutto ok          → RUNNING stabile
+        #
+        # IMPORTANTE: request_on va controllato PER PRIMO.
+        # Se energy_ok venisse controllato prima, un utente che spegne l'HVAC
+        # mentre il boiler è freddo non otterrebbe lo spegnimento immediato —
+        # il sistema entrerebbe nello stall tracking e aspetterebbe fino a 600s.
         if not inp.request_on:
+            # Spegnimento volontario o perdita di domanda: STOPPING normale.
+            # min_on_s protegge da short-cycling delle pompe; con energy_ok=False
+            # le pompe sono già bloccate, ma il timer resta per coerenza FSM.
             if elapsed_s() >= float(cfg.min_on_s):
                 transition(PlantPhase.STOPPING)
             else:
                 reasons.append("min_on_hold")
+        elif not energy_ok:
+            # Domanda attiva ma energia non disponibile (boiler freddo o PDC spenta).
+            # Tracciamo da quando per rilevare uno stall prolungato.
+            if st.energy_stall_since is None:
+                st.energy_stall_since = now
+            stall_s = (now - st.energy_stall_since).total_seconds()
+            if stall_s >= float(cfg.energy_stall_timeout_s):
+                # Stall energetico persistente: forza STOPPING per ripristinare
+                # il ciclo di avvio. Quando BUG-3 sarà risolto (comando PDC
+                # attivo), il ciclo si stabilizzerà normalmente in RUNNING.
+                transition(PlantPhase.STOPPING)
+                reasons.append(f"energy_stall:{stall_s:.0f}s")
+            else:
+                reasons.append(f"energy_stall_wait:{stall_s:.0f}s/{cfg.energy_stall_timeout_s:.0f}s")
+        else:
+            # Energia ok e domanda attiva: azzera eventuale stall pregresso.
+            if st.energy_stall_since is not None:
+                st.energy_stall_since = None
 
     elif st.phase == PlantPhase.STOPPING:
         # Attendi una finestra breve prima di dichiararti OFF.

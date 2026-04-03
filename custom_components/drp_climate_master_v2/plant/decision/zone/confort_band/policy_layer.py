@@ -205,6 +205,11 @@ MODE_CTRL_DEFAULTS: Dict[HVACOperatingProfile, float] = {
 }
 
 
+# Frazione di interpolazione clo in caso di cold_snap (shoulder → winter).
+# Valore 0.40 = 40 % del delta shoulder→winter: persone più vestite ma non
+# al livello pieno invernale.  Valori utili: 0.25 (debole) … 0.60 (forte).
+_COLD_SNAP_CLO_FRACTION: float = 0.40
+
 # -----------------------------
 # Implementation
 # -----------------------------
@@ -308,6 +313,16 @@ class ComfortPolicyLayer:
         elif ctx.season == OperativeSeason.SHOULDER:
             clo = float(self._cfg.base_clo_shoulder)
             reasons.append(f"clo:shoulder={clo:.2f}")
+            # cold_snap: interpola clo verso inverno.
+            # Le persone si vestono più pesante nei giorni freddi per la stagione;
+            # il PMV calcolato con clo più alto è fisicamente più corretto.
+            if ctx.cold_snap:
+                if self._cfg.climate_zone and self._cfg.zone_clo_delta_enabled:
+                    clo_winter = float(ZONE_CLO_WINTER.get(self._cfg.climate_zone, self._cfg.default_clo_winter))
+                else:
+                    clo_winter = float(self._cfg.default_clo_winter)
+                clo = clo + _COLD_SNAP_CLO_FRACTION * (clo_winter - clo)
+                reasons.append(f"clo:cold_snap:interp={clo:.2f}")
         else:
             # Winter: use climate zone mapping if enabled and zone is known
             if self._cfg.climate_zone and self._cfg.zone_clo_delta_enabled:

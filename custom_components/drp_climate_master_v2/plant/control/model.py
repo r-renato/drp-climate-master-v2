@@ -126,6 +126,11 @@ class PlantFsmState:
     start_deadline: Optional[datetime] = None
     stop_deadline: Optional[datetime] = None
     last_request_on: bool = False
+    # Timestamp da cui energy_ok è diventato False in fase RUNNING.
+    # Usato per rilevare lo stall energetico prolungato (PDC/boiler non disponibili)
+    # e forzare la transizione a STOPPING dopo energy_stall_timeout_s.
+    # None se energy_ok=True o se siamo fuori da RUNNING.
+    energy_stall_since: Optional[datetime] = None
 
 
 @dataclass(slots=True)

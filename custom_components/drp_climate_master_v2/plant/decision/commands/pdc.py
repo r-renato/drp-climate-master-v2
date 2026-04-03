@@ -81,7 +81,22 @@ class PdcCommandBuilder:
             if heat_def_max >= float(cfg.heating.enh.kick_on_max_def_c):
                 kick = float(cfg.heating.enh.kick_extra_c)
 
-            target = curve + prof_offset + fb + kick
+            # --- B2: regime meteorologico → delta WOT in riscaldamento.
+            # Legge cold_snap e regime_hint da snapshot.season (WeatherSeason, segnale ML).
+            # Fail-safe: se il campo non è disponibile, regime_delta_c = 0.
+            _season_state = getattr(snapshot, "season", None)
+            _weather = getattr(_season_state, "weather", None)
+            regime_hint: str = str(getattr(_weather, "regime_hint", "mild")) if _weather else "mild"
+            cold_snap_active: bool = bool(getattr(_weather, "cold_snap", False)) if _weather else False
+
+            # Priorità: regime_hint="cold" (assoluto) > cold_snap (relativo alla stagione).
+            regime_delta_c: float = 0.0
+            if regime_hint == "cold":
+                regime_delta_c = float(cfg.heating.enh.regime_cold_delta_c)
+            elif cold_snap_active:
+                regime_delta_c = float(cfg.heating.enh.regime_cold_snap_delta_c)
+
+            target = curve + prof_offset + fb + kick + regime_delta_c
             target = clamp(target, cfg.heating.curve.wot_min_c, cfg.heating.curve.wot_max_c)
 
             # --- 4) deadband + rate-limit (anti-hunting)
@@ -119,7 +134,10 @@ class PdcCommandBuilder:
                     "zones_first_on_step": demand.zones_first_on_step,
                     "activity_scale": float(activity_scale),
                     "kick_c": float(kick),
-                    "wot_target_pre_rate_c": float(curve + prof_offset + fb + kick),
+                    "regime_hint": regime_hint,
+                    "cold_snap": cold_snap_active,
+                    "regime_delta_c": float(regime_delta_c),
+                    "wot_target_pre_rate_c": float(curve + prof_offset + fb + kick + regime_delta_c),
                 }
             )
 

@@ -41,7 +41,13 @@ class HumiditySolveMode(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class PolicyContext:
-    """Runtime context used by the policy layer."""
+    """Runtime context used by the policy layer.
+
+    Attributi aggiuntivi rispetto al contesto base:
+      - ``cold_snap``: True se il giorno è più freddo del prototipo stagionale
+        (segnale ML da WeatherSeason; usato per interpolare clo verso inverno in
+        modalità shoulder, riflettendo che le persone si vestono più pesante).
+    """
 
     now: datetime
     room: str
@@ -51,6 +57,7 @@ class PolicyContext:
     t_op_current: Optional[float]
     mode: HVACOperatingProfile
     outdoor_temp: Optional[float] = None
+    cold_snap: bool = False  # ML: giorno più freddo del prototipo stagionale
 
 
 @dataclass(frozen=True, slots=True)

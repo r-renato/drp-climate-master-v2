@@ -26,6 +26,13 @@ class PlantActuatorConfig:
     fsm_min_off_s: float = 120.0
     fsm_start_timeout_s: float = 900.0
     fsm_stop_timeout_s: float = 30.0
+    # Timeout stall energetico in RUNNING: se energy_ok=False persiste oltre questo
+    # valore, la FSM forza la transizione a STOPPING per ripristinare il ciclo
+    # di avvio. Deve essere inferiore a fsm_start_timeout_s per consentire
+    # almeno un tentativo di ripartenza pulito.
+    # Valore tipico: 600s (10 min). Abbassare a 300s per impianti con PDC
+    # a risposta rapida; alzare a 900s se il boiler impiega molto a scaldarsi.
+    fsm_energy_stall_timeout_s: float = 600.0
 
     def validate(self) -> None:
         """Valida i parametri di configurazione."""
@@ -47,3 +54,10 @@ class PlantActuatorConfig:
             raise ValueError("fsm_start_timeout_s deve essere > 0")
         if self.fsm_stop_timeout_s <= 0:
             raise ValueError("fsm_stop_timeout_s deve essere > 0")
+        if self.fsm_energy_stall_timeout_s <= 0:
+            raise ValueError("fsm_energy_stall_timeout_s deve essere > 0")
+        if self.fsm_energy_stall_timeout_s >= self.fsm_start_timeout_s:
+            raise ValueError(
+                "fsm_energy_stall_timeout_s deve essere < fsm_start_timeout_s "
+                "(altrimenti lo stall non verrebbe mai rilevato prima del timeout di avvio)"
+            )

@@ -574,6 +574,7 @@ class ComfortBandCalculator:
         room_names: Sequence[str] | None = None,
         include_global: bool = True,
         humidity_solve_mode: HumiditySolveMode | str | None = None,
+        cold_snap: bool = False,
     ) -> Dict[str, ComfortBandResult]:
         """Compute comfort band for multiple rooms.
 
@@ -624,6 +625,7 @@ class ComfortBandCalculator:
                 t_op_current=float(t_op) if t_op is not None else None,
                 outdoor_temp=outdoor_temp,
                 mode=mode,
+                cold_snap=bool(cold_snap),
             )
             decision: PolicyDecision = policy_layer.decide(ctx)
 

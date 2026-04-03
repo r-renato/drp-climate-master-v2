@@ -205,6 +205,7 @@ class PlantActuator:
                 min_off_s=self._cfg.fsm_min_off_s,
                 start_timeout_s=self._cfg.fsm_start_timeout_s,
                 stop_timeout_s=self._cfg.fsm_stop_timeout_s,
+                energy_stall_timeout_s=self._cfg.fsm_energy_stall_timeout_s,
             )
 
             # 4) Gating valvole: query pura sulla fase FSM corrente (no mutazione).

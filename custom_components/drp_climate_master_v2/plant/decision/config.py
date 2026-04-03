@@ -262,6 +262,13 @@ class HeatEnhancementsConfig:
     wot_rate_limit_c_per_min: float = 0.5
     wot_deadband_c: float = 0.2
 
+    # Segnale ML: delta WOT addizionale in riscaldamento basato su regime meteorologico.
+    # regime_hint="cold" → giornata fredda in assoluto (t_smooth bassa su scala annuale).
+    # cold_snap=True     → giornata fredda *per la stagione* (sotto il prototipo stagionale ML).
+    # I due delta si escludono: si applica il maggiore (cold_hint ha priorità su cold_snap).
+    regime_cold_delta_c: float = 2.0       # delta WOT (°C) per regime_hint="cold"
+    regime_cold_snap_delta_c: float = 1.0  # delta WOT (°C) per cold_snap=True in shoulder
+
     def offset(self, profile: HVACOperatingProfile) -> float:
         """Return profile-specific WOT offset (°C).
 

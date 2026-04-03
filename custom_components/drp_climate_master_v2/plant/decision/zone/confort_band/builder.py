@@ -72,6 +72,10 @@ def build_confort_zones(
     # Le room_id usate dal tuo mapping devono combaciare con indoor_zones keys
     room_names = [slugify(a) for a in indoor_zones.keys()]
 
+    # Estrae cold_snap dal segnale ML (WeatherSeason).
+    # Fail-safe: se season_state è None o il campo manca, assume False.
+    cold_snap: bool = bool(getattr(getattr(season_state, "weather", None), "cold_snap", False))
+
     bands = calculator.compute_many(
         now=(now or datetime.now(timezone.utc)),
         season=season_state.season,          # accetta Seasons o OperativeSeason
@@ -82,6 +86,7 @@ def build_confort_zones(
         policy_layer=policy_layer,
         room_names=room_names,
         include_global=True,                # se indoor_zones contiene "global" -> "global_indoor"
+        cold_snap=cold_snap,
         # humidity_solve_mode=None,          # None = usa la policy (estate/inverno PA_CONST; shoulder AUTO)
         # humidity_solve_mode="rh_const",    # override forzato per commissioning
     )
