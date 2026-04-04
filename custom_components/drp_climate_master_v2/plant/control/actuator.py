@@ -210,7 +210,10 @@ class PlantActuator:
 
             # 4) Gating valvole: query pura sulla fase FSM corrente (no mutazione).
             # allow_valves=True in STARTING e RUNNING; force_close in tutti gli altri stati.
-            allow_valves, force_close_valves = fsm_valve_gate(self._stage.fsm)
+            allow_valves, force_close_valves = fsm_valve_gate(
+                self._stage.fsm,
+                pdc_effective_on=bool(ctx.pdc.effective_on) if ctx.pdc.effective_known else None,
+            )
 
             # 5) Piano valvole + apply
             valves_plan = compute_zone_valves_plan(
@@ -232,6 +235,7 @@ class PlantActuator:
                 now=now,
                 request_on=ctx.request_on,
                 pdc_effective_on=ctx.pdc.effective_on,
+                pdc_effective_known=bool(ctx.pdc.effective_known),
                 compressor_on=ctx.pdc.compressor_on,
                 boiler_ready=boiler_ready,
                 boiler_signal_available=ctx.boiler.available,

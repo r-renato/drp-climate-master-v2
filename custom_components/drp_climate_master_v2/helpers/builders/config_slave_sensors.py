@@ -176,21 +176,21 @@ def build_slave_sensor_defs(runtime_config: RuntimeConfig) -> list[dict[str, Any
     defs.append(
         {
             "type": "PDCSensor",
-            "name": f"{sensor_prefix} PDC Decision",
+            "name": f"{sensor_prefix} Decision PDC",
             "category": EntityCategory.DIAGNOSTIC,
         }
     )
     defs.append(
         {
             "type": "VMCSensor",
-            "name": f"{sensor_prefix} VMC Decision",
+            "name": f"{sensor_prefix} Decision VMC",
             "category": EntityCategory.DIAGNOSTIC,
         }
     )
     defs.append(
         {
             "type": "RadiantSensor",
-            "name": f"{sensor_prefix} Radiant Decision",
+            "name": f"{sensor_prefix} Decision Radiants",
             "category": EntityCategory.DIAGNOSTIC,
         }
     )    

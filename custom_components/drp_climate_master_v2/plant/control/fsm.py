@@ -7,27 +7,41 @@ from typing import Optional
 from .model import PlantFsmOutput, PlantFsmState, PlantPhase, StagingState
 
 
-def fsm_valve_gate(fsm_state: "PlantFsmState") -> tuple[bool, bool]:
+def fsm_valve_gate(
+    fsm_state: "PlantFsmState",
+    *,
+    pdc_effective_on: Optional[bool] = None,
+) -> tuple[bool, bool]:
     """Query pura: restituisce (allow_valves, force_close_valves) per la fase corrente.
 
-    Non muta alcuno stato. Sostituisce la prima chiamata a fsm_step nel ciclo
-    di attuazione.
+    Non muta alcuno stato.
 
     Regola base: le valvole sono consentite in STARTING e RUNNING.
     In STOPPING, OFF e FAULT → chiusura forzata (fail-safe).
 
-    Eccezione stall_triggered_restart:
-        Se la FSM è in STARTING dopo uno stall energetico (PDC/boiler non
-        disponibili), le valvole rimangono chiuse finché energy_ok non torna
-        True e fsm_step azzera il flag. Questo previene il ciclo apri/chiudi
-        elettrovalvole che si verificherebbe con PDC spenta (BUG-3).
+    Eccezioni in STARTING — valvole soppresse se:
+      1) stall_triggered_restart=True: restart dopo stall energetico,
+         valvole chiuse finché energy_ok (e quindi pdc_effective_on) non torna.
+      2) pdc_effective_on=False (PDC nota spenta): non ha senso aprire valvole
+         se non c'è energia disponibile. Protegge dal primo tick di STARTING
+         in cui stall_triggered_restart potrebbe non essere ancora impostato.
+
+    L'argomento pdc_effective_on deve essere None se lo stato PDC non è noto
+    (sensore assente), in quel caso non viene applicato nessun gate aggiuntivo.
     """
     phase = fsm_state.phase
     allow = phase in (PlantPhase.STARTING, PlantPhase.RUNNING)
-    # In STARTING dopo uno stall energetico: sopprimi apertura valvole.
-    # Le valvole non servono finché la PDC non è pronta ad erogare energia.
-    if phase == PlantPhase.STARTING and fsm_state.stall_triggered_restart:
-        allow = False
+
+    if phase == PlantPhase.STARTING:
+        # Caso 1: restart dopo stall energetico persistente.
+        if fsm_state.stall_triggered_restart:
+            allow = False
+        # Caso 2: PDC nota spenta (stato noto = pdc_effective_on non è None).
+        # Non aprire valvole senza fonte di energia: non si fa circolare
+        # acqua fredda nei pannelli radianti se la PDC non sta erogando.
+        elif pdc_effective_on is False:
+            allow = False
+
     force_close = not allow
     return allow, force_close
 
@@ -79,6 +93,9 @@ class PlantFsmInputs:
 
     # Stato energia osservata (preferibile a 'requested_on' per evitare ottimismo)
     pdc_effective_on: bool
+    # True se almeno un sensore di stato PDC (power o compressor) è disponibile.
+    # False = stato PDC ignoto: non applicare gating PDC su energy_ok.
+    pdc_effective_known: bool
     compressor_on: Optional[bool]
 
     boiler_ready: bool
@@ -124,10 +141,27 @@ def fsm_step(stage: StagingState, *, inp: PlantFsmInputs, cfg: PlantFsmConfig) -
         if new_phase == PlantPhase.STOPPING:
             st.stop_deadline = now + timedelta(seconds=float(cfg.stop_timeout_s))
 
-    # Energia "credibile" disponibile (gating per RUNNING):
-    # - se sensori boiler disponibili: usa boiler_ready
-    # - altrimenti: usa lo stato osservato della PDC
-    energy_ok = bool(inp.boiler_ready) if inp.boiler_signal_available else bool(inp.pdc_effective_on)
+    # Energia "credibile" disponibile (gating per RUNNING/STARTING).
+    #
+    # Prerequisito PDC (quando nota):
+    #   Se la PDC è nota spenta (pdc_effective_known=True e pdc_effective_on=False),
+    #   energy_ok è SEMPRE False indipendentemente dal boiler.
+    #   Rationale: senza PDC attiva non c'è fonte di calore/freddo; il boiler
+    #   non si scalderà mai da solo. Questo impedisce che RUNNING venga raggiunto
+    #   con PDC spenta, anche quando boiler_ready=True per effetto dell'isteresi
+    #   o di una soglia di readiness bassa (come boiler_ready_heat_bias_c=-12.0).
+    #
+    # Se PDC non nota (pdc_effective_known=False): nessun gate PDC.
+    #   Utile per sistemi senza sensore di stato PDC.
+    #
+    # Se PDC nota accesa: usa boiler_ready (o pdc_effective_on come fallback).
+    pdc_known_off = inp.pdc_effective_known and not inp.pdc_effective_on
+    if pdc_known_off:
+        energy_ok = False
+    elif inp.boiler_signal_available:
+        energy_ok = bool(inp.boiler_ready)
+    else:
+        energy_ok = bool(inp.pdc_effective_on)
 
     # --- Transizioni ---
     if st.phase == PlantPhase.OFF:
