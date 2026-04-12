@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Mapping
+from enum import Enum
 
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import HVACMode, HVACAction, ClimateEntityFeature
@@ -38,6 +39,75 @@ from .domain.enums import HVACOperatingProfile
 
 _LOGGER = logging.getLogger(__name__)
 
+class DewPointPerception(Enum):
+    """Human perception categories for dew point in °C."""
+
+    _description: str
+    _icon: str
+
+    DRY = ("dry", "Dry", "mdi:emoticon-cool-outline")
+    VERY_COMFORTABLE = (
+        "very_comfortable",
+        "Very comfortable",
+        "mdi:emoticon-happy-outline",
+    )
+    COMFORTABLE = (
+        "comfortable",
+        "Comfortable",
+        "mdi:emoticon-outline",
+    )
+    OK_BUT_HUMID = (
+        "ok_but_humid",
+        "Ok but humid",
+        "mdi:emoticon-neutral-outline",
+    )
+    SOMEWHAT_UNCOMFORTABLE = (
+        "somewhat_uncomfortable",
+        "Somewhat uncomfortable",
+        "mdi:emoticon-sad-outline",
+    )
+    QUITE_UNCOMFORTABLE = (
+        "quite_uncomfortable",
+        "Quite uncomfortable",
+        "mdi:emoticon-angry-outline",
+    )
+    EXTREMELY_UNCOMFORTABLE = (
+        "extremely_uncomfortable",
+        "Extremely uncomfortable",
+        "mdi:emoticon-cry-outline",
+    )
+    SEVERELY_HIGH = (
+        "severely_high",
+        "Severely high",
+        "mdi:emoticon-dead-outline",
+    )
+
+    def __new__(
+        cls,
+        unique_id: str,
+        description: str,
+        icon: str,
+    ) -> DewPointPerception:
+        obj = object.__new__(cls)
+        obj._value_ = unique_id
+        return obj
+
+    def __init__(self, unique_id: str, description: str, icon: str) -> None:
+        self._description = description
+        self._icon = icon
+
+    @property
+    def unique_id(self) -> str:
+        return self.value
+
+    @property
+    def description(self) -> str:
+        return self._description
+
+    @property
+    def icon(self) -> str:
+        return self._icon
+    
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """..."""
     store = hass.data[DOMAIN][entry.entry_id]
@@ -170,17 +240,48 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
         return self.coordinator.last_update_success
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-            "name": INTEGRATION_NAME,
-            "manufacturer": INTEGRATION_MANUFACTURER,
-            "sw_version" : INTEGRATION_VERSION,
-            # "config_version": str(getattr(self._entry, "version", "v2")),
-        }
+    def extra_state_attributes(self) -> dict[str, int | float | str | None]:
+    # def device_info(self) -> dict[str, Any]:
+        data: dict[str, Any] = dict(super().extra_state_attributes or {})
+
+        # data["identifiers"] = {(DOMAIN, self._entry.entry_id)}
+        data["integration"] = INTEGRATION_NAME
+        data["manufacturer"] = INTEGRATION_MANUFACTURER
+        data["sw_version"] = INTEGRATION_VERSION
+
+        plant_snapshot = self._coordinator.plant_snapshot
+        if plant_snapshot is not None and plant_snapshot.global_indoor_zone is not None:
+            if plant_snapshot.global_indoor_zone.dew_point is not None:
+                human_perception = self._human_perception(plant_snapshot.global_indoor_zone.dew_point.value)
+                if human_perception is not None:
+                    data["Human Perception"] = human_perception.description
+                    data["Human Perception Icon"] = human_perception.icon
+
+        return data
 
     @property
     def _entry_store(self) -> dict[str, Any]:
         domain_store = self._hass.data.setdefault(DOMAIN, {})
         return domain_store.setdefault(self._entry.entry_id, {})
     
+    def _human_perception(self, dewpoint: float | None) -> DewPointPerception | None:
+        """Return the dew point perception category for a dew point in °C."""
+
+        _DEW_POINT_THRESHOLDS: tuple[tuple[float, DewPointPerception], ...] = (
+            (10.0, DewPointPerception.DRY),
+            (13.0, DewPointPerception.VERY_COMFORTABLE),
+            (16.0, DewPointPerception.COMFORTABLE),
+            (18.0, DewPointPerception.OK_BUT_HUMID),
+            (21.0, DewPointPerception.SOMEWHAT_UNCOMFORTABLE),
+            (24.0, DewPointPerception.QUITE_UNCOMFORTABLE),
+            (26.0, DewPointPerception.EXTREMELY_UNCOMFORTABLE),
+        )
+
+        if dewpoint is None:
+            return None
+
+        for upper_bound, perception in _DEW_POINT_THRESHOLDS:
+            if dewpoint < upper_bound:
+                return perception
+
+        return DewPointPerception.SEVERELY_HIGH

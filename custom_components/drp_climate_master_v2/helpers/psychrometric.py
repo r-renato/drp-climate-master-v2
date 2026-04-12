@@ -105,7 +105,7 @@ def dew_point_celsius(t_c: float, rh_pct: float) -> float:
 # Rapporto di umidità — base per il controllo proporzionale VMC
 # ---------------------------------------------------------------------------
 
-def humidity_ratio_from_rh(t_c: float, rh_pct: float) -> float:
+def humidity_ratio_from_rh(t_c: float, rh_pct: float, pressure_pa: float=100539) -> float:
     """Rapporto di umidità W (kg_vapore / kg_aria_secca) da T e UR.
 
     W è la grandezza fisica che descrive il contenuto assoluto di vapore
@@ -131,7 +131,7 @@ def humidity_ratio_from_rh(t_c: float, rh_pct: float) -> float:
     rh_pct = float(rh_pct)
     if not 0.0 <= rh_pct <= 100.0:
         raise ValueError(f"rh_pct deve essere in [0, 100], ricevuto: {rh_pct}")
-    return float(psychrolib.GetHumRatioFromRelHum(float(t_c), rh_pct / 100.0))
+    return float(psychrolib.GetHumRatioFromRelHum(float(t_c), rh_pct / 100.0, pressure_pa))
 
 
 def delta_humidity_ratio(
