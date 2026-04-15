@@ -472,29 +472,51 @@ class TemperatureSensor(BaseSensor):
             
             cb = comfort_bands.get(slugify(self._area), None)
             if cb is not None:
-                data[ "air speed (m/s)" ] = (
-                    f"v_air best={fnum(cb.v_air_best, 3)}, "
-                    f"v_air lo={fnum(cb.v_air_lo, 3)}, "
-                    f"v_air hi={fnum(cb.v_air_hi, 3)}, "
-                    f"v_air draft={fnum(cb.v_air_draft, 3)}"
-                )
-                data[ "comfort band (°C)" ] = (
-                    f"t_op min={fnum(cb.t_op_min, 2)}, "
-                    f"t_op max={fnum(cb.t_op_max, 2)}"
-                )
-                data[ "evaluation" ] = (
-                    f"t_op={fnum(cb.t_op, 2)}, "
-                    f"PMV={fnum(cb.pmv, 2)}, "
-                    f"PPD={fnum(cb.ppd, 2)}, "
-                    f"in band={fbool(cb.ok, "True", "False")}, "
-                )
-                data[ "knobs" ] = (
-                    f"Humidity solve={fstr(cb.humidity_solve_mode)}, "
-                    f"PMV target={fnum(cb.pmv_center, 2)} ± {fnum(cb.pmv_band, 2)}, "
-                    f"met used={fnum(cb.met_used, 2)}, "
-                    f"clo used={fbool(cb.clo_used, "True", "False")}, "
-                )
+                # data[ "air speed (m/s)" ] = (
+                #     f"v_air best={fnum(cb.v_air_best, 3)}, "
+                #     f"v_air lo={fnum(cb.v_air_lo, 3)}, "
+                #     f"v_air hi={fnum(cb.v_air_hi, 3)}, "
+                #     f"v_air draft={fnum(cb.v_air_draft, 3)}"
+                # )
+                data[ "air speed (m/s)" ] = {
+                    "v_air_best": round(cb.v_air_best, 2),
+                    "v_air_lo": round(cb.v_air_lo, 2),
+                    "v_air_hi": round(cb.v_air_hi, 2),
+                    "v_air_draft": round(cb.v_air_draft, 2) if cb.v_air_draft is not None else None
+                }
 
+                # data[ "comfort band (°C)" ] = (
+                #     f"t_op min={fnum(cb.t_op_min, 2)}, "
+                #     f"t_op max={fnum(cb.t_op_max, 2)}"
+                # )
+                data[ "comfort band (°C)" ] = {
+                    "t_op_min": round(cb.t_op_min, 2),
+                    "t_op_max": round(cb.t_op_max, 2)
+                }
+                # data[ "evaluation" ] = (
+                #     f"t_op={fnum(cb.t_op, 2)}, "
+                #     f"PMV={fnum(cb.pmv, 2)}, "
+                #     f"PPD={fnum(cb.ppd, 2)}, "
+                #     f"in band={fbool(cb.ok, "True", "False")}, "
+                # )
+                data[ "evaluation" ] = {
+                    "t_op": round(cb.t_op, 2) if cb.t_op is not None else None,
+                    "PMV": round(cb.pmv, 2) if cb.pmv is not None else None,
+                    "PPD": round(cb.ppd, 2) if cb.ppd is not None else None,
+                    "in_band": cb.ok
+                }
+                # data[ "knobs" ] = (
+                #     f"Humidity solve={fstr(cb.humidity_solve_mode)}, "
+                #     f"PMV target={fnum(cb.pmv_center, 2)} ± {fnum(cb.pmv_band, 2)}, "
+                #     f"met used={fnum(cb.met_used, 2)}, "
+                #     f"clo used={fbool(cb.clo_used, "True", "False")}, "
+                # )
+                data[ "knobs" ] = {
+                    "humidity_solve_mode": fstr(cb.humidity_solve_mode),
+                    "PMV_target": f"{fnum(cb.pmv_center, 2)} ± {fnum(cb.pmv_band, 2)}",
+                    "met_used": round(cb.met_used, 2) if cb.met_used is not None else None,
+                    "clo_used": cb.clo_used
+                }
         return data
     
     def _slave_update(self) -> bool:
@@ -697,24 +719,48 @@ class SeasonSensor(BaseSensor):
             weather = season.weather
             
             data["calendar window"] = f"{window.start.isoformat()} - {window.end.isoformat()}"
-            data["calendar days"] = f"{season.days} passed={season.passed} remaining={season.remaining}"
+            # data["calendar window"] = [window.start.isoformat(), window.end.isoformat()]
+            data["calendar days"] = f"{season.days}"
+            data["calendar days passed"] = f"{season.passed}"
+            data["calendar days remaining"] = f"{season.remaining}"
 
-            data["weather season"] = (
-                f"{weather.season} [anomaly={weather.anomaly}, score={fnum(weather.anomaly_score)}] "
-            )
+            # data["weather season"] = (
+            #     f"{weather.season} [anomaly={weather.anomaly}, score={fnum(weather.anomaly_score)}] "
+            # )
+            data["weather reason"] = {
+                "detect_model": season.weather_detect_model,
+                "anomaly": weather.anomaly,
+                "score": round(weather.anomaly_score, 2),
+                "cold_snap": weather.cold_snap,
+                "cold_snap_score": round(weather.cold_snap_score, 2),
+            }
             data["weather regime"] = weather.regime_hint
-            data["weather signals"] = (
-                f"t_low={weather.weather_day_signals.t_low} °C ",
-                f"t_mean={weather.weather_day_signals.t_mean} °C ",
-                f"dewp={weather.weather_day_signals.dew} °C ",
-                f"wind={weather.weather_day_signals.wind} km/h ",
-                f"cloud={fnum(weather.weather_day_signals.cloud*100) if weather.weather_day_signals.cloud else '-'} %",        
-            )
-            data["weather signals eng."] = (
-                f"smooth=[t={fnum(season.weather.weather_day_signals.t_smooth)} °C ",
-                f"dewp={fnum(season.weather.weather_day_signals.dew_smooth)} °C] ",
-                f"trend={fnum(season.weather.weather_day_signals.trend)}",
-            )
+            # data["weather signals"] = (
+            #     f"t_low={weather.weather_day_signals.t_low} °C ",
+            #     f"t_mean={weather.weather_day_signals.t_mean} °C ",
+            #     f"dewp={weather.weather_day_signals.dew} °C ",
+            #     f"wind={weather.weather_day_signals.wind} km/h ",
+            #     f"cloud={fnum(weather.weather_day_signals.cloud*100) if weather.weather_day_signals.cloud else '-'} %",        
+            # )
+            data["weather signals"] = {
+                "t_low": {weather.weather_day_signals.t_low},
+                "t_mean": {weather.weather_day_signals.t_mean},
+                "dewp": {weather.weather_day_signals.dew},
+                "wind": {weather.weather_day_signals.wind},
+                "cloud": {fnum(weather.weather_day_signals.cloud*100) if weather.weather_day_signals.cloud else '-'}
+            }
+
+
+            # data["weather signals eng."] = (
+            #     f"smooth=[t={fnum(season.weather.weather_day_signals.t_smooth)} °C ",
+            #     f"dewp={fnum(season.weather.weather_day_signals.dew_smooth)} °C] ",
+            #     f"trend={fnum(season.weather.weather_day_signals.trend)}",
+            # )
+            data["weather signals eng."] = {
+                "smooth": round(season.weather.weather_day_signals.t_smooth,2 ) if season.weather.weather_day_signals.t_smooth is not None else None,
+                "dewp": round(season.weather.weather_day_signals.dew_smooth, 2) if season.weather.weather_day_signals.dew_smooth is not None else None,
+                "trend": round(season.weather.weather_day_signals.trend, 2) if season.weather.weather_day_signals.trend is not None else None
+            }
         return data
     
     def _slave_update(self) -> bool:
