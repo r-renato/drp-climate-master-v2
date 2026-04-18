@@ -5,11 +5,11 @@ import logging
 from datetime import datetime, timezone, time
 from typing import Dict
 
-from ....monitor.plant import ZoneSnapshot
+from ...monitor.plant import ZoneSnapshot
 
-from .....domain.enums import HVACOperatingProfile
-from .....helpers.utils import slugify
-from .....helpers.logger import log_debug
+from ....domain.enums import HVACOperatingProfile
+from ....helpers.utils import slugify
+from ....helpers.logger import log_debug
 
 from .calculator import ComfortBandCalculator
 from .policy_layer import ClimateZoneIT, ComfortPolicyLayer, ComplianceMode, ConfortPolicyConfig
@@ -72,9 +72,9 @@ def build_confort_zones(
     # Le room_id usate dal tuo mapping devono combaciare con indoor_zones keys
     room_names = [slugify(a) for a in indoor_zones.keys()]
 
-    # Estrae cold_snap dal segnale ML (WeatherSeason).
-    # Fail-safe: se season_state è None o il campo manca, assume False.
-    cold_snap: bool = bool(getattr(getattr(season_state, "weather", None), "cold_snap", False))
+    # Estrae cold_snap tramite la property tipizzata di SeasonState.
+    # Fail-safe: se season_state è None o non espone la property, assume False.
+    cold_snap: bool = bool(getattr(season_state, "weather_cold_snap", False))
 
     bands = calculator.compute_many(
         now=(now or datetime.now(timezone.utc)),

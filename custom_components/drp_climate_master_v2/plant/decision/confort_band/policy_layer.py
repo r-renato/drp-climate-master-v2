@@ -21,7 +21,7 @@ from datetime import datetime, time
 from enum import StrEnum
 from typing import Any, Dict, Literal, Optional, Tuple
 
-from .....domain.enums import HVACOperatingProfile
+from ....domain.enums import HVACOperatingProfile
 
 try:
     # Preferred in Home Assistant for correct timezone handling
@@ -186,7 +186,11 @@ ZONE_CLO_WINTER: Dict[ClimateZoneIT, float] = {
 
 
 MODE_PMV_DEFAULTS: Dict[HVACOperatingProfile, Dict[str, float]] = {
-    HVACOperatingProfile.COMFORT: {"pmv_center": 0.00, "pmv_band": 0.50},
+    # Radiante a soffitto: alta inerzia + effetto MRT asimmetrico.
+    # COMFORT → ISO Cat. A/B ibrida: banda ±0.30 attorno a PMV=-0.05
+    #   (centro leggermente fresco: riduce overshooting su cicli lunghi).
+    # BOOST → banda più larga per recupero rapido (invariata).
+    HVACOperatingProfile.COMFORT: {"pmv_center": -0.05, "pmv_band": 0.30},
     HVACOperatingProfile.BOOST: {"pmv_center": 0.00, "pmv_band": 0.50},
     HVACOperatingProfile.ECO: {"pmv_center": -0.10, "pmv_band": 0.35},
     HVACOperatingProfile.SLEEP: {"pmv_center": -0.40, "pmv_band": 0.45},
@@ -272,7 +276,7 @@ class ComfortPolicyLayer:
         # Default strategy:
         # - SUMMER/WINTER: favor PA_CONST (more physical for typical homes without tight RH control)
         # - SHOULDER: AUTO (lets the calculator fall back to RH_CONST if no anchor temperature is available)
-        from .....domain.models.season import OperativeSeason
+        from ....domain.models.season import OperativeSeason
 
         if ctx.season in (OperativeSeason.SUMMER, OperativeSeason.WINTER):
             h_mode = HumiditySolveMode.PA_CONST
@@ -304,7 +308,7 @@ class ComfortPolicyLayer:
     # -------------------------
 
     def _clo_for(self, ctx: PolicyContext, reasons: list[str]) -> float:
-        from .....domain.models.season import OperativeSeason
+        from ....domain.models.season import OperativeSeason
 
         # Base by season
         if ctx.season == OperativeSeason.SUMMER:
@@ -346,7 +350,7 @@ class ComfortPolicyLayer:
         return float(clo)
 
     def _pmv_targets(self, ctx: PolicyContext, reasons: list[str]) -> Tuple[float, float]:
-        from .....domain.models.season import OperativeSeason
+        from ....domain.models.season import OperativeSeason
 
         md = MODE_PMV_DEFAULTS.get(ctx.mode, MODE_PMV_DEFAULTS[HVACOperatingProfile.COMFORT])
         pmv_center = float(md["pmv_center"])
@@ -383,7 +387,7 @@ class ComfortPolicyLayer:
         return float(v_best_s), float(v_hi_s), v_lo_override
 
     def _compliance(self, ctx: PolicyContext, reasons: list[str]) -> Tuple[Optional[bool], Optional[bool]]:
-        from .....domain.models.season import OperativeSeason
+        from ....domain.models.season import OperativeSeason
 
         if self._cfg.compliance_mode == ComplianceMode.OFF:
             return None, None

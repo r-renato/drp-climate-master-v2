@@ -14,9 +14,9 @@ from ...plant.monitor.plant import PlantSnapshot
 from ...domain.enums import HVACOperatingProfile
 
 from .zone.model import ZonesDecision
-from .zone.confort_band.builder import build_comfort_engine, build_confort_zones
-from .zone.confort_band.policy_layer import ComfortPolicyLayer, ConfortPolicyConfig
-from .zone.confort_band_mpc.provider import ZonesMpcProvider
+from .confort_band.builder import build_confort_zones
+from .confort_band.policy_layer import ComfortPolicyLayer, ConfortPolicyConfig
+from .confort_band.mpc.provider import ZonesMpcProvider
 
 from .context import DecisionDerivedInputs
 
@@ -96,7 +96,11 @@ class PlantDecisionPlanner:
     _zones_mpc: ZonesMpcProvider = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self.cpcfg, self.cpl = build_comfort_engine()
+        # Legge la configurazione comfort dal PlantPlannerConfig (unica fonte di verità).
+        # Non usare build_comfort_engine() che ha valori hardcoded.
+        self.cpcfg = self.cfg.comfort_policy
+        self.cpl = ComfortPolicyLayer(self.cpcfg)
+        self.cpcfg.validate()
 
         # Observation builder (zone comfort + dew point)
         self._signals = DemandSignalsBuilder(self.cfg, zone_weight_fn=_zone_weight)

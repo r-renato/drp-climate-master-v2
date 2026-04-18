@@ -15,8 +15,8 @@ from ....domain.enums import HVACOperatingProfile
 
 from .model import ZoneCommand, ZonesDecision
 from .config import ControlConfig, MpcConfig
-from .confort_band_mpc.rc_model import RcZoneModel
-from .confort_band.model import ComfortBandResult
+from ..confort_band.mpc.rc_model import RcZoneModel
+from ..confort_band.model import ComfortBandResult
 
 def _binary_sequences(n: int) -> Iterable[list[int]]:
     """Generate all binary sequences of length n (as lists of 0/1)."""

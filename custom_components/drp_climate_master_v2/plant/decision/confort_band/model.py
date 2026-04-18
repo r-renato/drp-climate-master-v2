@@ -13,8 +13,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Optional, Tuple
 
-from .....domain.enums import HVACOperatingProfile
-from .....domain.models.season import OperativeSeason
+from ....domain.enums import HVACOperatingProfile
+from ....domain.models.season import OperativeSeason
 
 
 def is_living(room: str) -> bool:
@@ -203,4 +203,3 @@ class ComfortBandResult:
         emit(lines, "clo used", fnum(self.clo_used, 2))
 
         return "\n".join(lines)
-

@@ -73,7 +73,6 @@ from ..plant.decision.zone.model import ZonesDecision
 from ..plant.decision.contracts import PlantDecision
 from ..plant.decision.planner import PlantDecisionPlanner
 from ..plant.decision.context import DecisionDerivedInputs
-from ..plant.decision.zone.confort_band.builder import build_comfort_engine, build_confort_zones
 
 from ..const import DOMAIN
 from ..helpers.logger import log_debug, log_exception, log_info, log_warning

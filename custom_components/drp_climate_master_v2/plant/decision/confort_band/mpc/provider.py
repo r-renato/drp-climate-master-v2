@@ -6,12 +6,12 @@ from typing import Mapping, Optional
 
 from homeassistant.components.climate.const import HVACMode
 
-from .....plant.monitor.plant import PlantSnapshot
+from ....monitor.plant import PlantSnapshot
 
 from ...config import ZonesMpcConfig
-from ..model import ZonesDecision
-from ..planner import ZoneDecisionPlanner
-from ..confort_band.model import ComfortBandResult
+from ...zone.model import ZonesDecision
+from ...zone.planner import ZoneDecisionPlanner
+from ..model import ComfortBandResult
 
 _LOGGER = logging.getLogger(__name__)
 

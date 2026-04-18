@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Mapping, Optional
 
 from ...domain.enums import HVACOperatingProfile
-from .zone.confort_band.model import ComfortBandResult
+from .confort_band.model import ComfortBandResult
 
 
 @dataclass(slots=True, frozen=True)

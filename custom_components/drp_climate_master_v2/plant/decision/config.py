@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import time
 from typing import Optional
 
 from ...domain.enums import HVACOperatingProfile
+from .confort_band.policy_layer import ClimateZoneIT, ComplianceMode, ConfortPolicyConfig
 
 # -----------------------------------------------------------------------------
 # Option A: nested, domain-oriented config blocks
@@ -784,3 +786,25 @@ class PlantPlannerConfig:
 
     vmc: VmcConfig = field(default_factory=VmcConfig)
     vacation: VacationConfig = field(default_factory=VacationConfig)
+
+    # Configurazione fisica del comfort engine (ISO 7730 PMV/PPD).
+    # Il default replica il comportamento precedente hardcoded in builder.py
+    # (zona climatica D, met=1.10, clo standard).
+    # Per Roma bordo D/E, considerare climate_zone=ClimateZoneIT.E (clo_winter=1.15).
+    comfort_policy: ConfortPolicyConfig = field(
+        default_factory=lambda: ConfortPolicyConfig(
+            climate_zone=ClimateZoneIT.D,
+            base_met=1.10,
+            base_clo_summer=0.50,
+            base_clo_shoulder=0.70,
+            default_clo_winter=1.00,
+            zone_clo_delta_enabled=True,
+            non_living_high_speed_hi_scale=0.90,
+            living_high_speed_hi_scale=1.05,
+            compliance_mode=ComplianceMode.OFF,
+            heating_allowed_from=time(5, 30),
+            heating_allowed_to=time(23, 30),
+            cooling_allowed_from=time(8, 0),
+            cooling_allowed_to=time(22, 30),
+        )
+    )
