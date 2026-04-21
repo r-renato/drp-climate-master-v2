@@ -149,8 +149,6 @@ class PlantDecisionPlanner:
         *,
         snapshot: PlantSnapshot,
         reason: str,
-        # zones_decision: Optional[ZonesDecision] = None,
-        # derived: DecisionDerivedInputs | None = None,
     ) -> PlantDecision:
         ts = snapshot.timestamp if isinstance(snapshot.timestamp, datetime) else dt_util.utcnow()
         if isinstance(ts, datetime) and ts.tzinfo is None:
@@ -158,26 +156,40 @@ class PlantDecisionPlanner:
 
         dec = PlantDecision(ts=ts, mode=PlantMode.OFF, reason=reason)
 
-        # --- Outdoor temperature (required to compute curves, but we can fallback)
+        # ── FASE 1 ─ Sanity check temperatura esterna ──────────────────────────
+        # t_out è necessaria per le curve climatiche ma non è bloccante.
+        # Se mancante o non finita, il planner continua con t_out=None.
         t_out = as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None))
         if t_out is None or (isinstance(t_out, float) and (math.isnan(t_out) or math.isinf(t_out))):
             dec.warnings.append("missing_outdoor_temperature")
             t_out = None
 
+        # ── FASE 2 ─ Comfort bands e running mean T_op per zona ────────────────
+        # Calcola le bande di comfort dinamiche per zona in base a stagione,
+        # profilo operativo e running mean T_operativa (ZoneTrmTracker, ~2h warm-up).
+        # Fail-safe: eccezione interna non rompe il tick (derived → None).
         derived = self._conf_bands_derived(snapshot=snapshot)
         if derived is not None:
             dec.derived_input = derived
 
         comfort_bands_by_zone = derived.comfort_bands_by_zone if derived is not None else None
 
-        # --- Extract indoor demand signals
+        # ── FASE 3 ─ Segnali di domanda aggregati ─────────────────────────────
+        # Produce PlantDemandSignals: deficit/surplus termico per zona,
+        # metriche quorum/coverage pesate, dp_max_c, dp_dehum_c.
+        # DemandSignalsBuilder è osservazione-only: nessuna logica di controllo.
         demand = self._signals.build(snapshot=snapshot, comfort_bands_by_zone=comfort_bands_by_zone)
 
-        # --- VMC domain: compute requests & DP setpoints (hysteresis-aware)
+        # ── FASE 4 ─ Arricchimento segnali VMC ────────────────────────────────
+        # VmcPolicy calcola setpoint dew point, soglie deumidifica e flag
+        # richieste (heating/cooling/dehum/water) con isteresi.
+        # I risultati sono scritti flat su demand per compatibilità logging.
+        # DemandSignalsBuilder rimane osservazione-only; la logica VMC è separata.
         self._enrich_vmc_signals(snapshot, demand)
 
-        # --- Zones MPC-lite (optional): if not provided by caller, compute here.
-        # Kept isolated behind a provider for maintainability.
+        # ── FASE 5 ─ Piano zone MPC-lite e risoluzione modo impianto ──────────
+        # ZonesMpcProvider produce il piano zone (opzionale, può restituire None).
+        # ModeResolver sceglie PlantMode combinando snapshot + demand + zones_decision.
         zones_decision = self._zones_mpc.maybe_plan(snapshot=snapshot, reason=f"{reason}/zones", comfort_bands_by_zone=comfort_bands_by_zone)
 
         # Expose zones plan in the decision object (single output artifact)
@@ -205,7 +217,12 @@ class PlantDecisionPlanner:
         log_debug(_LOGGER, "Computed plant regime: %s", mode)
         dec.signals = demand
 
-        # --- Dew-point safety (single source of truth).
+        # ── FASE 6 ─ Dew-point guard ──────────────────────────────────────────
+        # Unica fonte di verità per la sicurezza anti-condensa.
+        # Applicata DOPO la risoluzione del modo: se COOLING è unsafe,
+        # il modo viene degradato qui e solo qui.
+        # NOTA TERMOTECNICA (P0): opera su dp_max_c aggregato (stima),
+        # non su T_mandata_radiante misurata. Secondo layer di verifica mancante.
         dew_guard: DewGuardResult = self._dew_guard.evaluate(
             mode=dec.mode,
             dp_max_c=getattr(demand, "dp_max_c", None),
@@ -223,13 +240,21 @@ class PlantDecisionPlanner:
                 dec.warnings.append(f"dew_guard_{dew_guard.reason}_switch_mode")
             dec.mode = dew_guard.suggested_mode
 
-        # --- Build device commands for the chosen mode
+        # ── FASE 7 ─ Compilazione comandi dispositivo ─────────────────────────
+        # I quattro builder traducono il PlantMode scelto in comandi concreti.
+        # Ordine obbligatorio: PDC → valvole → supply → VMC.
+        # dew_guard è passato esplicitamente a valves e supply per modulare
+        # setpoint T_mandata e apertura valvole in funzione del rischio condensa.
+        # NOTA TERMOTECNICA (P2): arbitraggio setpoint PDC tra circuito VMC
+        # e radiante non è esplicito — rischio PDC fuori punto di lavoro.
         self._pdc_cmd.fill(dec, snapshot, t_out, demand)
         self._valves_cmd.fill(dec, snapshot, demand, zones_decision, dew_guard=dew_guard)
         self._supply_cmd.fill(dec, snapshot, demand, zones_decision, dew_guard=dew_guard)
         self._vmc_cmd.fill(dec, snapshot, demand)
 
-        # --- Coherence validation (PlantMode invariants)
+        # ── FASE 7b ─ Validazione coerenza ────────────────────────────────────
+        # Verifica invarianti PlantMode (es. valvole aperte senza PDC attivo).
+        # Warning aggiuntivi appesi a dec.warnings senza bloccare l'output.
         dec.warnings.extend(validate_decision(dec))
 
         return dec
