@@ -4,6 +4,18 @@ Refactor goals (no logic changes)
 --------------------------------
 - Centralize shared types used by both policy and calculator.
 - Provide a single room classification helper (is_living).
+
+Note sull'organizzazione degli import
+--------------------------------------
+``ClimateZoneIT`` e ``ComplianceMode`` sono definiti **qui** (model.py) perché
+sono tipi di dominio puri (enum senza logica) usati sia da ``config.py`` sia da
+``policy_layer.py``.  Tenerli in ``policy_layer.py`` creava un import circolare:
+
+    config.py → policy_layer.ClimateZoneIT
+    policy_layer.py → config.CLO_WINTER_BY_ZONE   (ancora non inizializzato)
+
+Spostare i tipi in model.py (che non importa né config né policy_layer) rompe
+il ciclo: entrambi i moduli importano da model.py senza circolarità.
 """
 
 from __future__ import annotations
@@ -11,11 +23,71 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from ....domain.enums import HVACOperatingProfile
 from ....domain.models.season import OperativeSeason
 
+
+# ---------------------------------------------------------------------------
+# Zona climatica italiana (DPR 412/1993) — tipo di dominio puro
+# ---------------------------------------------------------------------------
+
+class ClimateZoneIT(StrEnum):
+    """Zona climatica italiana A-F (DPR 412/1993, gradi-giorno).
+
+    Usata per selezionare il CLO invernale appropriato in base alle abitudini
+    di abbigliamento locali (vedi config.CLO_WINTER_BY_ZONE).
+    """
+
+    A = "A"
+    B = "B"
+    C = "C"
+    D = "D"
+    E = "E"
+    F = "F"
+
+    @classmethod
+    def is_member(cls, value: Any) -> bool:
+        """True se ``value`` rappresenta una zona valida."""
+        if isinstance(value, cls):
+            return True
+        if isinstance(value, str):
+            return value.strip().upper() in cls._value2member_map_
+        return False
+
+    @classmethod
+    def from_str(cls, value: Optional[str]) -> Optional["ClimateZoneIT"]:
+        """Parsa una stringa in ClimateZoneIT; None se non valida."""
+        if value is None:
+            return None
+        v = value.strip().upper()
+        if not v:
+            return None
+        try:
+            return cls(v)
+        except ValueError:
+            return None
+
+
+# ---------------------------------------------------------------------------
+# Modalità di compliance oraria — tipo di dominio puro
+# ---------------------------------------------------------------------------
+
+class ComplianceMode(StrEnum):
+    """Modalità di gating temporale per le decisioni di policy.
+
+    - OFF: nessun vincolo orario applicato.
+    - WARN: vincolo valutato ma non bloccante (solo log).
+    - ENFORCE: vincolo bloccante (heating/cooling_allowed=False fuori finestra).
+    """
+
+    OFF = "off"
+    WARN = "warn"
+    ENFORCE = "enforce"
+
+
+# ---------------------------------------------------------------------------
 
 def is_living(room: str) -> bool:
     """Heuristic: classify room as living area.
@@ -58,6 +130,21 @@ class PolicyContext:
     mode: HVACOperatingProfile
     outdoor_temp: Optional[float] = None
     cold_snap: bool = False  # ML: giorno più freddo del prototipo stagionale
+    t_op_running_mean: Optional[float] = None
+    """Running mean EWMA della T_op interna per questa zona (°C).
+
+    Prodotta da ``ZoneTrmTracker`` nel ``PlantDecisionPlanner`` e iniettata
+    qui prima della chiamata a ``ComfortPolicyLayer.decide()``.
+
+    - ``None``: tracker in warm-up o zona non tracciata → la policy usa il
+      CLO stagionale base senza correzione adattiva (fail-safe).
+    - ``float``: valore disponibile → la policy calcola ``delta_clo`` S3
+      in ``_clo_for()`` e lo applica prima del cap finale.
+
+    Nota: non ha significato fisico per i profili SLEEP/AWAY/VACATION
+    (la policy sopprime la correzione per quei profili — vedi
+    ``config.T_RM_SKIP_PROFILES``).
+    """
 
 
 @dataclass(frozen=True, slots=True)

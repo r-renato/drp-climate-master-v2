@@ -18,8 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time
-from enum import StrEnum
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Dict, Literal, Optional, Tuple
 
 from ....domain.enums import HVACOperatingProfile
 
@@ -29,54 +28,52 @@ try:
 except Exception:  # pragma: no cover
     dt_util = None
 
-from .model import PolicyContext, PolicyDecision, HumiditySolveMode, is_living
-
-
-# -----------------------------
-# Public types
-# -----------------------------
-
-
-class ClimateZoneIT(StrEnum):
-    """Italian climate zone (A-F)."""
-
-    A = "A"
-    B = "B"
-    C = "C"
-    D = "D"
-    E = "E"
-    F = "F"
-
-    @classmethod
-    def is_member(cls, value: Any) -> bool:
-        """Return True if value represents a valid climate zone."""
-        if isinstance(value, cls):
-            return True
-        if isinstance(value, str):
-            v = value.strip().upper()
-            return v in cls._value2member_map_
-        return False
-
-    @classmethod
-    def from_str(cls, value: Optional[str]) -> Optional["ClimateZoneIT"]:
-        """Parse a string into ClimateZoneIT; returns None if invalid."""
-        if value is None:
-            return None
-        v = value.strip().upper()
-        if not v:
-            return None
-        try:
-            return cls(v)
-        except ValueError:
-            return None
-
-
-class ComplianceMode(StrEnum):
-    """Compliance gating mode for policy decisions."""
-
-    OFF = "off"
-    WARN = "warn"
-    ENFORCE = "enforce"
+from .config import (
+    # CLO base stagionali
+    CLO_BASE_SUMMER,
+    CLO_BASE_SHOULDER,
+    CLO_BASE_WINTER,
+    # Correzioni CLO per profilo/stagione
+    CLO_SLEEP_WINTER_DELTA,
+    CLO_AWAY_VACATION_WINTER_DELTA,
+    CLO_AWAY_VACATION_WINTER_FLOOR,
+    CLO_CAP_SLEEP,
+    CLO_CAP_DEFAULT,
+    COLD_SNAP_CLO_FRACTION,
+    # Tabella CLO per zona climatica
+    CLO_WINTER_BY_ZONE,
+    # MET per profilo
+    MET_BASE,
+    MET_SLEEP,
+    MET_AWAY_VACATION,
+    # Tabelle PMV e aggressività
+    MODE_PMV_CENTER,
+    MODE_PMV_BAND,
+    MODE_CTRL_AGGRESSIVENESS,
+    # Nudge PMV estate/ECO
+    PMV_SUMMER_ECO_NUDGE_DELTA,
+    PMV_SUMMER_ECO_CENTER_MAX,
+    # Draft robustness
+    DRAFT_ALPHA_LIVING,
+    DRAFT_ALPHA_OTHER,
+    DRAFT_ALPHA_SLEEP_DELTA,
+    DRAFT_ALPHA_SLEEP_MIN,
+    DRAFT_ALPHA_HIGH_SPEED_DELTA,
+    VMC_SPEED_THR_DRAFT,
+    VMC_SPEED_THR_LIVING_HI_SCALE,
+    # v_air scaling SLEEP/WINTER
+    V_AIR_HI_SLEEP_WINTER_MAX,
+    # Scaling v_hi per portata alta VMC
+    V_AIR_HI_SCALE_NON_LIVING_HIGH_SPEED,
+    V_AIR_HI_SCALE_LIVING_HIGH_SPEED,
+    # S3: adaptive CLO su running mean T_op
+    T_RM_NEUTRAL_BY_SEASON,
+    T_RM_SENSITIVITY_CLO,
+    T_RM_CAP_DELTA_CLO,
+    T_RM_SKIP_PROFILES,
+    T_RM_MAX_DEVIATION_SUPPRESS_C,
+)
+from .model import PolicyContext, PolicyDecision, HumiditySolveMode, is_living, ClimateZoneIT, ComplianceMode
 
 
 # -----------------------------
@@ -86,23 +83,30 @@ class ComplianceMode(StrEnum):
 
 @dataclass(slots=True)
 class ConfortPolicyConfig:
-    """Static configuration for the comfort policy layer."""
+    """Configurazione statica del policy layer per il comfort ISO 7730.
 
-    # Context
+    I valori di default replicano le costanti definite in ``config.py``:
+    in questo modo un'istanza costruita senza argomenti è già calibrata
+    per l'impianto di riferimento (zona climatica D, met base 1.10).
+    Per modificare i default a livello di impianto, agire su ``config.py``.
+    """
+
+    # Contesto geografico
     climate_zone: Optional[ClimateZoneIT] = None
 
-    # Comfort profile
-    base_met: float = 1.10
-    base_clo_summer: float = 0.50
-    base_clo_shoulder: float = 0.70
-    default_clo_winter: float = 1.00
+    # Profilo comfort base (v. config.py sezione C e D)
+    base_met: float = MET_BASE
+    base_clo_summer: float = CLO_BASE_SUMMER
+    base_clo_shoulder: float = CLO_BASE_SHOULDER
+    default_clo_winter: float = CLO_BASE_WINTER
 
-    # If True and climate_zone is set, policy may apply a zone-specific winter CLO.
+    # Se True e climate_zone è impostata, applica il delta CLO zonale invernale.
     zone_clo_delta_enabled: bool = True
 
-    # Draft calibration
-    non_living_high_speed_hi_scale: float = 0.90
-    living_high_speed_hi_scale: float = 1.05
+    # Calibrazione draft/aria (scaling v_hi per step VMC alto)
+    # Vedi config.py sezione B per il razionale.
+    non_living_high_speed_hi_scale: float = V_AIR_HI_SCALE_NON_LIVING_HIGH_SPEED
+    living_high_speed_hi_scale: float = V_AIR_HI_SCALE_LIVING_HIGH_SPEED
 
     # Compliance gating
     compliance_mode: ComplianceMode = ComplianceMode.OFF
@@ -169,50 +173,10 @@ class ConfortPolicyConfig:
             raise ValueError("compliance_mode must be 'off', 'warn' or 'enforce'")
 
 
-# -----------------------------
-# Defaults / tables
-# -----------------------------
+# Le tabelle di lookup per zona climatica, PMV target e aggressività controllo
+# sono definite in ``config.py`` di questo modulo e importate direttamente.
+# Non sono più replicate qui: un'unica source of truth evita disallineamenti.
 
-
-# Heuristic mapping of winter clothing insulation by climate zone.
-ZONE_CLO_WINTER: Dict[ClimateZoneIT, float] = {
-    ClimateZoneIT.A: 0.90,
-    ClimateZoneIT.B: 0.95,
-    ClimateZoneIT.C: 1.00,
-    ClimateZoneIT.D: 1.05,
-    ClimateZoneIT.E: 1.15,
-    ClimateZoneIT.F: 1.25,
-}
-
-
-MODE_PMV_DEFAULTS: Dict[HVACOperatingProfile, Dict[str, float]] = {
-    # Radiante a soffitto: alta inerzia + effetto MRT asimmetrico.
-    # COMFORT → ISO Cat. A/B ibrida: banda ±0.30 attorno a PMV=-0.05
-    #   (centro leggermente fresco: riduce overshooting su cicli lunghi).
-    # BOOST → banda più larga per recupero rapido (invariata).
-    HVACOperatingProfile.COMFORT: {"pmv_center": -0.05, "pmv_band": 0.30},
-    HVACOperatingProfile.BOOST: {"pmv_center": 0.00, "pmv_band": 0.50},
-    HVACOperatingProfile.ECO: {"pmv_center": -0.10, "pmv_band": 0.35},
-    HVACOperatingProfile.SLEEP: {"pmv_center": -0.40, "pmv_band": 0.45},
-    HVACOperatingProfile.AWAY: {"pmv_center": -0.60, "pmv_band": 1.20},
-    HVACOperatingProfile.VACATION: {"pmv_center": -0.60, "pmv_band": 1.20},
-}
-
-
-MODE_CTRL_DEFAULTS: Dict[HVACOperatingProfile, float] = {
-    HVACOperatingProfile.COMFORT: 1.00,
-    HVACOperatingProfile.BOOST: 1.35,
-    HVACOperatingProfile.ECO: 0.85,
-    HVACOperatingProfile.SLEEP: 0.75,
-    HVACOperatingProfile.AWAY: 0.50,
-    HVACOperatingProfile.VACATION: 0.50,
-}
-
-
-# Frazione di interpolazione clo in caso di cold_snap (shoulder → winter).
-# Valore 0.40 = 40 % del delta shoulder→winter: persone più vestite ma non
-# al livello pieno invernale.  Valori utili: 0.25 (debole) … 0.60 (forte).
-_COLD_SNAP_CLO_FRACTION: float = 0.40
 
 # -----------------------------
 # Implementation
@@ -242,11 +206,11 @@ class ComfortPolicyLayer:
         # 1) met (mode-aware)
         met = float(self._cfg.base_met)
         if ctx.mode == HVACOperatingProfile.SLEEP:
-            met = 0.90
-            reasons.append("met:sleep=0.90")
+            met = MET_SLEEP
+            reasons.append(f"met:sleep={MET_SLEEP:.2f}")
         elif ctx.mode in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
-            met = 1.00
-            reasons.append("met:away/vacation=1.00")
+            met = MET_AWAY_VACATION
+            reasons.append(f"met:away/vacation={MET_AWAY_VACATION:.2f}")
 
         # 2) clo (season + climate zone + mode)
         clo = self._clo_for(ctx, reasons)
@@ -255,22 +219,27 @@ class ComfortPolicyLayer:
         pmv_center, pmv_band = self._pmv_targets(ctx, reasons)
 
         # 3b) Controller aggressiveness (decoupled from PMV)
-        ctrl_aggr = float(MODE_CTRL_DEFAULTS.get(ctx.mode, 1.0))
+        ctrl_aggr = float(MODE_CTRL_AGGRESSIVENESS.get(ctx.mode, 1.0))
         reasons.append(f"ctrl:aggr={ctrl_aggr:.2f}")
 
         # 4) v_air scaling (draft calibration)
         v_best_s, v_hi_s, v_lo_override = self._v_air_policy(ctx, vmc_speed, reasons)
 
-        # Draft robustness (optional): used by ComfortBandCalculator to blend v_best/v_hi
-        draft_alpha: Optional[float] = None
+        # Draft robustness: blending v_best→v_hi per il bound freddo (t_op_min).
+        # Vedi config.py sezione B per il razionale termotecnico.
         living = is_living(ctx.room)
-        draft_alpha = 0.55 if living else 0.35
+        draft_alpha = DRAFT_ALPHA_LIVING if living else DRAFT_ALPHA_OTHER
         if ctx.mode == HVACOperatingProfile.SLEEP:
-            # At night avoid being too draft-conservative (prevents early heating)
-            draft_alpha = max(0.05, draft_alpha - 0.10)
-            reasons.append("SLEEP_delta_draft=-0.10")
-        if (vmc_speed >= 4) and (not living):
-            draft_alpha = max(0.0, draft_alpha - 0.05)
+            # Notte: riduce il conservativismo (VMC a passo basso, draft reale minimo)
+            # → abbassa t_op_min, evitando riscaldamento prematuro nelle ore notturne.
+            draft_alpha = max(DRAFT_ALPHA_SLEEP_MIN, draft_alpha + DRAFT_ALPHA_SLEEP_DELTA)
+            reasons.append(f"draft:sleep_delta={DRAFT_ALPHA_SLEEP_DELTA:+.2f} -> {draft_alpha:.2f}")
+        if (vmc_speed >= VMC_SPEED_THR_DRAFT) and (not living):
+            # VMC ad alta portata in ambienti non-living: la turbolenza è già
+            # rappresentata nelle tabelle V_AIR_HI_OTHER → correzione per evitare
+            # doppio conteggio dell'effetto draft.
+            draft_alpha = max(0.0, draft_alpha + DRAFT_ALPHA_HIGH_SPEED_DELTA)
+            reasons.append(f"draft:high_speed_delta={DRAFT_ALPHA_HIGH_SPEED_DELTA:+.2f} -> {draft_alpha:.2f}")
 
         # 4b) Humidity solving mode for comfort-band bounds (policy choice)
         # Default strategy:
@@ -310,7 +279,7 @@ class ComfortPolicyLayer:
     def _clo_for(self, ctx: PolicyContext, reasons: list[str]) -> float:
         from ....domain.models.season import OperativeSeason
 
-        # Base by season
+        # Base per stagione (vedi config.py sezione C)
         if ctx.season == OperativeSeason.SUMMER:
             clo = float(self._cfg.base_clo_summer)
             reasons.append(f"clo:summer={clo:.2f}")
@@ -320,47 +289,83 @@ class ComfortPolicyLayer:
             # cold_snap: interpola clo verso inverno.
             # Le persone si vestono più pesante nei giorni freddi per la stagione;
             # il PMV calcolato con clo più alto è fisicamente più corretto.
+            # Frazione di interpolazione: config.COLD_SNAP_CLO_FRACTION.
             if ctx.cold_snap:
                 if self._cfg.climate_zone and self._cfg.zone_clo_delta_enabled:
-                    clo_winter = float(ZONE_CLO_WINTER.get(self._cfg.climate_zone, self._cfg.default_clo_winter))
+                    clo_winter = float(CLO_WINTER_BY_ZONE.get(self._cfg.climate_zone, self._cfg.default_clo_winter))
                 else:
                     clo_winter = float(self._cfg.default_clo_winter)
-                clo = clo + _COLD_SNAP_CLO_FRACTION * (clo_winter - clo)
+                clo = clo + COLD_SNAP_CLO_FRACTION * (clo_winter - clo)
                 reasons.append(f"clo:cold_snap:interp={clo:.2f}")
         else:
-            # Winter: use climate zone mapping if enabled and zone is known
+            # Inverno: usa la tabella per zona climatica se abilitata
             if self._cfg.climate_zone and self._cfg.zone_clo_delta_enabled:
-                clo = float(ZONE_CLO_WINTER.get(self._cfg.climate_zone, self._cfg.default_clo_winter))
+                clo = float(CLO_WINTER_BY_ZONE.get(self._cfg.climate_zone, self._cfg.default_clo_winter))
                 reasons.append(f"clo:winter:zone={self._cfg.climate_zone}={clo:.2f}")
             else:
                 clo = float(self._cfg.default_clo_winter)
                 reasons.append(f"clo:winter:default={clo:.2f}")
 
-        # Mode adjustments
+        # Correzioni per profilo/stagione (vedi config.py sezione C)
         if ctx.mode == HVACOperatingProfile.SLEEP and ctx.season.name.lower() == "winter":
-            clo += 0.95
-            reasons.append(f"clo:sleep:+0.95 -> {clo:.2f}")
+            # Coperte invernali: delta +CLO_SLEEP_WINTER_DELTA (pigiama + piumino)
+            clo += CLO_SLEEP_WINTER_DELTA
+            reasons.append(f"clo:sleep:+{CLO_SLEEP_WINTER_DELTA:.2f} -> {clo:.2f}")
 
         if ctx.mode in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION) and ctx.season.name.lower() == "winter":
-            clo = max(0.70, clo - 0.10)
-            reasons.append(f"clo:away:-0.10 -> {clo:.2f}")
+            # Assenza: abbigliamento leggero; floor a CLO_AWAY_VACATION_WINTER_FLOOR
+            clo = max(CLO_AWAY_VACATION_WINTER_FLOOR, clo + CLO_AWAY_VACATION_WINTER_DELTA)
+            reasons.append(f"clo:away:{CLO_AWAY_VACATION_WINTER_DELTA:+.2f}:floor={CLO_AWAY_VACATION_WINTER_FLOOR:.2f} -> {clo:.2f}")
 
-        clo_cap = 2.4 if ctx.mode == HVACOperatingProfile.SLEEP else 1.6
+        # S3 — Correzione adattiva CLO su running mean T_op (ASHRAE 55 adaptive)
+        # Soppresso per SLEEP/AWAY/VACATION (vedi config.T_RM_SKIP_PROFILES).
+        # Soppresso se t_op_running_mean è None (tracker in warm-up → fail-safe).
+        profile_name = ctx.mode.value.lower() if hasattr(ctx.mode, "value") else str(ctx.mode).lower()
+        t_rm = ctx.t_op_running_mean
+        if t_rm is not None and profile_name not in T_RM_SKIP_PROFILES:
+            deviation = abs(ctx.t_op_current - float(t_rm)) if ctx.t_op_current is not None else 0.0
+            if deviation > T_RM_MAX_DEVIATION_SUPPRESS_C:
+                # Rientro da assenza: T_rm troppo distante da T_op corrente.
+                # S3 soppressa → CLO stagionale baseline (fail-safe neutro).
+                reasons.append(
+                    f"clo:trm:suppressed:deviation={deviation:.1f}C"
+                    f">threshold={T_RM_MAX_DEVIATION_SUPPRESS_C:.1f}C"
+                )
+            else:
+                season_key = ctx.season.value.lower() if hasattr(ctx.season, "value") else str(ctx.season).lower()
+                t_rm_neutral = float(T_RM_NEUTRAL_BY_SEASON.get(season_key, T_RM_NEUTRAL_BY_SEASON["shoulder"]))
+                delta_raw = (t_rm_neutral - float(t_rm)) * T_RM_SENSITIVITY_CLO
+                delta_clo = max(-T_RM_CAP_DELTA_CLO, min(T_RM_CAP_DELTA_CLO, delta_raw))
+                if abs(delta_clo) >= 0.005:
+                    clo = clo + delta_clo
+                    reasons.append(
+                        f"clo:trm:t_rm={float(t_rm):.1f}C"
+                        f":neutral={t_rm_neutral:.1f}C"
+                        f":delta={delta_clo:+.3f}"
+                        f" -> {clo:.3f}"
+                    )
+
+        # Cap superiore fisicamente plausibile per profilo
+        clo_cap = CLO_CAP_SLEEP if ctx.mode == HVACOperatingProfile.SLEEP else CLO_CAP_DEFAULT
         clo = min(clo_cap, clo)
         return float(clo)
 
     def _pmv_targets(self, ctx: PolicyContext, reasons: list[str]) -> Tuple[float, float]:
         from ....domain.models.season import OperativeSeason
 
-        md = MODE_PMV_DEFAULTS.get(ctx.mode, MODE_PMV_DEFAULTS[HVACOperatingProfile.COMFORT])
-        pmv_center = float(md["pmv_center"])
-        pmv_band = float(md["pmv_band"])
+        # Legge centro e banda dalla tabella per profilo (config.py sezione E).
+        # Fallback su COMFORT se il profilo non è in tabella.
+        fallback_center = MODE_PMV_CENTER[HVACOperatingProfile.COMFORT]
+        fallback_band   = MODE_PMV_BAND[HVACOperatingProfile.COMFORT]
+        pmv_center = float(MODE_PMV_CENTER.get(ctx.mode, fallback_center))
+        pmv_band   = float(MODE_PMV_BAND.get(ctx.mode, fallback_band))
         reasons.append(f"pmv:mode={ctx.mode}:center={pmv_center:+.2f},band={pmv_band:.2f}")
 
-        # Optional nudges
+        # Nudge estate/ECO: alza leggermente il centro per ridurre il raffreddamento.
+        # Vedi config.py PMV_SUMMER_ECO_NUDGE_DELTA e PMV_SUMMER_ECO_CENTER_MAX.
         if ctx.season == OperativeSeason.SUMMER and ctx.mode == HVACOperatingProfile.ECO:
-            pmv_center = min(0.20, pmv_center + 0.10)
-            reasons.append(f"pmv:summer_eco:center_adj -> {pmv_center:+.2f}")
+            pmv_center = min(PMV_SUMMER_ECO_CENTER_MAX, pmv_center + PMV_SUMMER_ECO_NUDGE_DELTA)
+            reasons.append(f"pmv:summer_eco:nudge+{PMV_SUMMER_ECO_NUDGE_DELTA:.2f} -> {pmv_center:+.2f}")
 
         return pmv_center, pmv_band
 
@@ -371,18 +376,23 @@ class ComfortPolicyLayer:
 
         living = is_living(ctx.room)
 
-        if vmc_speed >= 4 and not living:
+        # Step VMC alto in ambienti non-living: riduce lo scaling v_hi per non
+        # sovrastimare la velocità (già rappresentata nelle tabelle V_AIR_HI_OTHER).
+        if vmc_speed >= VMC_SPEED_THR_DRAFT and not living:
             v_hi_s = float(self._cfg.non_living_high_speed_hi_scale)
-            reasons.append(f"v_air_hi:scale={v_hi_s:.2f} (speed>=4 non-living)")
+            reasons.append(f"v_air_hi:scale={v_hi_s:.2f} (speed>={VMC_SPEED_THR_DRAFT} non-living)")
 
-        if living and vmc_speed >= 3:
+        # Step VMC moderato/alto in living: aumenta leggermente v_hi per riflettere
+        # la maggiore dispersione in ambienti aperti (tabella LIVING più alta).
+        if living and vmc_speed >= VMC_SPEED_THR_LIVING_HI_SCALE:
             v_hi_s = max(v_hi_s, float(self._cfg.living_high_speed_hi_scale))
-            reasons.append(f"v_air_hi:scale={v_hi_s:.2f} (living speed>=3)")
+            reasons.append(f"v_air_hi:scale={v_hi_s:.2f} (living speed>={VMC_SPEED_THR_LIVING_HI_SCALE})")
 
-        # Sleep/Winter: reduce draft conservatism
+        # SLEEP/WINTER: azzera l'amplificazione v_hi (VMC a passo basso di notte;
+        # il draft reale è già gestito dall'alpha, non serve scaling aggiuntivo).
         if ctx.mode == HVACOperatingProfile.SLEEP and ctx.season.name.lower() == "winter":
-            v_hi_s = min(v_hi_s, 1.00)
-            reasons.append("v_air_hi:sleep<=1.00")
+            v_hi_s = min(v_hi_s, V_AIR_HI_SLEEP_WINTER_MAX)
+            reasons.append(f"v_air_hi:sleep_winter:cap={V_AIR_HI_SLEEP_WINTER_MAX:.2f}")
 
         return float(v_best_s), float(v_hi_s), v_lo_override
 

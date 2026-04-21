@@ -24,6 +24,24 @@ from ....plant.monitor.plant import SeasonState, ZoneSnapshot
 from ....domain.models.season import OperativeSeason, Seasons
 from ....domain.models.runtime_schema import RuntimeConfig
 
+from .config import (
+    T_OP_MIN_SLEEP_FLOOR_C,
+    V_AIR_BEST_LIVING,
+    V_AIR_BEST_OTHER,
+    V_AIR_HI_LIVING,
+    V_AIR_HI_OTHER,
+    V_AIR_LO_DEFAULT,
+    V_AIR_BEST_CLAMP,
+    V_AIR_HI_CLAMP,
+    V_AIR_LO_CLAMP,
+    DRAFT_ALPHA_LIVING,
+    DRAFT_ALPHA_OTHER,
+    MET_BASE,
+    MET_WORK_DEFAULT,
+    CLO_BASE_WINTER,
+    CLO_BASE_SUMMER,
+    CLO_BASE_SHOULDER,
+)
 from .model import ComfortBandResult, PolicyContext, PolicyDecision, HumiditySolveMode, is_living
 from .policy_layer import ComfortPolicyLayer
 
@@ -33,25 +51,22 @@ from ....helpers.utils import slugify
 _LOGGER = logging.getLogger(__name__)
 
 class ComfortBandCalculator:
-    """ISO 7730 PMV/PPD comfort-band calculator (Category-like band), policy-aware."""
+    """ISO 7730 PMV/PPD comfort-band calculator (Category-like band), policy-aware.
 
-    # speed 0..5 tables
-    _V_AIR_BEST_LIVING = (0.05, 0.07, 0.09, 0.11, 0.13, 0.15)
-    _V_AIR_BEST_OTHER = (0.05, 0.06, 0.07, 0.08, 0.09, 0.10)
-
-    _V_AIR_HI_LIVING = (0.05, 0.092, 0.134, 0.176, 0.218, 0.260)
-    _V_AIR_HI_OTHER = (0.05, 0.074, 0.098, 0.122, 0.146, 0.170)
-
-    _V_AIR_LO = 0.05
+    Le tabelle di velocità aria e i valori default di met/clo sono definite
+    in ``config.py`` di questo modulo e importate come costanti named.
+    I coefficienti dell'equazione di Fanger (ISO 7730) restano inline in
+    ``pmv_ppd()`` perché sono costanti normative, non configurazione.
+    """
 
     def __init__(
         self,
         *,
-        met: float = 1.1,
-        clo_winter: float = 1.0,
-        clo_summer: float = 0.5,
-        clo_shoulder: float = 0.7,
-        work_met: float = 0.0,
+        met: float = MET_BASE,
+        clo_winter: float = CLO_BASE_WINTER,
+        clo_summer: float = CLO_BASE_SUMMER,
+        clo_shoulder: float = CLO_BASE_SHOULDER,
+        work_met: float = MET_WORK_DEFAULT,
         pressure_pa: float = 101325.0,
     ) -> None:
         self._met = float(met)
@@ -87,23 +102,23 @@ class ComfortBandCalculator:
             raise ValueError(f"speed must be int in [0..5], got {speed}")
 
         if is_living(room):
-            v_best = float(self._V_AIR_BEST_LIVING[speed])
-            v_hi = float(self._V_AIR_HI_LIVING[speed])
+            v_best = float(V_AIR_BEST_LIVING[speed])
+            v_hi = float(V_AIR_HI_LIVING[speed])
         else:
-            v_best = float(self._V_AIR_BEST_OTHER[speed])
-            v_hi = float(self._V_AIR_HI_OTHER[speed])
+            v_best = float(V_AIR_BEST_OTHER[speed])
+            v_hi = float(V_AIR_HI_OTHER[speed])
 
-        v_lo = float(v_air_lo_override) if v_air_lo_override is not None else float(self._V_AIR_LO)
+        v_lo = float(v_air_lo_override) if v_air_lo_override is not None else float(V_AIR_LO_DEFAULT)
 
         # apply policy scaling
         v_best = max(0.0, v_best * float(v_air_best_scale))
         v_hi = max(0.0, v_hi * float(v_air_hi_scale))
         v_lo = max(0.0, v_lo)
 
-        # reasonable indoor clamps (defensive)
-        v_best = min(v_best, 0.6)
-        v_hi = min(v_hi, 0.8)
-        v_lo = min(v_lo, 0.3)
+        # Clamp difensivi: limiti fisici indoor (vedi config.py sezione A)
+        v_best = min(v_best, V_AIR_BEST_CLAMP)
+        v_hi = min(v_hi, V_AIR_HI_CLAMP)
+        v_lo = min(v_lo, V_AIR_LO_CLAMP)
 
         v_hi = max(v_hi, v_best, v_lo)  # ensure hi >= best >= lo
         return v_best, v_lo, v_hi
@@ -205,9 +220,12 @@ class ComfortBandCalculator:
         return self._clo_map.get(season, self._clo_map[OperativeSeason.SHOULDER])
 
     def _default_draft_robustness(self, room: str, season: OperativeSeason) -> float:
-        """Default alpha for blending v_best -> v_hi on the lower bound."""
+        """Alpha di default per il blending v_best → v_hi sul bound freddo.
+
+        Vedi config.py sezione B per il razionale termotecnico.
+        """
         _ = season
-        return 0.55 if is_living(room) else 0.35
+        return DRAFT_ALPHA_LIVING if is_living(room) else DRAFT_ALPHA_OTHER
 
     def _resolve_band_v_air_bounds(
         self,
@@ -513,6 +531,20 @@ class ComfortBandCalculator:
         if t_op_min > t_op_max:
             t_op_min, t_op_max = t_op_max, t_op_min
 
+        # Floor assoluto per profilo SLEEP in inverno (P0-B).
+        # Il PMV con CLO=2.0 tollera temperature fino a 15°C, ma il floor
+        # di sicurezza garantisce un minimo indipendente dal calcolo termodinamico.
+        if (
+            season_value == OperativeSeason.WINTER
+            and policy is not None
+            and getattr(policy, "met", None) is not None
+            and float(policy.met) <= 0.95          # proxy SLEEP: MET_SLEEP=0.90
+        ):
+            if t_op_min < T_OP_MIN_SLEEP_FLOOR_C:
+                t_op_min = float(T_OP_MIN_SLEEP_FLOOR_C)
+                if t_op_max < t_op_min:
+                    t_op_max = t_op_min  # degenerate case: banda piatta a 17°C
+
         res = ComfortBandResult(
             room=str(room),
             season=season_value,
@@ -575,13 +607,24 @@ class ComfortBandCalculator:
         include_global: bool = True,
         humidity_solve_mode: HumiditySolveMode | str | None = None,
         cold_snap: bool = False,
+        t_op_rm_by_zone: Mapping[str, float] | None = None,
     ) -> Dict[str, ComfortBandResult]:
-        """Compute comfort band for multiple rooms.
+        """Calcola la comfort band per più zone.
 
-        - If room_names is None, uses all keys in indoor_zones (except optional global handling).
-        - If include_global=True and indoor_zones contains "global", also returns "global_indoor".
-        - humidity_solve_mode precedence is handled by compute_single():
-            explicit override > policy.humidity_solve_mode > default(AUTO)
+        - Se room_names è None, usa tutte le chiavi di indoor_zones (tranne
+          l'eventuale voce "global").
+        - Se include_global=True e indoor_zones contiene "global", restituisce
+          anche "global_indoor".
+        - humidity_solve_mode: precedenza gestita da compute_single()
+          (override esplicito > policy.humidity_solve_mode > default AUTO).
+
+        Parametro S3
+        ------------
+        t_op_rm_by_zone : Mapping[str, float] | None
+            Running mean EWMA della T_op per zona, prodotta da
+            ``ZoneTrmTracker``.  None o zona assente →
+            ``PolicyContext.t_op_running_mean = None`` (warm-up / fail-safe):
+            la correzione adattiva CLO è soppressa silenziosamente.
         """
         season_value = OperativeSeason.from_value(season)
 
@@ -623,6 +666,12 @@ class ComfortBandCalculator:
                 )
                 return None
 
+            # S3: running mean T_op per zona (None → warm-up → policy sopprime la correzione)
+            t_rm: Optional[float] = None
+            if t_op_rm_by_zone is not None:
+                raw_rm = t_op_rm_by_zone.get(room_id)
+                t_rm = float(raw_rm) if raw_rm is not None else None
+
             ctx = PolicyContext(
                 now=now,
                 room=room_id,
@@ -633,6 +682,7 @@ class ComfortBandCalculator:
                 outdoor_temp=outdoor_temp,
                 mode=mode,
                 cold_snap=bool(cold_snap),
+                t_op_running_mean=t_rm,
             )
             decision: PolicyDecision = policy_layer.decide(ctx)
 

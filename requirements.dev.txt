@@ -8,6 +8,8 @@ influxdb-client==1.24.0
 holidays
 #
 pylint
+pytest
+pytest-asyncio
 # pyright
 # business-time
 # flake8

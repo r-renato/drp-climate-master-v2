@@ -1,0 +1,236 @@
+{
+  "_comment": "Input di simulazione per simulate_confort_band.py — versione 2.0.",
+  "_version": "2.0",
+  "_t_op_stagionali": {
+    "_note": "T_op realistiche zona D (Roma) con impianto radiante a soffitto attivo.",
+    "winter":   "21.0°C — radiante a regime, setpoint invernale tipico",
+    "shoulder": "19.0°C — impianto acceso saltuariamente, transizione apr/ott",
+    "summer":   "25.5°C — raffrescamento attivo, setpoint estivo tipico"
+  },
+
+  "global": {
+    "_comment": "Parametri globali. Le sezioni possono sovrascrivere qualsiasi campo.",
+    "climate_zone":       "D",
+    "room_non_living":    "camera_1",
+    "room_living":        "soggiorno",
+    "default_season":     "winter",
+    "default_profile":    "Comfort",
+    "default_rh_pct":     50.0,
+    "default_t_op":       21.0,
+    "default_vmc_speed":  2,
+    "t_op_winter":        21.0,
+    "t_op_shoulder":      19.0,
+    "t_op_summer":        25.5
+  },
+
+  "sim_01_stagioni_per_profilo": {
+    "_comment": "Matrice stagione × profilo. T_op realistica per stagione.",
+    "seasons":   ["winter", "shoulder", "summer"],
+    "profiles":  ["Comfort", "Eco", "Boost", "Sleep", "Away", "Vacation"],
+    "t_op_by_season": { "winter": 21.0, "shoulder": 19.0, "summer": 25.5 },
+    "rh_pct":    50.0,
+    "vmc_speed": 2
+  },
+
+  "sim_02_umidita_relativa": {
+    "_comment": "Sweep RH 30→80% per tutte le stagioni, profili Comfort e Sleep.",
+    "seasons":   ["winter", "shoulder", "summer"],
+    "profiles":  ["Comfort", "Sleep"],
+    "t_op_by_season": { "winter": 21.0, "shoulder": 19.0, "summer": 25.5 },
+    "vmc_speed": 2,
+    "rh_values": [30, 40, 50, 60, 70, 80]
+  },
+
+  "sim_03_step_vmc": {
+    "_comment": "Sweep step VMC 0→5 per tutte le stagioni, zone living e non-living.",
+    "seasons":   ["winter", "shoulder", "summer"],
+    "profile":   "Comfort",
+    "t_op_by_season": { "winter": 21.0, "shoulder": 19.0, "summer": 25.5 },
+    "rh_pct":    50.0,
+    "zones": [
+      { "room": "camera_1",  "label": "camera_1 (non-living)" },
+      { "room": "soggiorno", "label": "soggiorno (living)"    }
+    ]
+  },
+
+  "sim_04_zona_climatica": {
+    "_comment": "Sweep zona climatica A→F — solo inverno (CLO_WINTER_BY_ZONE è invariante per estate/shoulder).",
+    "season":  "winter",
+    "profile": "Comfort",
+    "t_op":    21.0,
+    "rh_pct":  50.0,
+    "zones": [
+      { "zone": "A", "gradi_giorno": "<600"      },
+      { "zone": "B", "gradi_giorno": "600-900"   },
+      { "zone": "C", "gradi_giorno": "900-1400"  },
+      { "zone": "D", "gradi_giorno": "1400-2100" },
+      { "zone": "E", "gradi_giorno": "2100-3000" },
+      { "zone": "F", "gradi_giorno": ">3000"     }
+    ]
+  },
+
+  "sim_05_cold_snap": {
+    "_comment": "Cold snap: T_op transitoria 18°C (shoulder realistico con impianto in fase di avvio). Verifica no-effect in estate/inverno.",
+    "primary_season": "shoulder",
+    "profile":        "Comfort",
+    "t_op":           18.0,
+    "rh_pct":         55.0,
+    "verify_no_effect_seasons": ["summer", "winter"]
+  },
+
+  "sim_06_adaptive_clo_s3": {
+    "_comment": "Sweep T_rm per S3: tutte le stagioni con T_op realistica. Range T_rm asimmetrici per stagione.",
+    "seasons": ["winter", "shoulder", "summer"],
+    "t_op_by_season": { "winter": 21.0, "shoulder": 19.0, "summer": 25.5 },
+    "rh_pct":  50.0,
+    "t_rm_values_by_season": {
+      "winter":   [14.0, 16.0, 17.5, 19.0, null, 22.0, 24.0],
+      "shoulder": [14.0, 16.0, 18.0, null, 23.0, 25.0],
+      "summer":   [20.0, 22.0, null, 27.0, 30.0, 33.0]
+    },
+    "_comment_null": "null → usa il neutro stagionale da T_RM_NEUTRAL_BY_SEASON",
+    "t_rm_cold_for_profile_comparison": 17.0,
+    "profiles_to_compare": ["Comfort", "Eco", "Sleep", "Away"]
+  },
+
+  "sim_07_t_op_sweep": {
+    "_comment": "Sweep T_op dentro/fuori banda per tutte le stagioni. Range centrati sulla T_op realistica per stagione.",
+    "seasons_config": [
+      {
+        "season":      "winter",
+        "profile":     "Comfort",
+        "t_op_values": [16.0, 18.0, 19.5, 20.5, 21.0, 21.5, 22.5, 23.5, 25.0]
+      },
+      {
+        "season":      "shoulder",
+        "profile":     "Comfort",
+        "t_op_values": [15.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 25.0]
+      },
+      {
+        "season":      "summer",
+        "profile":     "Comfort",
+        "t_op_values": [21.0, 22.0, 23.5, 24.5, 25.5, 26.5, 27.5, 29.0, 31.0]
+      }
+    ],
+    "rh_pct":    50.0,
+    "vmc_speed": 2
+  },
+
+  "sim_08_living_vs_non_living": {
+    "_comment": "Confronto v_air living vs non-living per tutte le stagioni. In estate il draft ha effetto rinfrescante (segno opposto all'inverno).",
+    "seasons":   ["winter", "shoulder", "summer"],
+    "profile":   "Comfort",
+    "t_op_by_season": { "winter": 21.0, "shoulder": 19.0, "summer": 25.5 },
+    "rh_pct":    50.0,
+    "zones": [
+      { "room": "camera_1",  "label": "camera_1 (non-liv)" },
+      { "room": "soggiorno", "label": "soggiorno (living)"  }
+    ]
+  },
+
+  "sim_09_trm_warmup_sequenza": {
+    "_comment": "Warm-up ZoneTrmTracker a tick reali (30s). Scenario: prima accensione stagionale con stanza a 17°C. Per scenari temporali compressi (rientro vacanza) usare le sezioni scenario_* sotto.",
+    "season":              "winter",
+    "profile":             "Comfort",
+    "rh_pct":              50.0,
+    "warmup_ticks":        10,
+    "tau_hours":           168.0,
+    "tick_count":          61,
+    "tick_interval_s":     30,
+    "t_op_start":          17.0,
+    "t_op_end":            21.0,
+    "print_every_n_ticks": 5
+  },
+
+  "sim_10_matrice_profili_stagioni": {
+    "_comment": "Matrice compatta di commissioning con T_op realistica per stagione. Output su una riga per profilo × stagione, senza reasons.",
+    "seasons":   ["winter", "shoulder", "summer"],
+    "profiles":  ["Comfort", "Eco", "Boost", "Sleep", "Away", "Vacation"],
+    "t_op_by_season": { "winter": 21.0, "shoulder": 19.0, "summer": 25.5 },
+    "rh_pct":    50.0,
+    "vmc_speed": 2
+  },
+
+  "scenario_rientro_vacanza_invernale": {
+    "_comment": "Casa vuota in inverno (T_rm ~15°C). Al rientro l'impianto è già a 21°C. Verifica soppressione S3 per deviazione eccessiva: CLO deve restare al baseline (1.050) finché T_rm non converge entro 4°C da T_op.",
+    "_criticita": "P1-A — patch T_RM_MAX_DEVIATION_SUPPRESS_C=4.0",
+    "_atteso":    "CLO=1.050 per i primi 4-5 giorni simulati; poi S3 si riattiva progressivamente.",
+    "season":              "winter",
+    "profile":             "Comfort",
+    "rh_pct":              50.0,
+    "warmup_ticks":        10,
+    "tau_hours":           168.0,
+    "tick_count":          240,
+    "tick_interval_s":     3600,
+    "t_op_start":          21.0,
+    "t_op_end":            21.0,
+    "print_every_n_ticks": 24
+  },
+
+  "scenario_rientro_vacanza_estiva": {
+    "_comment": "Casa chiusa in estate (T_rm ~30°C). Al rientro il raffrescamento è già a 25.5°C. Verifica soppressione S3 lato caldo: CLO deve restare al baseline estivo (0.50) finché T_rm non scende entro 4°C da T_op.",
+    "_criticita": "P1-A — patch T_RM_MAX_DEVIATION_SUPPRESS_C=4.0 lato caldo",
+    "_atteso":    "CLO=0.50 per i primi giorni; poi S3 si riattiva man mano che T_rm scende.",
+    "season":              "summer",
+    "profile":             "Comfort",
+    "rh_pct":              60.0,
+    "warmup_ticks":        10,
+    "tau_hours":           168.0,
+    "tick_count":          240,
+    "tick_interval_s":     3600,
+    "t_op_start":          25.5,
+    "t_op_end":            25.5,
+    "print_every_n_ticks": 24
+  },
+
+  "scenario_sleep_floor_invernale": {
+    "_comment": "Documenta il limite inferiore banda SLEEP in inverno (attualmente ~15.6°C). Serve come riferimento pre/post implementazione T_OP_MIN_SLEEP_FLOOR_C=17.0°C nella decision layer.",
+    "_criticita": "P0-B — floor assoluto T_setpoint SLEEP assente",
+    "_atteso_pre_fix":  "Banda [15.6, 20.4]°C — T_op=16°C risulta DENTRO banda ma sotto il floor di sicurezza.",
+    "_atteso_post_fix": "t_op_min effettivo non scende sotto 17.0°C indipendentemente dal PMV calcolato.",
+    "season":      "winter",
+    "profile":     "Sleep",
+    "rh_pct":      50.0,
+    "vmc_speed":   1,
+    "t_op_values": [14.0, 15.0, 15.5, 16.0, 16.5, 17.0, 17.5, 18.0, 19.0, 20.0, 21.0]
+  },
+
+  "scenario_estate_roma_umida": {
+    "_comment": "Luglio-agosto Roma: RH 65-80%, T_op 24-28°C. Verifica PMV floor in raffrescamento (Sleep con PMV < -1.5) e sensitività banda all'umidità in estate.",
+    "_criticita": "CHIUSA — PMV<-1.5 in estate è artefatto di T_op irrealistica (<23°C). Range operativo realistico Roma: T_op >= 23°C in estate.",
+    "_atteso":    "Nessun guardrail necessario. Il simulatore documenta il comportamento per T_op nel range realistico 23-28°C.",
+    "season":    "summer",
+    "profiles":  ["Comfort", "Eco", "Boost", "Sleep", "Away", "Vacation"],
+    "rh_pct":    65.0,
+    "vmc_speed": 2,
+    "t_op_values": [21.0, 22.0, 23.0, 24.0, 25.0, 25.5, 26.0, 27.0, 28.0],
+    "rh_values":   [50, 55, 60, 65, 70, 75, 80, 85]
+  },
+
+  "scenario_shoulder_roma_transitorio": {
+    "_comment": "Aprile/ottobre Roma: T_op 17-22°C, RH 55-65%. Verifica bande shoulder con CLO=0.82 post-fix, cold snap a T_op transitoria, e curva S3 in mezza stagione.",
+    "_criticita": "P2 — bande shoulder sistematicamente sopra T_op di transizione",
+    "_nota":      "Con CLO=0.82 il neutro PMV shoulder è ~23°C: il modello chiede riscaldamento anche a 19-20°C. Questo scenario lo documenta e serve da riferimento per decisioni future sul CLO shoulder.",
+    "season":    "shoulder",
+    "profiles":  ["Comfort", "Eco", "Boost", "Sleep", "Away", "Vacation"],
+    "rh_pct":    55.0,
+    "vmc_speed": 2,
+    "t_op_values":       [15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0],
+    "cold_snap_t_op":    18.0,
+    "cold_snap_rh_pct":  60.0,
+    "t_rm_values":       [14.0, 16.0, 18.0, null, 23.0, 25.0, 27.0]
+  },
+
+  "scenario_cold_snap_s3_combinati": {
+    "_comment": "Cold snap + S3 combinati in shoulder: verifica interazione tra correzione cold snap (CLO interpolato verso inverno) e correzione adattiva S3 (CLO alzato per T_rm bassa). Le due correzioni si sommano o si escludono?",
+    "_atteso": "Con cold_snap=True e T_rm=16°C (S3 attiva): CLO deve riflettere entrambe le correzioni. Il reason log deve mostrare sia clo:cold_snap:interp sia clo:trm:. Con T_rm=14°C (S3 soppressa per deviazione): solo cold_snap attivo.",
+    "season":   "shoulder",
+    "profile":  "Comfort",
+    "t_op":     19.0,
+    "rh_pct":   55.0,
+    "vmc_speed": 2,
+    "t_rm_values":        [null, 14.0, 16.0, 17.5, 19.0, 22.5],
+    "cold_snap_values":   [false, true],
+    "profiles_to_compare": ["Comfort", "Eco", "Sleep", "Away"]
+  }
+}

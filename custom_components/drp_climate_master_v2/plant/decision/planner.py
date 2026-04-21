@@ -17,6 +17,13 @@ from .zone.model import ZonesDecision
 from .confort_band.builder import build_confort_zones
 from .confort_band.policy_layer import ComfortPolicyLayer, ConfortPolicyConfig
 from .confort_band.mpc.provider import ZonesMpcProvider
+from .confort_band.trm import ZoneTrmTracker
+from .confort_band.config import (
+    T_RM_TAU_HOURS,
+    T_RM_WARMUP_TICKS,
+    T_RM_CLAMP_MIN,
+    T_RM_CLAMP_MAX,
+)
 
 from .context import DecisionDerivedInputs
 
@@ -95,6 +102,10 @@ class PlantDecisionPlanner:
     # Zones MPC-lite integration (kept isolated in `zone/provider.py`)
     _zones_mpc: ZonesMpcProvider = field(init=False, repr=False)
 
+    # S3 — Adaptive CLO: running mean T_op per zona (ZoneTrmTracker)
+    # Stato in memoria; reset al riavvio HA (warm-up ~2h a 30s/tick).
+    _zone_trm: ZoneTrmTracker = field(init=False, repr=False)
+
     def __post_init__(self) -> None:
         # Legge la configurazione comfort dal PlantPlannerConfig (unica fonte di verità).
         # Non usare build_comfort_engine() che ha valori hardcoded.
@@ -122,6 +133,16 @@ class PlantDecisionPlanner:
 
         # Zones MPC provider (optional)
         self._zones_mpc = ZonesMpcProvider(cfg=self.cfg.zones_mpc)
+
+        # S3 — Adaptive CLO: tracker running mean T_op per zona.
+        # Parametri letti da config.py (tau, warmup, clamp) per coerenza
+        # con la policy layer che usa le stesse costanti.
+        self._zone_trm = ZoneTrmTracker(
+            tau_hours=T_RM_TAU_HOURS,
+            warmup_ticks=T_RM_WARMUP_TICKS,
+            t_rm_clamp_min=T_RM_CLAMP_MIN,
+            t_rm_clamp_max=T_RM_CLAMP_MAX,
+        )
 
     def plan(
         self,
@@ -219,13 +240,22 @@ class PlantDecisionPlanner:
         derived: DecisionDerivedInputs | None = None
 
         try:
-            # Compute comfort-band per zone as *derived decision input*.
-            # The comfort band is not part of PlantSnapshot by design.
             if snapshot.indoor_zones and snapshot.season is not None:
                 vmc_speed = as_int(getattr(getattr(snapshot, "vmc", None), "spare_setpoint", None), default=0, min_value=0, max_value=5) or 0
                 t_out = as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None))
                 preset = getattr(snapshot, "climate_preset_mode", None) or HVACOperatingProfile.ECO
-                
+
+                # S3 — aggiorna la running mean T_op per ogni zona e raccoglie
+                # i valori pronti (None per le zone ancora in warm-up).
+                ts = snapshot.timestamp
+                t_op_rm: dict[str, float] = {}
+                for zone_id, z in snapshot.indoor_zones.items():
+                    t_op_val = as_float(getattr(getattr(z, "t_op", None), "value", None))
+                    self._zone_trm.update(zone_id, t_op_val, ts)
+                    rm = self._zone_trm.get_t_rm(zone_id)
+                    if rm is not None:
+                        t_op_rm[zone_id] = rm
+
                 bands = build_confort_zones(
                     now=snapshot.timestamp,
                     season_state=snapshot.season,
@@ -235,6 +265,8 @@ class PlantDecisionPlanner:
                     preset_mode=preset,
                     policy_cfg=self.cpcfg,
                     policy_layer=self.cpl,
+                    # None se nessuna zona ha superato il warm-up (fail-safe)
+                    t_op_rm_by_zone=t_op_rm if t_op_rm else None,
                 )
                 derived = DecisionDerivedInputs(comfort_bands_by_zone=bands)
         except Exception as e:
