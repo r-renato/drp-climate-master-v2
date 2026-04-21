@@ -32,6 +32,8 @@ class VmcDemand:
     req_cooling: bool
     req_dehumidif: bool
     req_water: bool
+    req_free_cooling: bool
+    req_free_heating: bool
 
     # Useful diagnostics
     operative_season: str
@@ -75,6 +77,8 @@ class VmcPolicy:
         dp_dehum_c: Optional[float],
         dp_max_c: Optional[float],
         outdoor_dp_c: Optional[float],
+        free_cool_feasible: bool = False,
+        free_heat_feasible: bool = False,
     ) -> VmcDemand:
         operative = self.infer_operative_bucket(snapshot)
 
@@ -126,6 +130,15 @@ class VmcPolicy:
         req_dehum = bool(need_dehum or raw_req_dehum) and (dehum_feasible is not False)
         req_water = bool(req_heat or req_cool or (req_dehum and bool(self.cfg.dehum.water_on_for_dehumid)))
 
+        # Free cooling/heating ventilativo: bypass recuperatore.
+        # Mutuamente esclusivo con req_heating/req_cooling (nessuna batteria idraulica).
+        req_free_cool = bool(free_cool_feasible) and self.allow_free_cooling(snapshot, outdoor_dp_c, dp_max_c)
+        req_free_heat = bool(free_heat_feasible) and self.allow_free_heating(snapshot)
+        # Se il trattamento termico idronico è già richiesto, il free vent non si attiva.
+        if req_heat or req_cool or req_dehum:
+            req_free_cool = False
+            req_free_heat = False
+
         return VmcDemand(
             dp_sp_c=float(dp_sp_cmd_c),
             ddp_cmd_c=float(ddp_cmd),
@@ -137,6 +150,8 @@ class VmcPolicy:
             req_cooling=req_cool,
             req_dehumidif=req_dehum,
             req_water=req_water,
+            req_free_cooling=req_free_cool,
+            req_free_heating=req_free_heat,
             operative_season=str(operative),
             rh_target_pct=float(rh_target_pct),
             t_ref_c=float(t_ref_c),
@@ -192,6 +207,57 @@ class VmcPolicy:
         turn_on = cur > float(on_thr_c)
         self._state.dehum_on = bool(turn_on)
         return bool(turn_on)
+
+    def allow_free_cooling(
+        self,
+        snapshot: PlantSnapshot,
+        outdoor_dp_c: Optional[float],
+        dp_max_c: Optional[float],
+    ) -> bool:
+        """Valuta se il free cooling ventilativo (bypass recuperatore) è attivabile.
+
+        Condizioni necessarie (tutte e tre):
+        1. free_cool_feasible è già calcolato nel FreeVentCluster del DemandSignalsBuilder;
+           qui ricalcoliamo solo il flag DP per non accoppiare la policy al builder.
+        2. Finestre chiuse.
+        3. Non in vacanza / assenza prolungata.
+
+        Il delta T viene letto da `snapshot.vmc` (T_outdoor vs T_indoor reference)
+        oppure dal segnale `free_cool_feasible` già presente nel demand se disponibile.
+        La policy non duplica il calcolo del delta T: legge il flag prodotto dal builder.
+        """
+        # Guardie identiche ai boost esistenti
+        if not bool(getattr(snapshot, "windows_close_state", True)):
+            return False
+        if bool(snapshot.presence_vacation):
+            return False
+        if bool(snapshot.presence_nobodysin):
+            return False
+        # Controllo DP: aria esterna non deve aggiungere umidità
+        if outdoor_dp_c is not None and dp_max_c is not None:
+            margin = float(getattr(self.cfg.dehum, "outdoor_dp_headroom_c", 2.0))
+            if float(outdoor_dp_c) >= (float(dp_max_c) - margin):
+                return False
+        elif outdoor_dp_c is None:
+            # DP esterno sconosciuto: fail-safe, non attivare
+            return False
+        # Il delta T è valutato dal caller tramite free_cool_feasible del demand
+        return True
+
+    def allow_free_heating(self, snapshot: PlantSnapshot) -> bool:
+        """Valuta se il free heating ventilativo (bypass recuperatore) è attivabile.
+
+        Condizioni: finestre chiuse, non vacanza, non estate.
+        Il delta T è valutato dal caller tramite free_heat_feasible del demand.
+        """
+        if not bool(getattr(snapshot, "windows_close_state", True)):
+            return False
+        if bool(snapshot.presence_vacation):
+            return False
+        season_val = getattr(getattr(getattr(snapshot, "season", None), "season", None), "value", None)
+        if season_val == "summer":
+            return False
+        return True
 
     def allow_heat_boost(self, snapshot: PlantSnapshot, heat_def_max_c: float, heat_def_wmean_c: float, heat_cov: float) -> bool:
         if not bool(self.cfg.boost.enabled):

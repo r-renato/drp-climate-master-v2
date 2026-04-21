@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, is_dataclass
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from custom_components.drp_climate_master_v2.helpers.formatter import fpadstr
-from custom_components.drp_climate_master_v2.plant.decision.context import DecisionDerivedInputs
+from ...helpers.formatter import fpadstr
+from ...plant.decision.context import DecisionDerivedInputs
 
 from .zone.model import ZonesDecision
 
@@ -391,6 +391,63 @@ class PlantDemandSignals:
             "source": "DemandSignalsBuilder.VmcCluster",
         },
     )
+    free_cool_delta_c: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": "Delta T indoor_mean − outdoor [°C]. Positivo = esterno più freddo.",
+            "unit": "°C",
+            "source": "DemandSignalsBuilder.FreeVentCluster",
+        },
+    )
+    free_heat_delta_c: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": "Delta T outdoor − indoor_mean [°C]. Positivo = esterno più caldo.",
+            "unit": "°C",
+            "source": "DemandSignalsBuilder.FreeVentCluster",
+        },
+    )
+    free_cool_dp_ok: Optional[bool] = field(
+        default=None,
+        metadata={
+            "doc": "True se DP_outdoor < DP_indoor_max − margine (aria esterna non aggiunge umidità).",
+            "unit": "bool",
+            "source": "DemandSignalsBuilder.FreeVentCluster",
+        },
+    )
+    free_cool_feasible: bool = field(
+        default=False,
+        metadata={
+            "doc": "True se free cooling ventilativo è fattibile (delta_T, DP e finestre ok).",
+            "unit": "bool",
+            "source": "DemandSignalsBuilder.FreeVentCluster",
+        },
+    )
+    free_heat_feasible: bool = field(
+        default=False,
+        metadata={
+            "doc": "True se free heating ventilativo è fattibile (delta_T, stagione e finestre ok).",
+            "unit": "bool",
+            "source": "DemandSignalsBuilder.FreeVentCluster",
+        },
+    )
+    # --- VMC free vent requests (prodotti da VmcPolicy) ---
+    vmc_req_free_cooling: bool = field(
+        default=False,
+        metadata={
+            "doc": "VMC richiede bypass recuperatore con aria esterna fredda (free cooling).",
+            "unit": "bool",
+            "source": "VmcPolicy",
+        },
+    )
+    vmc_req_free_heating: bool = field(
+        default=False,
+        metadata={
+            "doc": "VMC richiede bypass recuperatore con aria esterna calda (free heating).",
+            "unit": "bool",
+            "source": "VmcPolicy",
+        },
+    )
 
     zones_any_heat_demand: bool = field(
         default=False,
@@ -773,6 +830,18 @@ class PlantDemandSignals:
         emit(lines, "VMC req cooling", "vmc_req_cooling", fbool(self.vmc_req_cooling, "True", "False"))
         emit(lines, "VMC req dehumidif", "vmc_req_dehumidif", fbool(self.vmc_req_dehumidif, "True", "False"))
         emit(lines, "VMC req water", "vmc_req_water", fbool(self.vmc_req_water, "True", "False"))
+        emit(lines, "VMC req free cool", "vmc_req_free_cooling", fbool(self.vmc_req_free_cooling, "True", "False"))
+        emit(lines, "VMC req free heat", "vmc_req_free_heating", fbool(self.vmc_req_free_heating, "True", "False"))
+
+        # -------------------------
+        # Cluster: Free conditioning feasibility
+        # -------------------------
+        lines += ["Free conditioning"]
+        emit(lines, "Free cool delta", "free_cool_delta_c", f"{fnum(self.free_cool_delta_c)} °C")
+        emit(lines, "Free heat delta", "free_heat_delta_c", f"{fnum(self.free_heat_delta_c)} °C")
+        emit(lines, "Free cool DP ok", "free_cool_dp_ok", fbool(self.free_cool_dp_ok, "True", "False"))
+        emit(lines, "Free cool feasible", "free_cool_feasible", fbool(self.free_cool_feasible, "True", "False"))
+        emit(lines, "Free heat feasible", "free_heat_feasible", fbool(self.free_heat_feasible, "True", "False"))
 
         # -------------------------
         # Cluster: MPC / ZonesPlan hints
@@ -878,6 +947,13 @@ class VmcCommand:
     setpoint_dp_c: Optional[float] = None
     setpoint_ddp_c: Optional[int] = None
 
+    # Free cooling ventilativo (bypass recuperatore)
+    # Prerequisito di sicurezza: force_treatment_off deve essere True prima
+    # di attivare enable_free_cooling e force_free_cooling.
+    force_treatment_off: Optional[bool] = None
+    enable_free_cooling: Optional[bool] = None
+    force_free_cooling: Optional[bool] = None
+
     debug: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -947,6 +1023,36 @@ class PlantDecision:
                 more = f" (+{len(d) - max_items})"
             s = ", ".join(f"{k}={fnum(v, nd)}" for k, v in items)
             return s + more
+
+        def fobj_summary(obj: Any) -> str:
+            if obj is None:
+                return "-"
+            try:
+                if is_dataclass(obj) and not isinstance(obj, type):
+                    data = asdict(obj)
+                elif hasattr(obj, "__dict__"):
+                    data = {
+                        k: v
+                        for k, v in vars(obj).items()
+                        if not k.startswith("_")
+                    }
+                else:
+                    return str(obj)
+            except Exception:
+                return str(obj)
+
+            if not data:
+                return "-"
+
+            parts = []
+            for k, v in data.items():
+                if isinstance(v, dict):
+                    if not v:
+                        continue
+                    parts.append(f"{k}={fdict_compact(v, nd=1)}")
+                else:
+                    parts.append(f"{k}={v}")
+            return ", ".join(parts) if parts else "-"
 
         # --- top-level ---
         ts = self.ts.isoformat()
@@ -1018,6 +1124,17 @@ class PlantDecision:
             #     f"  Heat def by zone   :: {fdict_compact(s.heat_def_by_zone_c, nd=1)}",
             #     f"  Cool sur by zone   :: {fdict_compact(s.cool_sur_by_zone_c, nd=1)}",
             # ]
+
+        # --- derived inputs ---
+        if getattr(self, "derived_input", None) is not None:
+            try:
+                lines += [
+                    f"------------------------------------------------------------------",
+                    f"Derived input",
+                    f"  Summary            :: {fobj_summary(self.derived_input)}",
+                ]
+            except Exception:
+                pass
 
         # --- zones MPC plan (valves) ---
         zdec = getattr(self, "zones", None)
@@ -1132,6 +1249,9 @@ class PlantDecision:
                 f"  Setpoint RH        :: {fnum(self.vmc.setpoint_rh_pct, 0)} %",
                 f"  Setpoint DP        :: {fnum(self.vmc.setpoint_dp_c)} °C",
                 f"  Setpoint ΔDP       :: {fnum(self.vmc.setpoint_ddp_c)} °C",
+                f"  Treatment off      :: {fbool(getattr(self.vmc, 'force_treatment_off', None), 'On', 'Off')}",
+                f"  Enable free cool   :: {fbool(getattr(self.vmc, 'enable_free_cooling', None), 'On', 'Off')}",
+                f"  Force free cool    :: {fbool(getattr(self.vmc, 'force_free_cooling', None), 'On', 'Off')}",
             ]
             if getattr(self.vmc, "debug", None):
                 lines += [f"  Debug              :: {self.vmc.debug}"]

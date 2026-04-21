@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import fields as dc_fields, is_dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional
+
+from ....helpers.logger import log_debug
 
 from ....helpers.num import quantile_linear
 
@@ -11,8 +14,14 @@ from ....helpers.psychrometric import dew_point_celsius
 from ....helpers.utils import as_float
 
 from ..config import PlantPlannerConfig
-from .model import DewPointCluster, ZoneComfortCluster, ZoneDemandMetrics
+from .model import DewPointCluster, FreeVentCluster, ZoneComfortCluster, ZoneDemandMetrics
 
+# Soglie default per il cluster free-vent (override tramite config se necessario)
+_FREE_COOL_DELTA_MIN_C: float = 3.0   # delta T minimo per attivare il free cooling
+_FREE_HEAT_DELTA_MIN_C: float = 3.0   # delta T minimo per attivare il free heating
+_FREE_COOL_DP_MARGIN_C: float = 5.0   # margine DP esterno vs DP indoor max
+
+_LOGGER = logging.getLogger(__name__)
 
 class DemandSignalsBuilder:
     """
@@ -82,6 +91,7 @@ class DemandSignalsBuilder:
         zc = self._compute_zone_comfort_cluster(snapshot, comfort_bands_by_zone=comfort_bands_by_zone)
         zm = self._compute_zone_demand_metrics(zc)
         dp = self._compute_dew_point_cluster(snapshot, zc)
+        fv = self._compute_free_vent_cluster(snapshot, zc, dp)
 
         payload: Dict[str, Any] = dict(
             # zone comfort
@@ -102,8 +112,16 @@ class DemandSignalsBuilder:
             dp_max_c=dp.dp_max_c,
             dp_dehum_c=dp.dp_dehum_c,
             outdoor_dp_c=dp.outdoor_dp_c,
+            # free vent (Cluster F)
+            free_cool_delta_c=fv.free_cool_delta_c,
+            free_heat_delta_c=fv.free_heat_delta_c,
+            free_cool_dp_ok=fv.free_cool_dp_ok,
+            free_cool_feasible=fv.free_cool_feasible,
+            free_heat_feasible=fv.free_heat_feasible,
         )
 
+        log_debug(_LOGGER, "Computed ZoneComfortCluster: %s", zc)
+        
         return self._safe_signals_init(payload)
 
     # -----------------
@@ -357,6 +375,79 @@ class DemandSignalsBuilder:
             dp_max_c=zc.dp_max_c,
             dp_dehum_c=dp_dehum_c,
             outdoor_dp_c=float(outdoor_dp_c) if outdoor_dp_c is not None else None,
+        )
+
+    def _compute_free_vent_cluster(
+        self,
+        snapshot: PlantSnapshot,
+        zc: ZoneComfortCluster,
+        dp: DewPointCluster,
+    ) -> FreeVentCluster:
+        """Calcola i segnali di fattibilità per free cooling/heating ventilativo.
+
+        Tre condizioni indipendenti per il free cooling:
+        1. Delta T sufficiente: T_indoor_mean − T_outdoor > soglia
+        2. Dew point esterno sicuro: DP_outdoor < DP_indoor_max − margine
+        3. Finestre chiuse: evita dispersione inutile
+
+        Per il free heating: solo delta T e stagione (no vincolo DP).
+
+        Questo metodo è osservativo: calcola segnali, non decide nulla.
+        """
+        del zc
+
+        # --- temperatura esterna ---
+        t_out = as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None))
+
+        # --- temperatura indoor: usa global_indoor_zone (già mediata a monte) ---
+        t_indoor_mean: Optional[float] = None
+        g_indoor = getattr(snapshot, "global_indoor_zone", None)
+        if g_indoor is not None:
+            t_indoor_mean = as_float(getattr(getattr(g_indoor, "t_op", None), "value", None))
+            if t_indoor_mean is None:
+                t_indoor_mean = as_float(getattr(getattr(g_indoor, "temperature", None), "value", None))
+
+        # --- delta T ---
+        free_cool_delta_c: Optional[float] = None
+        free_heat_delta_c: Optional[float] = None
+        if t_indoor_mean is not None and t_out is not None:
+            free_cool_delta_c = float(t_indoor_mean) - float(t_out)
+            free_heat_delta_c = float(t_out) - float(t_indoor_mean)
+
+        # --- DP esterno sicuro ---
+        free_cool_dp_ok: Optional[bool] = None
+        if dp.outdoor_dp_c is not None and dp.dp_max_c is not None:
+            free_cool_dp_ok = float(dp.outdoor_dp_c) < (
+                float(dp.dp_max_c) - _FREE_COOL_DP_MARGIN_C
+            )
+
+        # --- finestre chiuse ---
+        windows_closed = bool(getattr(snapshot, "windows_close_state", True))
+
+        # --- stagione (summer blocca free heating) ---
+        season_val = getattr(getattr(getattr(snapshot, "season", None), "season", None), "value", None)
+        is_summer = season_val == "summer"
+
+        # --- fattibilità ---
+        free_cool_feasible = bool(
+            free_cool_delta_c is not None
+            and free_cool_delta_c >= _FREE_COOL_DELTA_MIN_C
+            and free_cool_dp_ok is True
+            and windows_closed
+        )
+        free_heat_feasible = bool(
+            free_heat_delta_c is not None
+            and free_heat_delta_c >= _FREE_HEAT_DELTA_MIN_C
+            and not is_summer
+            and windows_closed
+        )
+
+        return FreeVentCluster(
+            free_cool_delta_c=free_cool_delta_c,
+            free_heat_delta_c=free_heat_delta_c,
+            free_cool_dp_ok=free_cool_dp_ok,
+            free_cool_feasible=free_cool_feasible,
+            free_heat_feasible=free_heat_feasible,
         )
 
     # -----------------

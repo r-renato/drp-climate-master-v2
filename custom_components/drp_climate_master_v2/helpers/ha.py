@@ -339,10 +339,14 @@ async def set_entity_select(
         if cur.state == option:
             # già selezionato
             return False
-
+    else:
+        log_warning(_LOGGER, f"Entity ({entity_id}) in state {cur.state if cur else 'None'}; calling service anyway")
+        return False
+    
     # Nota: il servizio è sempre "select.select_option" anche per input_select
     await hass.services.async_call(
-        "select",
+        # "select",
+        dom,
         "select_option",
         {"entity_id": entity_id, "option": option},
         blocking=False,

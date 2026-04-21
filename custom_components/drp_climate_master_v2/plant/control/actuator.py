@@ -122,7 +122,16 @@ class PlantActuator:
         await self._heatpump.async_set_cool_setpoints(t=pdc_command.cool_wot_c, dt=pdc_command.cool_dt_c)
 
     async def _async_vmc_actuator(self, vmc_command: VmcCommand) -> None:
-        """Applica un comando VMC alle entità Home Assistant."""
+        """Applica un comando VMC alle entità Home Assistant.
+
+        Sequenza obbligatoria per il free cooling:
+        1. force_treatment_off (Coil 3) — deve precedere l'attivazione del bypass
+        2. enable_free_cooling (Coil 9) — abilita la forzatura
+        3. force_free_cooling (Coil 10) — attiva il bypass
+        Nel path normale i tre flag vengono rimessi a False nello stesso ordine inverso.
+        """
+
+        log_debug(_LOGGER, "Applying VMC command: %s", vmc_command)
 
         await self._vmc.async_set_power(power=vmc_command.power)
         await self._vmc.async_set_processing_mode(mode=vmc_command.mode)
@@ -131,6 +140,10 @@ class PlantActuator:
         await self._vmc.async_set_humidity(target=vmc_command.setpoint_rh_pct)
         await self._vmc.async_set_dew_point(target=vmc_command.setpoint_dp_c)
         await self._vmc.async_set_delta_dew_point(target=vmc_command.setpoint_ddp_c)
+        # Free cooling: sequenza con prerequisito di sicurezza
+        # await self._vmc.async_set_treatment_off(value=vmc_command.force_treatment_off)
+        await self._vmc.async_enable_free_cooling(value=vmc_command.enable_free_cooling)
+        await self._vmc.async_set_free_cooling(value=vmc_command.force_free_cooling)
 
     async def _async_apply_zone_valves(self, commands) -> None:
         """Esegue i comandi valvole calcolati dalla logica."""

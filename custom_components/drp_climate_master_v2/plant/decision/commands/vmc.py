@@ -39,13 +39,51 @@ class VmcCommandBuilder:
             v.setpoint_rh_pct = None
             v.setpoint_dp_c = None
             v.setpoint_ddp_c = None
+            v.force_treatment_off = False
+            v.enable_free_cooling = False
+            v.force_free_cooling = False
             v.debug.update({"reason": "plant_mode_off"})
             return
+
+        # ── PATH FREE COOLING (bypass recuperatore) ───────────────────────────
+        # Mutuamente esclusivo con il path normale: nessun setpoint T/RH/DP,
+        # nessun trattamento idronico. Prerequisito: force_treatment_off = True.
+        if demand.vmc_req_free_cooling:
+            windows_closed = as_bool(getattr(snapshot, "windows_close_state", None), default=True)
+            air_speed = int(self.cfg.vmc.speed.speed_base) if windows_closed else int(self.cfg.vmc.speed.speed_windows_open)
+            air_speed = int(clamp(float(air_speed), float(self.cfg.vmc.speed.speed_min), float(self.cfg.vmc.speed.speed_max)))
+            v.power = True
+            v.mode = None
+            v.air_speed = air_speed
+            v.setpoint_t_c = None
+            v.setpoint_rh_pct = None
+            v.setpoint_dp_c = None
+            v.setpoint_ddp_c = None
+            v.force_treatment_off = True
+            v.enable_free_cooling = True
+            v.force_free_cooling = True
+            v.debug.update(
+                {
+                    "reason": "free_cooling_bypass",
+                    "free_cool_delta_c": getattr(demand, "free_cool_delta_c", None),
+                    "free_cool_dp_ok": getattr(demand, "free_cool_dp_ok", None),
+                }
+            )
+            return
+
+        # ── PATH NORMALE (recuperatore + eventuale batteria idraulica) ─────────
+        # Riabilita il trattamento nel caso in cui fosse stato disabilitato
+        # nel tick precedente per free cooling.
+        v.force_treatment_off = False
+        v.enable_free_cooling = False
+        v.force_free_cooling = False
 
         if demand.operative_season == "winter":
             mode = cfg.vmc.mode_winter
         elif demand.operative_season == "summer":
             mode = cfg.vmc.mode_summer
+        elif demand.operative_season == "shoulder":
+            mode = cfg.vmc.mode_shoulder
         else:
             mode = getattr(snapshot.vmc, "processing_mode", None) or cfg.vmc.mode_winter
 

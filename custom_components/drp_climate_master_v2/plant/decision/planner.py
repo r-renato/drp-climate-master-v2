@@ -207,6 +207,14 @@ class PlantDecisionPlanner:
         mode = self._mode_resolver.decide(snapshot=snapshot, demand=demand, zones_decision=zones_decision)
         dec.mode = mode
 
+        # Arricchisce reason con il motivo specifico del VENT_ONLY se free vent attivo.
+        # Distingue il VENT_ONLY intenzionale (free cooling/heating) dal fallback di sicurezza.
+        if mode == PlantMode.VENT_ONLY:
+            if demand.vmc_req_free_cooling:
+                dec.reason = f"{reason}|vent_only_free_cooling"
+            elif demand.vmc_req_free_heating:
+                dec.reason = f"{reason}|vent_only_free_heating"
+
         # Diagnostics / warnings derived from enriched demand
         if getattr(demand, "vmc_dehum_feasible", None) is False:
             dec.warnings.append("vmc_dehum_unfeasible_outdoor_dp")
@@ -328,6 +336,8 @@ class PlantDecisionPlanner:
             dp_dehum_c=getattr(demand, "dp_dehum_c", None),
             dp_max_c=getattr(demand, "dp_max_c", None),
             outdoor_dp_c=getattr(demand, "outdoor_dp_c", None),
+            free_cool_feasible=bool(getattr(demand, "free_cool_feasible", False)),
+            free_heat_feasible=bool(getattr(demand, "free_heat_feasible", False)),
         )
 
         # PlantDemandSignals stores VMC policy outputs flat for logging/backward-compat.
@@ -341,3 +351,5 @@ class PlantDecisionPlanner:
         demand.vmc_req_cooling = vmc_dem.req_cooling
         demand.vmc_req_dehumidif = vmc_dem.req_dehumidif
         demand.vmc_req_water = vmc_dem.req_water
+        demand.vmc_req_free_cooling = vmc_dem.req_free_cooling
+        demand.vmc_req_free_heating = vmc_dem.req_free_heating

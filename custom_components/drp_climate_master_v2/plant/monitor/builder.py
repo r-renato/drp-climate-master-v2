@@ -428,7 +428,7 @@ async def async_build_plant_states_snapshot(
             climate_preset_mode=climate_preset_mode,
         )
 
-        log_debug(_LOGGER, "Built PlantSnapshot %s", plant_snapshot)
+        # log_debug(_LOGGER, "Built PlantSnapshot %s", plant_snapshot)
         return plant_snapshot
     except TypeError as ex:
         # Parametri mancanti/extra o mismatch firma costruttore

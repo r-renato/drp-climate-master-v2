@@ -154,6 +154,11 @@ class ModeResolver:
             # Idle: in AWAY/VACATION save energy by not forcing ventilation at plant level
             if profile in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
                 return PlantMode.OFF
+            # Free cooling/heating intenzionale (bypass recuperatore VMC)
+            if demand.vmc_req_free_cooling:
+                return PlantMode.VENT_ONLY
+            if demand.vmc_req_free_heating:
+                return PlantMode.VENT_ONLY
             return PlantMode.VENT_ONLY
 
         if operative == "summer":
@@ -164,6 +169,9 @@ class ModeResolver:
                 return PlantMode.VENT_ONLY
             if profile in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
                 return PlantMode.OFF
+            # Free cooling intenzionale in estate (free heating non applicabile)
+            if demand.vmc_req_free_cooling:
+                return PlantMode.VENT_ONLY
             return PlantMode.VENT_ONLY
 
         # SHOULDER: allow both, resolve conflicts by dominant error
@@ -183,5 +191,9 @@ class ModeResolver:
                 else (PlantMode.DEHUM_ASSIST if g.vmc_req_dehum else PlantMode.COOLING)
             )
 
-        # Idle shoulder
+        # Idle shoulder: free cooling/heating se fattibile
+        if demand.vmc_req_free_cooling:
+            return PlantMode.VENT_ONLY
+        if demand.vmc_req_free_heating:
+            return PlantMode.VENT_ONLY
         return PlantMode.OFF

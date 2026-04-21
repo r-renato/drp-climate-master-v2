@@ -677,6 +677,7 @@ class VmcConfig:
 
     mode_winter: str = "winter"
     mode_summer: str = "summer"
+    mode_shoulder: str = "shoulder"
 
     setpoint_t_c: float = 20.0
     temp_neutral_deadband_c: float = 0.3

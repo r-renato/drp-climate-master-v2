@@ -401,7 +401,7 @@ class PlantSnapshot:
 
     def __str__(self) -> str:
         try:
-            log_debug(_LOGGER, "PlantSnapshot A")
+            # log_debug(_LOGGER, "PlantSnapshot A")
             # --- helper di formattazione compatti e robusti ---
             # def fnum(x, nd=1):
             #     return f"{x:.{nd}f}" if x is not None else "-"
@@ -710,7 +710,7 @@ class PlantSnapshot:
                 lines += [f"  -"]
             lines += [f"------------------------------------------------------------------"]
 
-            log_debug(_LOGGER, "PlantSnapshot E")
+            # log_debug(_LOGGER, "PlantSnapshot E")
             return "\n".join(lines)
         except Exception as e:  # noqa: BLE001
             log_exception(_LOGGER, f"Error in PlantSnapshot.__str__: {e}")
