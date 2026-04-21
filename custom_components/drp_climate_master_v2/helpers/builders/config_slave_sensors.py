@@ -123,6 +123,7 @@ def build_slave_sensor_defs(runtime_config: RuntimeConfig) -> list[dict[str, Any
     defs.append(
         {
             "type": "TemperatureSensor",
+            "area": GLOBAL,
             "name": f"{sensor_prefix} {NAME_AREA_HOME}",
             "sensors": SensorPair(
                 temperature=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),
@@ -134,6 +135,7 @@ def build_slave_sensor_defs(runtime_config: RuntimeConfig) -> list[dict[str, Any
     defs.append(
         {
             "type": "HumiditySensor",
+            "area": GLOBAL,
             "name": f"{sensor_prefix} {NAME_AREA_HOME}",
             "sensors": SensorPair(
                 temperature=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),

@@ -241,6 +241,9 @@ class PlantDecisionPlanner:
 
         try:
             if snapshot.indoor_zones and snapshot.season is not None:
+                all_indoor_zones = snapshot.indoor_zones
+                if snapshot.global_indoor_zone is not None:
+                    all_indoor_zones["global"] = snapshot.global_indoor_zone
                 vmc_speed = as_int(getattr(getattr(snapshot, "vmc", None), "spare_setpoint", None), default=0, min_value=0, max_value=5) or 0
                 t_out = as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None))
                 preset = getattr(snapshot, "climate_preset_mode", None) or HVACOperatingProfile.ECO

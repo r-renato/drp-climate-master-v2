@@ -20,6 +20,8 @@ from typing import Dict, Optional, Tuple
 from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
 
+from ....helpers.builders.config_aggregate_sensors import GLOBAL
+
 from ....plant.monitor.plant import SeasonState, ZoneSnapshot
 from ....domain.models.season import OperativeSeason, Seasons
 from ....domain.models.runtime_schema import RuntimeConfig
@@ -714,9 +716,9 @@ class ComfortBandCalculator:
 
         if include_global:
             # Convention used in your current code: "global" zone -> "global_indoor"
-            if "global" in indoor_zones:
-                res_g = _compute_one("global")
+            if GLOBAL in indoor_zones:
+                res_g = _compute_one(GLOBAL)
                 if res_g is not None:
-                    out["global_indoor"] = res_g
+                    out[GLOBAL] = res_g
 
         return out
