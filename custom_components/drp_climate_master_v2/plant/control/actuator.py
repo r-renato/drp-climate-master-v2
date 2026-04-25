@@ -142,7 +142,7 @@ class PlantActuator:
         await self._vmc.async_set_delta_dew_point(target=vmc_command.setpoint_ddp_c)
         # Free cooling: sequenza con prerequisito di sicurezza
         # await self._vmc.async_set_treatment_off(value=vmc_command.force_treatment_off)
-        await self._vmc.async_enable_free_cooling(value=vmc_command.enable_free_cooling)
+        # await self._vmc.async_enable_free_cooling(value=vmc_command.enable_free_cooling)
         await self._vmc.async_set_free_cooling(value=vmc_command.force_free_cooling)
 
     async def _async_apply_zone_valves(self, commands) -> None:

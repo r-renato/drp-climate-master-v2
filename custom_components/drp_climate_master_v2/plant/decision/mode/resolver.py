@@ -31,6 +31,27 @@ class ModeResolver:
 
     cfg: PlantPlannerConfig
 
+    def _iaq_mode(self, snapshot: PlantSnapshot) -> PlantMode:
+        """Restituisce IAQ_ONLY o OFF in base a occupazione e stato finestre.
+
+        Logica:
+        - Vacation -> OFF (nessuno in casa per periodo esteso)
+        - Finestre aperte da piu di windows_open_off_minutes -> OFF
+          (nessun senso climatizzare/ventilare con dispersione attiva)
+        - Altrimenti -> IAQ_ONLY (ricambio aria minimo garantito)
+        """
+        if bool(snapshot.presence_vacation):
+            return PlantMode.OFF
+
+        windows_open_min = as_float(
+            getattr(snapshot, "windows_close_minutes_off", None)
+        )
+        threshold = float(self.cfg.windows_open_off_minutes)
+        if windows_open_min is not None and float(windows_open_min) >= threshold:
+            return PlantMode.OFF
+
+        return PlantMode.IAQ_ONLY
+
     def decide(
         self,
         *,
@@ -60,7 +81,7 @@ class ModeResolver:
         demand.user_hvac_mode = hvac_mode_s
         demand.user_profile = profile.value
 
-        # Absolute override
+        # Absolute override: hvac_mode OFF spegne tutto inclusa VMC
         if hvac_mode_s == HVACMode.OFF.value:
             demand.user_forced_off = True
             return PlantMode.OFF
@@ -139,7 +160,7 @@ class ModeResolver:
                     return PlantMode.DEHUM_ASSIST
                 return PlantMode.VENT_ONLY
 
-            # No dew risk: fully OFF (including VMC)
+            # No dew risk in vacation: fully OFF (including VMC)
             return PlantMode.OFF
 
         # --------------------
@@ -151,15 +172,16 @@ class ModeResolver:
             if any_cool_or_dehum:
                 # Avoid active cooling in winter: prefer ventilation only.
                 return PlantMode.VENT_ONLY
-            # Idle: in AWAY/VACATION save energy by not forcing ventilation at plant level
+            # Profili AWAY: rispetta la scelta utente ma garantisce IAQ se occupato
             if profile in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
-                return PlantMode.OFF
+                return self._iaq_mode(snapshot)
             # Free cooling/heating intenzionale (bypass recuperatore VMC)
             if demand.vmc_req_free_cooling:
                 return PlantMode.VENT_ONLY
             if demand.vmc_req_free_heating:
                 return PlantMode.VENT_ONLY
-            return PlantMode.VENT_ONLY
+            # Idle inverno occupato: IAQ minimo garantito
+            return self._iaq_mode(snapshot)
 
         if operative == "summer":
             if any_cool_or_dehum:
@@ -168,11 +190,12 @@ class ModeResolver:
                 # Avoid active heating in summer: ventilation only.
                 return PlantMode.VENT_ONLY
             if profile in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
-                return PlantMode.OFF
+                return self._iaq_mode(snapshot)
             # Free cooling intenzionale in estate (free heating non applicabile)
             if demand.vmc_req_free_cooling:
                 return PlantMode.VENT_ONLY
-            return PlantMode.VENT_ONLY
+            # Idle estate occupata: IAQ minimo garantito
+            return self._iaq_mode(snapshot)
 
         # SHOULDER: allow both, resolve conflicts by dominant error
         if g.any_heat and not any_cool_or_dehum:
@@ -191,9 +214,9 @@ class ModeResolver:
                 else (PlantMode.DEHUM_ASSIST if g.vmc_req_dehum else PlantMode.COOLING)
             )
 
-        # Idle shoulder: free cooling/heating se fattibile
+        # Idle shoulder: free cooling/heating se fattibile, altrimenti IAQ
         if demand.vmc_req_free_cooling:
             return PlantMode.VENT_ONLY
         if demand.vmc_req_free_heating:
             return PlantMode.VENT_ONLY
-        return PlantMode.OFF
+        return self._iaq_mode(snapshot)

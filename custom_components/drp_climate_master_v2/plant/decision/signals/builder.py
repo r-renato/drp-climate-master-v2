@@ -18,8 +18,33 @@ from .model import DewPointCluster, FreeVentCluster, ZoneComfortCluster, ZoneDem
 
 # Soglie default per il cluster free-vent (override tramite config se necessario)
 _FREE_COOL_DELTA_MIN_C: float = 3.0   # delta T minimo per attivare il free cooling
-_FREE_HEAT_DELTA_MIN_C: float = 3.0   # delta T minimo per attivare il free heating
-_FREE_COOL_DP_MARGIN_C: float = 5.0   # margine DP esterno vs DP indoor max
+_FREE_HEAT_DELTA_MIN_C: float = 4.0   # delta T minimo per attivare il free heating
+# Margine di sicurezza DP esterno vs DP indoor per il free cooling ventilativo.
+# Garantisce che l'aria esterna immessa abbia un dew point sufficientemente
+# inferiore a quello indoor da non aggiungere umidità all'appartamento.
+#
+# Valori di riferimento per clima mediterraneo (Roma, zona D):
+#
+#   Margine (°C) │ Comportamento atteso
+#   ─────────────┼──────────────────────────────────────────────────────────────
+#      5.0       │ Mai attivabile in condizioni normali. Solo per test/debug o
+#                │ climi continentali secchi con forte escursione termica.
+#      2.5       │ Molto conservativo. Attivabile solo in inverno con aria secca
+#                │ (tramontana, anticilone). Protezione massima contro umidità.
+#      2.0       │ Conservativo. Attivabile in condizioni favorevoli di tarda
+#                │ serata autunnale/invernale. Raramente in primavera/estate.
+#      1.5       │ Raccomandato per Roma. Attivabile la maggior parte delle sere
+#                │ primaverili e autunnali quando T_outdoor scende sotto ~18°C.
+#                │ Protezione adeguata: aria esterna resta 1.5°C più secca
+#                │ dell'interno prima di entrare.
+#      1.0       │ Permissivo. Attivabile frequentemente anche in estate serale.
+#                │ Accettabile solo con sensori UR calibrati e stabili.
+#      0.5       │ Molto permissivo. Rischio concreto di introdurre umidità
+#                │ in condizioni di sensori rumorosi o RH in rapida variazione.
+#   ─────────────┴──────────────────────────────────────────────────────────────
+# Default: 1.5°C — bilanciamento tra disponibilità e sicurezza igrometrica.
+# Da aumentare in fase di commissioning, ridurre progressivamente a regime.
+_FREE_COOL_DP_MARGIN_C: float = 1.0
 
 _LOGGER = logging.getLogger(__name__)
 

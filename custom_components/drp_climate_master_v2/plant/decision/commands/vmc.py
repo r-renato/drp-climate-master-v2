@@ -30,7 +30,8 @@ class VmcCommandBuilder:
         cfg = self.cfg
         v = dec.vmc
 
-        # OFF means plant idle, including VMC (unless a different policy is implemented).
+        # OFF means plant idle, including VMC.
+        # Solo hvac_mode=OFF esplicito o vacation+finestre aperte arriva qui.
         if dec.mode == PlantMode.OFF:
             v.power = False
             v.mode = "off"
@@ -43,6 +44,40 @@ class VmcCommandBuilder:
             v.enable_free_cooling = False
             v.force_free_cooling = False
             v.debug.update({"reason": "plant_mode_off"})
+            return
+
+        # IAQ_ONLY: ricambio aria minimo, nessun setpoint termico, nessun bypass.
+        if dec.mode == PlantMode.IAQ_ONLY:
+            iaq_speed = int(
+                clamp(
+                    float(cfg.vmc.speed.speed_iaq_min),
+                    float(cfg.vmc.speed.speed_min),
+                    float(cfg.vmc.speed.speed_max),
+                )
+            )
+            if demand.operative_season == "winter":
+                iaq_mode = cfg.vmc.mode_winter
+            elif demand.operative_season == "summer":
+                iaq_mode = cfg.vmc.mode_summer
+            else:
+                iaq_mode = getattr(snapshot.vmc, "processing_mode", None) or cfg.vmc.mode_winter
+
+            v.power = True
+            v.mode = iaq_mode
+            v.air_speed = iaq_speed
+            v.setpoint_t_c = None
+            v.setpoint_rh_pct = None
+            v.setpoint_dp_c = None
+            v.setpoint_ddp_c = None
+            v.force_treatment_off = False
+            v.enable_free_cooling = False
+            v.force_free_cooling = False
+            v.debug.update(
+                {
+                    "reason": "iaq_only",
+                    "iaq_speed": iaq_speed,
+                }
+            )
             return
 
         # ── PATH FREE COOLING (bypass recuperatore) ───────────────────────────

@@ -9,7 +9,7 @@ from ..domain.models.season import Seasons
 from ..domain.models.runtime_schema import VMCConfig
 from ..helpers.builders.config_entries import RuntimeConfig
 from ..helpers.formatter import fbool
-from ..helpers.ha import set_entity_bool, set_entity_number, set_entity_select
+from ..helpers.ha import log_warning, set_entity_bool, set_entity_number, set_entity_select
 from ..helpers.logger import log_info
 
 from .vmc import ControlledMechanicalVentilationDevice
@@ -72,28 +72,30 @@ class EnerenRER020I(ControlledMechanicalVentilationDevice):
             if changed:
                 log_info(_LOGGER, "Delta Dew Point set to %d", target)
 
-    async def async_set_treatment_off(self, value: bool | None = None) -> None:
-        """Coil 3 — disabilita il trattamento termico (prerequisito free cooling)."""
-        if value is not None and self._vmc is not None:
-            # Il field nella config corrisponde all'entity_id del coil "forzatura off trattamento"
-            entity_id = getattr(self._vmc, "force_treatment_off", None)
-            if entity_id:
-                changed = await set_entity_bool(hass=self._hass, entity_id=entity_id, value=value)
-                if changed:
-                    log_info(_LOGGER, "Treatment off set to %s", fbool(value, on="On", off="Off"))
+    # async def async_set_treatment_off(self, value: bool | None = None) -> None:
+    #     """Coil 3 — disabilita il trattamento termico (prerequisito free cooling)."""
+    #     if value is not None and self._vmc is not None:
+    #         # Il field nella config corrisponde all'entity_id del coil "forzatura off trattamento"
+    #         entity_id = getattr(self._vmc, "force_treatment_off", None)
+    #         if entity_id:
+    #             changed = await set_entity_bool(hass=self._hass, entity_id=entity_id, value=value)
+    #             if changed:
+    #                 log_info(_LOGGER, "Treatment off set to %s", fbool(value, on="On", off="Off"))
 
-    async def async_enable_free_cooling(self, value: bool | None = None) -> None:
+    async def async_set_free_cooling(self, value: bool | None = None) -> None:
         """Coil 9 — abilita la forzatura free-cooling."""
         if value is not None and self._vmc is not None:
-            entity_id = getattr(self._vmc, "enable_free_cooling", None)
+            entity_id = getattr(self._vmc, "force_free_cooling", None)
             if entity_id:
                 changed = await set_entity_bool(hass=self._hass, entity_id=entity_id, value=value)
                 if changed:
                     log_info(_LOGGER, "Enable free cooling set to %s", fbool(value, on="On", off="Off"))
+            else:
+                log_warning(_LOGGER, "Enable free cooling: no entity configured for force_free_cooling")
 
-    async def async_set_free_cooling(self, value: bool | None = None) -> None:
-        """Coil 10 — attiva il bypass recuperatore (free cooling attivo)."""
-        if value is not None and self._vmc is not None and self._vmc.force_free_cooling is not None:
-            changed = await set_entity_bool(hass=self._hass, entity_id=self._vmc.force_free_cooling, value=value)
-            if changed:
-                log_info(_LOGGER, "Force free cooling set to %s", fbool(value, on="On", off="Off"))
+    # async def async_set_free_cooling(self, value: bool | None = None) -> None:
+    #     """Coil 10 — attiva il bypass recuperatore (free cooling attivo)."""
+    #     if value is not None and self._vmc is not None and self._vmc.force_free_cooling is not None:
+    #         changed = await set_entity_bool(hass=self._hass, entity_id=self._vmc.force_free_cooling, value=value)
+    #         if changed:
+    #             log_info(_LOGGER, "Force free cooling set to %s", fbool(value, on="On", off="Off"))

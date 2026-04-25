@@ -621,6 +621,11 @@ class VmcSpeedPolicyConfig:
     speed_windows_open:
         Speed used when windows are detected open (often 0).
 
+    speed_iaq_min:
+        Velocita minima VMC in modalita IAQ_ONLY (appartamento occupato, nessuna
+        domanda termica). Garantisce il ricambio d'aria minimo indipendentemente
+        dal DP. Tipicamente 1 (minimo dispositivo attivo).
+
     dp_boost_step1_c, dp_boost_step2_c, dp_boost_step3_c:
         Dew-point deviation thresholds (°C) used to increase speed.
         Typical interpretation: if measured DP exceeds DP_SP by these steps,
@@ -632,6 +637,7 @@ class VmcSpeedPolicyConfig:
     speed_base: int = 2
     speed_vacation: int = 1
     speed_windows_open: int = 0
+    speed_iaq_min: int = 1
 
     dp_boost_step1_c: float = 0.5
     dp_boost_step2_c: float = 1.2
@@ -787,6 +793,12 @@ class PlantPlannerConfig:
 
     vmc: VmcConfig = field(default_factory=VmcConfig)
     vacation: VacationConfig = field(default_factory=VacationConfig)
+
+    # Soglia finestre aperte per disabilitare l'impianto [minuti].
+    # Se le finestre risultano aperte da piu di questo tempo, il modo
+    # scende a OFF anche con appartamento occupato (nessun senso climatizzare
+    # con dispersione attiva). Default 30 min - coerente con inerzia radiante.
+    windows_open_off_minutes: float = 30.0
 
     # Configurazione fisica del comfort engine (ISO 7730 PMV/PPD).
     # Il default replica il comportamento precedente hardcoded in builder.py

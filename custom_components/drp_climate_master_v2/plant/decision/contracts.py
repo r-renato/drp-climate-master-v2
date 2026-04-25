@@ -75,13 +75,24 @@ class PlantMode(str, Enum):
           Radiant circuit = optional / often OFF unless explicitly safe and required
 
     VENT_ONLY
-      - Ventilation-only operation: no thermal production (no active heating/cooling).
-      - Used for IAQ maintenance, mild shoulder operation, or winter dehumidification
-        by air exchange when active cooling is not allowed.
-      - Typical intent:
-          PDC power = OFF
-          Hydronic pumps = OFF (unless architecture requires otherwise)
-          VMC power = ON (speed governed by IAQ/DP policy)
+      - Ventilazione attiva senza produzione termica.
+      - Usato per: free cooling/heating ventilativo (bypass recuperatore),
+        fallback di sicurezza (evita cooling in inverno o heating in estate),
+        deumidifica leggera senza PDC.
+      - VMC power = ON (velocita governata da DP/boost policy)
+      - PDC power = OFF
+      - Pompe idroniche = OFF
+      - Valvole = chiuse
+
+    IAQ_ONLY
+      - Ventilazione minima per qualita dell'aria indoor (IAQ).
+      - Attivo quando: appartamento occupato, nessuna domanda termica,
+        finestre chiuse o aperte da meno di WINDOWS_OPEN_OFF_MINUTES minuti.
+      - VMC power = ON a speed_iaq_min (velocita minima fissa, non DP-driven)
+      - PDC power = OFF
+      - Pompe idroniche = OFF
+      - Valvole = chiuse
+      - Nessun setpoint termico inviato alla VMC
 
     Notes
     -----
@@ -97,6 +108,7 @@ class PlantMode(str, Enum):
     COOLING = "cooling"
     DEHUM_ASSIST = "dehum_assist"
     VENT_ONLY = "vent_only"
+    IAQ_ONLY = "iaq_only"
 
 
 @dataclass(slots=True)
