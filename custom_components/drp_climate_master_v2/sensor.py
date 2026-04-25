@@ -29,7 +29,7 @@ from homeassistant.const import (
 from .helpers.formatter import fbool, fnum, fstr
 
 from .helpers.builders.config_slave_sensors import build_slave_sensor_defs
-from .plant.decision.contracts import PlantMode
+from .plant.decision.contracts import PlantDecision, PlantMode
 
 from .controller.coordinator import ClimateCoordinator
 from .controller.supervisor import ClimateSupervisor
@@ -839,14 +839,55 @@ class PDCSensor(BaseSensor):
 
             data["mode"] = f"{pdc.mode}"
 
-            if pdc.mode is not None and pdc.mode.lower() == PlantMode.HEATING.value.lower(): 
-                data["heat-wot"] = f"{pdc.heat_wot_c} °C"
-                data["heat-Δt"] = f"{pdc.heat_dt_c} °C"
-            elif pdc.mode is not None and pdc.mode.lower() == PlantMode.COOLING.value.lower():
-                data["cool-wot"] = f"{pdc.cool_wot_c} °C"
-                data["cool-Δt"] = f"{pdc.cool_dt_c} °C"
+            data["heat-wot"]   = f"{fnum(pdc.heat_wot_c, nd=1)} °C"
+            data["heat-Δt"]   = f"{fnum(pdc.heat_dt_c, nd=1)} °C"
+            data["cool-wot"]   = f"{fnum(pdc.cool_wot_c, nd=1)} °C"
+            data["cool-Δt"]   = f"{fnum(pdc.cool_dt_c, nd=1)} °C"
 
-            data["debug"] = f"{pdc.debug}"
+            # Stagione e profilo (contesto decisione)
+            data["operative season"] = f"{signals.operative_season}"
+            data["runtime season"]   = f"{signals.runtime_season}"
+            data["ctrl aggressiveness"] = f"{fnum(signals.ctrl_aggr, nd=2)}"
+
+            # Domanda sensibile (il "perché" la PDC è accesa)
+            data["heat def max"]   = f"{fnum(signals.heat_def_max_c, nd=1)} °C"
+            data["heat def mean"]  = f"{fnum(signals.heat_def_wmean_c, nd=1)} °C"
+            data["heat coverage"]  = f"{fnum(signals.heat_cov, nd=0)} %"
+            data["heat on thr"]    = f"{fnum(signals.heat_on_thr_c, nd=1)} °C"
+            data["cool sur max"]   = f"{fnum(signals.cool_sur_max_c, nd=1)} °C"
+            data["cool coverage"]  = f"{fnum(signals.cool_cov, nd=0)} %"
+
+            # Gating / quorum (il "se" la PDC parte)
+            data["heat override"]  = signals.heat_override
+            data["heat quorum ok"] = signals.heat_quorum_ok
+            data["heat mean ok"]   = signals.heat_mean_ok
+            data["quorum cov req"] = f"{fnum(signals.quorum_cov_req, nd=0)} %"
+            data["any heat"]       = signals.any_heat
+            data["any cool"]       = signals.any_cool
+
+            # Curva climatica WOT (estratta dal debug — già calcolata)
+            if isinstance(pdc.debug, dict):
+                dbg = pdc.debug
+                data["wot curve"]        = dbg.get("curve", "—")
+                data["wot base"]         = f"{fnum(dbg.get('curve_base', 0), nd=2)} °C"
+                data["wot profile off"]  = f"{fnum(dbg.get('profile_offset_c', 0), nd=1)} °C"
+                data["wot feedback"]     = f"{fnum(dbg.get('feedback_c', 0), nd=2)} °C"
+                data["wot kick"]         = f"{fnum(dbg.get('kick_c', 0), nd=2)} °C"
+                data["wot pre rate"]     = f"{fnum(dbg.get('wot_target_pre_rate_c', 0), nd=2)} °C"
+                data["t outdoor"]        = f"{fnum(dbg.get('t_out_c', 0), nd=1)} °C"
+                data["regime hint"]      = dbg.get("regime_hint", "—")
+                data["cold snap"]        = dbg.get("cold_snap", False)
+                data["regime delta"]     = f"{fnum(dbg.get('regime_delta_c', 0), nd=2)} °C"
+                data["activity scale"]   = f"{fnum(dbg.get('activity_scale', 1.0), nd=2)}"
+                data["zones on now"]     = f"{fnum(dbg.get('zones_on_now_pct', 0), nd=1)} %"
+                data["zones duty avg"]   = f"{fnum(dbg.get('zones_duty_avg_pct', 0), nd=1)} %"
+
+            # MPC hints (attività zone — utile per leggere il carico richiesto)
+            data["zones mpc heat"]     = signals.zones_any_heat_demand
+            data["zones mpc on now"]   = f"{fnum(signals.zones_full_on_pct, nd=1)} %"
+            data["zones mpc duty avg"] = f"{fnum(signals.zones_duty_avg_pct, nd=1)} %"
+            data["zones mpc preheat"]  = signals.zones_mpc_heat_preheat_ok
+
         return data
 
     def _slave_update(self) -> bool:
@@ -913,22 +954,49 @@ class VMCSensor(BaseSensor):
         data: dict[str, Any] = super().extra_state_attributes
         data["category"] = EntityCategory.DIAGNOSTIC
 
-        last_plant_decision = self._supervisor.last_plant_decision
+        last_plant_decision: PlantDecision | None = self._supervisor.last_plant_decision
         if last_plant_decision is not None and last_plant_decision.vmc is not None:
             vmc = last_plant_decision.vmc
             signals = last_plant_decision.signals
 
-            data["hvac mode"] = f"{signals.user_hvac_mode}"
-            data["hvac preset"] = f"{signals.user_profile}"
+            # --- Contesto ---
+            data["hvac mode"]        = f"{signals.user_hvac_mode}"
+            data["hvac preset"]      = f"{signals.user_profile}"
+            data["operative season"] = f"{signals.operative_season}"
 
-            data["mode"] = f"{vmc.mode}"
+            # --- Comando VMC ---
+            data["mode"]    = f"{vmc.mode}"
             data["air speed"] = f"{fnum(vmc.air_speed, nd=0)}"
-            data["set t"] = f"{fnum(vmc.setpoint_t_c)} °C"
-            data["set h"] = f"{fnum(vmc.setpoint_rh_pct)} %"
-            data["set dp"] = f"{fnum(vmc.setpoint_dp_c)} °C"
+            data["set t"]   = f"{fnum(vmc.setpoint_t_c)} °C"
+            data["set h"]   = f"{fnum(vmc.setpoint_rh_pct)} %"
+            data["set dp"]  = f"{fnum(vmc.setpoint_dp_c)} °C"
             data["set Δdp"] = f"{fnum(vmc.setpoint_ddp_c)} °C"
 
-            data["debug"] = f"{vmc.debug}"
+            # --- Richieste calcolate dal planner ---
+            data["req heating"]   = signals.vmc_req_heating
+            data["req cooling"]   = signals.vmc_req_cooling
+            data["req dehumidif"] = signals.vmc_req_dehumidif
+            data["req water"]     = signals.vmc_req_water
+            data["req free cool"] = signals.vmc_req_free_cooling
+            data["req free heat"] = signals.vmc_req_free_heating
+
+            # --- Soglie dew-point ---
+            data["dp indoor max"]   = f"{fnum(signals.dp_max_c)} °C"
+            data["dp dehum"]        = f"{fnum(signals.dp_dehum_c)} °C"
+            data["dp outdoor"]      = f"{fnum(signals.outdoor_dp_c)} °C"
+            data["dp sp raw"]       = f"{fnum(signals.vmc_dp_sp_raw_c)} °C"
+            data["dehum on thr"]    = f"{fnum(signals.vmc_dehum_on_thr_c)} °C"
+            data["dehum off thr"]   = f"{fnum(signals.vmc_dehum_off_thr_c)} °C"
+            data["dehum feasible"]  = signals.vmc_dehum_feasible
+
+            # --- Free conditioning ---
+            data["free cool Δt"]       = f"{fnum(signals.free_cool_delta_c, nd=1)} °C"
+            data["free heat Δt"]       = f"{fnum(signals.free_heat_delta_c, nd=1)} °C"
+            data["free cool feasible"] = signals.free_cool_feasible
+            data["free heat feasible"] = signals.free_heat_feasible
+
+            data["debug"] = vmc.debug
+
         return data
 
     def _slave_update(self) -> bool:
@@ -991,24 +1059,73 @@ class RadiantSensor(BaseSensor):
     @property
     def extra_state_attributes(self):
         """Return the extra state attributes of the device."""
-
         data: dict[str, Any] = super().extra_state_attributes
         data["category"] = EntityCategory.DIAGNOSTIC
-
         last_plant_decision = self._supervisor.last_plant_decision
         if last_plant_decision is not None and last_plant_decision.supply is not None:
             supply = last_plant_decision.supply
             signals = last_plant_decision.signals
 
-            data["hvac mode"] = f"{signals.user_hvac_mode}"
-            data["hvac preset"] = f"{signals.user_profile}"
+            # --- Contesto ---
+            data["hvac mode"]        = f"{signals.user_hvac_mode}"
+            data["hvac preset"]      = f"{signals.user_profile}"
+            data["operative season"] = f"{signals.operative_season}"
 
-            data["pump direct"] = f"{fbool(supply.direct_pump_on)}"
-            data["pump adj"] = f"{fbool(supply.adj_pump_on)}"
-            data["mix valve"] = f"{fnum(supply.mix_valve_pct)} %"
-            data["radiant target"] = f"{fnum(supply.rad_supply_target_c)} °C"
+            # --- Comandi supply ---
+            data["pump direct"]      = f"{fbool(supply.direct_pump_on)}"
+            data["pump adj"]         = f"{fbool(supply.adj_pump_on)}"
+            data["mix valve"]        = f"{fnum(supply.mix_valve_pct)} %"
+            data["radiant target"]   = f"{fnum(supply.rad_supply_target_c)} °C"
 
-            data["debug"] = f"{supply.debug}"
+            # --- Temperature circuiti (dal debug) ---
+            if isinstance(supply.debug, dict):
+                dbg = supply.debug
+                data["adj supply flow"]    = f"{fnum(dbg.get('adj_supply_flow_c'))} °C"
+                data["adj return flow"]    = f"{fnum(dbg.get('adj_return_flow_c'))} °C"
+                data["direct supply flow"] = f"{fnum(dbg.get('direct_supply_flow_c'))} °C"
+                data["direct return flow"] = f"{fnum(dbg.get('direct_return_flow_c'))} °C"
+                data["boiler supply flow"] = f"{fnum(dbg.get('boiler_supply_flow_c'))} °C"
+                data["boiler return flow"] = f"{fnum(dbg.get('boiler_return_flow_c'))} °C"
+                # Calcolo valvola miscelatrice (t_target, t_primary, t_return)
+                mvc = dbg.get("mix_valve_calc", {})
+                if mvc:
+                    data["mix t target"]   = f"{fnum(mvc.get('t_target_c'))} °C"
+                    data["mix t primary"]  = f"{fnum(mvc.get('t_primary_c'))} °C"
+                    data["mix t return"]   = f"{fnum(mvc.get('t_return_c'))} °C"
+
+            # --- Domanda sensibile ---
+            data["heat def max"]     = f"{fnum(signals.heat_def_max_c, nd=1)} °C"
+            data["heat def mean"]    = f"{fnum(signals.heat_def_wmean_c, nd=1)} °C"
+            data["heat coverage"]    = f"{fnum(signals.heat_cov * 100, nd=0)} %"
+            data["heat headroom"]    = f"{fnum(signals.heat_headroom_min_c, nd=1)} °C"
+            data["cool sur max"]     = f"{fnum(signals.cool_sur_max_c, nd=1)} °C"
+            data["cool coverage"]    = f"{fnum(signals.cool_cov * 100, nd=0)} %"
+            data["cool headroom"]    = f"{fnum(signals.cool_headroom_min_c, nd=1)} °C"
+
+            # --- Dew point (safety gate radiante) ---
+            data["dp indoor max"]    = f"{fnum(signals.dp_max_c, nd=1)} °C"
+            data["dp dehum"]         = f"{fnum(signals.dp_dehum_c, nd=1)} °C"
+            data["dp outdoor"]       = f"{fnum(signals.outdoor_dp_c, nd=1)} °C"
+
+            # --- Flag finali ---
+            data["any heat"]         = signals.any_heat
+            data["any cool"]         = signals.any_cool
+            data["heat sensible"]    = signals.heat_sensible
+            data["cool sensible"]    = signals.cool_sensible
+            data["heat override"]    = signals.heat_override
+
+            # --- Zone MPC (guidano valvole e target supply) ---
+            data["zones on now"]     = f"{fnum(signals.zones_on_now_pct, nd=1)} %"
+            data["zones duty avg"]   = f"{fnum(signals.zones_duty_avg_pct, nd=1)} %"
+            data["zones full on"]    = f"{fnum(signals.zones_full_on_pct, nd=1)} %"
+            data["zones mpc heat"]   = signals.zones_any_heat_demand
+            data["zones mpc preheat"]= signals.zones_mpc_heat_preheat_ok
+
+            # --- VMC water request (determina pompa diretta) ---
+            data["vmc req water"]    = signals.vmc_req_water
+            data["vmc req heating"]  = signals.vmc_req_heating
+            data["vmc req cooling"]  = signals.vmc_req_cooling
+
         return data
 
     def _slave_update(self) -> bool:
