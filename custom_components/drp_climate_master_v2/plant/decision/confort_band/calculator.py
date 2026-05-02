@@ -28,6 +28,8 @@ from ....domain.models.runtime_schema import RuntimeConfig
 
 from .config import (
     T_OP_MIN_SLEEP_FLOOR_C,
+    T_OP_MIN_SLEEP_CAP_SHOULDER_C,
+    T_OP_MIN_SLEEP_CAP_T_OUT_C,
     V_AIR_BEST_LIVING,
     V_AIR_BEST_OTHER,
     V_AIR_HI_LIVING,
@@ -540,7 +542,7 @@ class ComfortBandCalculator:
             season_value == OperativeSeason.WINTER
             and policy is not None
             and getattr(policy, "met", None) is not None
-            and float(policy.met) <= 0.95          # proxy SLEEP: MET_SLEEP=0.90
+            and float(policy.met) <= 0.95          # proxy SLEEP: MET_SLEEP=0.70
         ):
             if t_op_min < T_OP_MIN_SLEEP_FLOOR_C:
                 t_op_min = float(T_OP_MIN_SLEEP_FLOOR_C)
@@ -700,6 +702,43 @@ class ComfortBandCalculator:
                 humidity_solve_mode=humidity_solve_mode,
             )
 
+        def _apply_sleep_shoulder_cap(res: ComfortBandResult) -> ComfortBandResult:
+            """Cap superiore di t_op_min per Sleep in shoulder season.
+
+            Il modello PMV con met=0.70 (sonno) è fuori dal dominio ISO 7730
+            (validato per met >= 0.8). In shoulder season questo produce una
+            t_op_min artificiosa (~23.7°C) che forza riscaldamento notturno
+            inutile quando la stanza è a 23°C.
+
+            Il cap è attivo SOLO se:
+            - stagione operativa = SHOULDER
+            - met_used <= 0.95  (proxy profilo Sleep)
+            - outdoor_temp >= T_OP_MIN_SLEEP_CAP_T_OUT_C  (12°C, guardrail autunno)
+            - t_op_min calcolata > T_OP_MIN_SLEEP_CAP_SHOULDER_C  (20°C)
+
+            PMV e PPD originali sono preservati (utili per commissioning).
+            Solo t_op_min e ok vengono aggiornati.
+            """
+            if not (
+                season_value == OperativeSeason.SHOULDER
+                and res.met_used is not None
+                and float(res.met_used) <= 0.95
+                and outdoor_temp is not None
+                and float(outdoor_temp) >= T_OP_MIN_SLEEP_CAP_T_OUT_C
+                and float(res.t_op_min) > T_OP_MIN_SLEEP_CAP_SHOULDER_C
+            ):
+                return res
+
+            res.t_op_min = float(T_OP_MIN_SLEEP_CAP_SHOULDER_C)
+            if res.t_op_max < res.t_op_min:
+                res.t_op_max = res.t_op_min  # degenerate: banda piatta a 20°C
+
+            # Ricalcola ok con il nuovo t_op_min
+            if res.t_op is not None:
+                res.ok = bool(res.t_op_min <= float(res.t_op) <= res.t_op_max)
+
+            return res
+
         out: Dict[str, ComfortBandResult] = {}
 
         # Determine rooms list
@@ -712,13 +751,13 @@ class ComfortBandCalculator:
         for room_id in rooms:
             res = _compute_one(str(room_id))
             if res is not None:
-                out[str(room_id)] = res
+                out[str(room_id)] = _apply_sleep_shoulder_cap(res)
 
         if include_global:
             # Convention used in your current code: "global" zone -> "global_indoor"
             if GLOBAL in indoor_zones:
                 res_g = _compute_one(GLOBAL)
                 if res_g is not None:
-                    out[GLOBAL] = res_g
+                    out[GLOBAL] = _apply_sleep_shoulder_cap(res_g)
 
         return out

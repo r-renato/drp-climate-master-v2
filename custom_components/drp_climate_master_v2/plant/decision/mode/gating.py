@@ -52,10 +52,20 @@ def compute_gating(
     demand: PlantDemandSignals,
     profile: HVACOperatingProfile,
     zones_decision: Optional[ZonesDecision],
+    t_ext: Optional[float] = None,
 ) -> GatingResult:
-    """Compute all profile-aware thresholds and gating flags.
+    """Calcola soglie e flag di gating dipendenti dal profilo operativo.
 
-    This function is intentionally *side-effect free*.
+    Funzione pura (nessun side-effect).
+
+    Args:
+        cfg: configurazione completa del planner.
+        demand: segnali di domanda aggregati (deficit/surplus, coverage, dp).
+        profile: profilo operativo HVAC attivo (ECO, SLEEP, COMFORT, ...).
+        zones_decision: piano zone MPC-lite (opzionale).
+        t_ext: temperatura esterna corrente in degC, usata per modulare
+            ``demand_override_factor`` in funzione della dispersione termica
+            attesa. Se None, si usa il fallback fisso (comportamento invernale).
     """
 
     heat_def = float(demand.heat_def_max_c)
@@ -94,12 +104,23 @@ def compute_gating(
         heat_sensible = heat_def >= heat_thr
         cool_sensible = cool_sur >= cool_thr
     else:
-        heat_override = heat_def >= heat_thr * float(cfg.gating.demand_override_factor)
+        # Fattori override modulati da T_ext con curve opposte:
+        # - heating: factor cresce con T_ext (deficit si recupera spontaneamente quando caldo)
+        # - cooling: factor decresce con T_ext (surplus peggiora rapidamente quando caldo)
+        eff_heat_override = cfg.gating.effective_heat_override_factor(t_ext)
+        eff_cool_override = cfg.gating.effective_cool_override_factor(t_ext)
+
+        heat_override = heat_def >= heat_thr * eff_heat_override
         heat_quorum_ok = heat_cov >= quorum
         heat_mean_ok = heat_def_wmean >= heat_thr * float(cfg.gating.demand_mean_factor)
         heat_sensible = bool(heat_override) or ((heat_def >= heat_thr) and (bool(heat_quorum_ok) or bool(heat_mean_ok)))
 
-        cool_override = cool_sur >= cool_thr * float(cfg.gating.demand_override_factor)
+        # Se il free cooling e' fattibile, il surplus si gestisce con ventilazione
+        # naturale senza avviare il circuito idronico. Disabilitare l'override
+        # evita avvii inutili della PDC in caso di surplus da apporti solari in
+        # giorni invernali soleggiati (T_ext bassa ma zona esposta a sud calda).
+        free_cool_ok = bool(getattr(demand, "free_cool_feasible", False))
+        cool_override = (cool_sur >= cool_thr * eff_cool_override) and not free_cool_ok
         cool_quorum_ok = cool_cov >= quorum
         cool_mean_ok = cool_sur_wmean >= cool_thr * float(cfg.gating.demand_mean_factor)
         cool_sensible = bool(cool_override) or ((cool_sur >= cool_thr) and (bool(cool_quorum_ok) or bool(cool_mean_ok)))

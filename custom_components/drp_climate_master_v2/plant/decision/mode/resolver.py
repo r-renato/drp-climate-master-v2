@@ -90,7 +90,13 @@ class ModeResolver:
         # --------------------
         # 1) Profile-aware gating (thresholds + booleans)
         # --------------------
-        g = compute_gating(cfg=cfg, demand=demand, profile=profile, zones_decision=zones_decision)
+        g = compute_gating(
+            cfg=cfg,
+            demand=demand,
+            profile=profile,
+            zones_decision=zones_decision,
+            t_ext=as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None)),
+        )
 
         demand.ctrl_aggr = g.ctrl_aggr
         demand.heat_on_thr_c = g.heat_thr_c

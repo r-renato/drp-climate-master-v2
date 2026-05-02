@@ -274,7 +274,9 @@ class PlantDecisionPlanner:
 
         try:
             if snapshot.indoor_zones and snapshot.season is not None:
-                all_indoor_zones = snapshot.indoor_zones
+                # Copia difensiva: evita di mutare snapshot.indoor_zones
+                # aggiungendo global_indoor_zone (che non ha area nel config).
+                all_indoor_zones = dict(snapshot.indoor_zones)
                 if snapshot.global_indoor_zone is not None:
                     all_indoor_zones["global"] = snapshot.global_indoor_zone
                 vmc_speed = as_int(getattr(getattr(snapshot, "vmc", None), "spare_setpoint", None), default=0, min_value=0, max_value=5) or 0
@@ -295,7 +297,8 @@ class PlantDecisionPlanner:
                 bands = build_confort_zones(
                     now=snapshot.timestamp,
                     season_state=snapshot.season,
-                    indoor_zones=snapshot.indoor_zones,
+                    # indoor_zones=snapshot.indoor_zones,
+                    indoor_zones=all_indoor_zones,
                     vmc_speed=int(vmc_speed),
                     outdoor_temp=t_out,
                     preset_mode=preset,

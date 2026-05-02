@@ -209,6 +209,14 @@ class DemandSignalsBuilder:
         dp_values: List[float] = []
 
         for zone_key, z in (getattr(snapshot, "indoor_zones", None) or {}).items():
+            # Zone con weight=0.0 sono zone di riferimento/aggregate:
+            # visibili al planner per dew-point guard e log, ma escluse da
+            # deficit/coverage/max per contratto esplicito in ZoneSnapshot.weight.
+            # Senza questo guard il denominatore del quorum viene gonfiato
+            # artificialmente, abbassando heat_cov e cool_cov.
+            z_weight = float(self._zone_weight_fn(z) or 0.0)
+            is_reference_zone = (z_weight == 0.0)
+
             # Temperatura di riferimento: T_op se presente, altrimenti T aria.
             t_meas = as_float(getattr(getattr(z, "t_op", None), "value", None))
             if t_meas is None:
@@ -230,15 +238,15 @@ class DemandSignalsBuilder:
             if t_meas is not None and t_min is not None:
                 d = max(0.0, float(t_min) - float(t_meas))
                 heat_def_by_zone[zone_key] = d
-                heat_def_max = max(heat_def_max, d)
 
-                w = float(self._zone_weight_fn(z) or 0.0)
+                if not is_reference_zone:
+                    heat_def_max = max(heat_def_max, d)
+                    heat_den_n += 1
+                    heat_sum_ndef += d
+                    if d > 0.0:
+                        heat_out_n += 1
 
-                heat_den_n += 1
-                heat_sum_ndef += d
-                if d > 0.0:
-                    heat_out_n += 1
-
+                w = z_weight
                 if w > 0.0:
                     heat_den_w += w
                     heat_sum_wdef += w * d
@@ -249,15 +257,15 @@ class DemandSignalsBuilder:
             if t_meas is not None and t_max is not None:
                 d = max(0.0, float(t_meas) - float(t_max))
                 cool_sur_by_zone[zone_key] = d
-                cool_sur_max = max(cool_sur_max, d)
 
-                w = float(self._zone_weight_fn(z) or 0.0)
+                if not is_reference_zone:
+                    cool_sur_max = max(cool_sur_max, d)
+                    cool_den_n += 1
+                    cool_sum_nsur += d
+                    if d > 0.0:
+                        cool_out_n += 1
 
-                cool_den_n += 1
-                cool_sum_nsur += d
-                if d > 0.0:
-                    cool_out_n += 1
-
+                w = z_weight
                 if w > 0.0:
                     cool_den_w += w
                     cool_sum_wsur += w * d

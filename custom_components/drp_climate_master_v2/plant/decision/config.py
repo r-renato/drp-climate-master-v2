@@ -106,7 +106,88 @@ class DemandGatingConfig:
     )
 
     demand_override_factor: float = 2.0
+    """Fattore override worst-zone (fallback fisso).
+    Usato da ``effective_override_factor()`` quando T_ext non è disponibile.
+    Valore conservativo invernale: intervento tempestivo anche senza quorum."""
+
+    demand_override_factor_cold: float = 2.0
+    """Fattore override a bassa T_ext (<= t_override_cold_c).
+    In inverno il deficit peggiora rapidamente: soglia bassa per intervento
+    tempestivo anche senza quorum."""
+
+    demand_override_factor_mild: float = 4.0
+    """Fattore override ad alta T_ext (>= t_override_mild_c).
+    In mezza stagione/estate le variazioni termiche sono spesso spontanee e
+    transitorie: soglia alta per evitare avvii inutili della PDC."""
+
+    t_override_cold_c: float = 5.0
+    """T_ext (degC) sotto la quale si applica demand_override_factor_cold senza interpolazione."""
+
+    t_override_mild_c: float = 18.0
+    """T_ext (degC) sopra la quale si applica demand_override_factor_mild senza interpolazione."""
+
     demand_mean_factor: float = 0.60
+
+    def _alpha(self, t_ext: float) -> float:
+        """Interpolazione lineare normalizzata [0..1] tra t_override_cold_c e t_override_mild_c."""
+        span = self.t_override_mild_c - self.t_override_cold_c
+        if span <= 0.0:
+            return 0.0
+        return max(0.0, min(1.0, (float(t_ext) - self.t_override_cold_c) / span))
+
+    def effective_heat_override_factor(self, t_ext: float | None) -> float:
+        """Fattore override per riscaldamento, interpolato in funzione di T_ext.
+
+        Fisica riscaldamento: dispersione proporzionale a (T_int - T_ext).
+        A T_ext bassa il deficit di riscaldamento peggiora rapidamente:
+        il fattore e' basso (soglia vicina a heat_thr, intervento tempestivo).
+        A T_ext alta il deficit si recupera spesso spontaneamente:
+        il fattore e' alto (soglia lontana, evita avvii inutili).
+
+        Comportamento ai limiti:
+        - T_ext <= t_override_cold_c -> demand_override_factor_cold   (inverno)
+        - T_ext >= t_override_mild_c -> demand_override_factor_mild   (estate)
+        - T_ext = None               -> demand_override_factor        (fallback invernale)
+
+        Args:
+            t_ext: temperatura esterna in degC, o None se non disponibile.
+
+        Returns:
+            Fattore adimensionale >= 1.0.
+        """
+        if t_ext is None:
+            return float(self.demand_override_factor)
+        alpha = self._alpha(t_ext)
+        return float(self.demand_override_factor_cold) + alpha * (
+            float(self.demand_override_factor_mild) - float(self.demand_override_factor_cold)
+        )
+
+    def effective_cool_override_factor(self, t_ext: float | None) -> float:
+        """Fattore override per raffrescamento, interpolato in funzione di T_ext.
+
+        Fisica raffrescamento: a T_ext alta il calore entra dall'esterno
+        continuamente, il surplus di cooling peggiora rapidamente e non
+        si recupera da solo, quindi il fattore e' basso (intervento tempestivo).
+        A T_ext bassa il raffreddamento estivo e' raro e i surplus sono
+        transitori, quindi il fattore e' alto (soglia lontana).
+
+        Curva inversa rispetto a effective_heat_override_factor:
+        - T_ext <= t_override_cold_c -> demand_override_factor_mild   (inverno: cooling raro)
+        - T_ext >= t_override_mild_c -> demand_override_factor_cold   (estate: cooling urgente)
+        - T_ext = None               -> demand_override_factor        (fallback invernale)
+
+        Args:
+            t_ext: temperatura esterna in degC, o None se non disponibile.
+
+        Returns:
+            Fattore adimensionale >= 1.0.
+        """
+        if t_ext is None:
+            return float(self.demand_override_factor)
+        alpha = self._alpha(t_ext)
+        return float(self.demand_override_factor_mild) - alpha * (
+            float(self.demand_override_factor_mild) - float(self.demand_override_factor_cold)
+        )
 
     def quorum_cov(self, profile: HVACOperatingProfile) -> float:
         """Return the coverage quorum (0..1) for the given profile.

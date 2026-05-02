@@ -35,6 +35,7 @@ from .config import (
     CLO_BASE_WINTER,
     # Correzioni CLO per profilo/stagione
     CLO_SLEEP_WINTER_DELTA,
+    CLO_SLEEP_SHOULDER_DELTA,
     CLO_AWAY_VACATION_WINTER_DELTA,
     CLO_AWAY_VACATION_WINTER_FLOOR,
     CLO_CAP_SLEEP,
@@ -307,10 +308,18 @@ class ComfortPolicyLayer:
                 reasons.append(f"clo:winter:default={clo:.2f}")
 
         # Correzioni per profilo/stagione (vedi config.py sezione C)
-        if ctx.mode == HVACOperatingProfile.SLEEP and ctx.season.name.lower() == "winter":
-            # Coperte invernali: delta +CLO_SLEEP_WINTER_DELTA (pigiama + piumino)
-            clo += CLO_SLEEP_WINTER_DELTA
-            reasons.append(f"clo:sleep:+{CLO_SLEEP_WINTER_DELTA:.2f} -> {clo:.2f}")
+        if ctx.mode == HVACOperatingProfile.SLEEP:
+            season_name = ctx.season.name.lower()
+            if season_name == "winter":
+                # Coperte invernali: pigiama + piumino pesante
+                clo += CLO_SLEEP_WINTER_DELTA
+                reasons.append(f"clo:sleep:winter:+{CLO_SLEEP_WINTER_DELTA:.2f} -> {clo:.2f}")
+            elif season_name == "shoulder":
+                # Coperta primaverile/autunnale: piumino leggero o coperta singola.
+                # In mezza stagione a Roma gli occupanti usano comunque coperture;
+                # senza questo delta il modello produce PMV~-0.4 a 23 gradi (deficit spurio).
+                clo += CLO_SLEEP_SHOULDER_DELTA
+                reasons.append(f"clo:sleep:shoulder:+{CLO_SLEEP_SHOULDER_DELTA:.2f} -> {clo:.2f}")
 
         if ctx.mode in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION) and ctx.season.name.lower() == "winter":
             # Assenza: abbigliamento leggero; floor a CLO_AWAY_VACATION_WINTER_FLOOR

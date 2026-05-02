@@ -165,13 +165,45 @@ temperatura operante, rendendo il PMV instabile.
 #   più uniforme; si accetta un bound freddo leggermente più basso.
 
 T_OP_MIN_SLEEP_FLOOR_C: float = 17.0
-"""Floor assoluto di T_op minima in modalità SLEEP (°C).
+"""Floor assoluto di T_op minima in modalità SLEEP in stagione invernale (°C).
 
 Il modello PMV con CLO=2.0 (pigiama + piumino) calcola comfort già a 15–16°C,
 ma lasciare la stanza sotto 17°C in inverno è inaccettabile per sicurezza
 e comfort reale (persone vulnerabili, bambini, variabilità individuale).
 Questo floor è indipendente dal PMV: si applica sempre in SLEEP invernale
 come hard cap sulla banda calcolata.
+"""
+
+T_OP_MIN_SLEEP_CAP_SHOULDER_C: float = 20.0
+"""Cap superiore di t_op_min per profilo SLEEP in stagione di mezza stagione (°C).
+
+Radice del problema: ISO 7730 è validato per met >= 0.8. Usando met=0.70 (sonno)
+fuori dal dominio della norma, la bisection PMV produce t_op_min artificiosa
+(~23.7°C in shoulder) che porta il sistema a pianificare riscaldamento notturno
+inutile quando la stanza è a 23°C in aprile/ottobre.
+
+Fisicamente: 20°C è il limite superiore dell'intervallo ottimale per il sonno
+(Muzet et al. 1984; ASHRAE 55). Una t_op_min > 20°C in shoulder season significa
+che il sistema riscalda per mantenere temperature notturne che la letteratura
+scientifica considera già calde per dormire.
+
+Implementazione: cap applicato come post-processing in compute_many() sul
+ComfortBandResult restituito da compute_single(), preservando PMV/PPD originali
+(utili per commissioning) e ricalcolando solo il campo ok.
+Inattivo se t_out < T_OP_MIN_SLEEP_CAP_T_OUT_C (protezione autunno freddo).
+Inattivo in winter (coperto dal floor T_OP_MIN_SLEEP_FLOOR_C) e summer.
+"""
+
+T_OP_MIN_SLEEP_CAP_T_OUT_C: float = 12.0
+"""Temperatura esterna minima per attivare il cap shoulder SLEEP (°C).
+
+Sotto 12°C la dispersione termica è abbastanza alta da giustificare un target
+notturno più conservativo. Questo guardrail esclude automaticamente le notti
+di autunno inoltrato/novembre freddo in cui la stagione operativa potrebbe
+ancora essere classificata come shoulder ma il comfort notturno richiede
+un target più alto di 20°C.
+Sopra 12°C (aprile mite, ottobre mite): il cap è attivo.
+Sotto 12°C (novembre freddo): cap inattivo, sistema usa t_op_min da PMV.
 """
 
 DRAFT_ALPHA_LIVING: float = 0.55
@@ -308,6 +340,19 @@ con le indicazioni di EN 16798-1 per ambienti di riposo notturno.
 Limite superiore garantito da CLO_CAP_SLEEP.
 """
 
+CLO_SLEEP_SHOULDER_DELTA: float = 0.70
+"""Delta CLO aggiunto in modalità SLEEP durante la stagione di mezza stagione (shoulder).
+
+Razionale: in aprile/ottobre a Roma gli occupanti usano comunque una coperta
+o un piumino leggero. Senza questo delta, il modello tratta la persona dormiente
+come seduta in abbigliamento da casa (clo~0.82), producendo PMV~-0.4 a 23 gradi
+e un deficit spurio che porta il planner a pianificare riscaldamento notturno.
+
+Composizione: pigiama leggero (0.20) + coperta primaverile (0.60-0.75)
+-> clo shoulder totale ~ 0.82 + 0.70 = 1.52, PMV a 23 gradi ~ +0.1.
+Limite superiore garantito da CLO_CAP_SLEEP.
+"""
+
 CLO_AWAY_VACATION_WINTER_DELTA: float = -0.10
 """Delta CLO sottratto in modalità AWAY/VACATION durante l'inverno.
 
@@ -375,20 +420,22 @@ ma non raggiungono il livello pieno invernale in una giornata transitoria.
 # Gli override per profilo riflettono il livello di attività atteso:
 # - Base (1.10 met): normale attività residenziale — seduto, in piedi, breve
 #   deambulazione (media ISO 7730).
-# - SLEEP (0.90 met): riposo notturno. ISO 7730 Tab. A.1 indica 0.8 met per
-#   sonno; 0.90 è un valore conservativo per pre-sleep (lettura a letto, ecc.).
+# - SLEEP (0.70 met): persona dormiente. ISO 8996 Tab. A.1 indica 0.70 met
+#   per sonno in posizione orizzontale.
 # - AWAY/VACATION (1.00 met): casa vuota ma si usa met=1.00 per mantenere un
 #   riferimento neutro; la vera riduzione dell'energia avviene tramite PMV
 #   center/band spostati (sezione E) e CLO ridotto (sezione C).
 
-MET_SLEEP: float = 0.90
-"""MET in modalità SLEEP — riposo notturno / pre-sonno.
+MET_SLEEP: float = 0.70
+"""MET in modalità SLEEP — persona dormiente.
 
-ISO 7730 Tab. A.1: sonno = 0.8 met; sdraiato tranquillo = 0.8 met.
-Si usa 0.90 come valore conservativo che copre sia il sonno profondo sia
-le fasi di addormentamento (lettura, TV a letto). Riduce la temperatura
-minima di comfort rispetto al valore base (minore produzione di calore
-endogeno → bisogno di temperatura esterna più alta per lo stesso PMV).
+ISO 8996 Tab. A.1: sonno = 0.70 met (posizione orizzontale, metabolismo basale).
+Valore precedente (0.90, "attività sedentaria") era termofisicamente errato:
+produceva un deficit sistematico di ~3°C su tutte le zone notturne, portando
+il planner a pianificare riscaldamento non necessario durante la notte.
+
+Correzione: 0.70 met -> con coperte (clo shoulder/winter), PMV a 23°C ~= +0.1,
+nessun deficit spurio.
 """
 
 MET_AWAY_VACATION: float = 1.00
