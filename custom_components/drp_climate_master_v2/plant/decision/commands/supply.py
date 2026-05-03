@@ -54,7 +54,7 @@ class SupplyCommandBuilder:
         snapshot: PlantSnapshot,
         demand: PlantDemandSignals,
         zones_decision: Optional[ZonesDecision],
-        dew_guard: Optional[DewGuardResult] = None,
+        dew_guard: DewGuardResult,
     ) -> None:
         cfg = self.cfg
         s = dec.supply
@@ -101,17 +101,7 @@ class SupplyCommandBuilder:
 
         elif dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST):
             # Dew-point safety is evaluated upstream by DewGuardPolicy (single source of truth).
-            if dew_guard is None:
-                dec.warnings.append("dew_guard_missing_result_radiant_disabled")
-                s.adj_pump_on = False
-                s.rad_supply_target_c = None
-                s.debug.update(
-                    {
-                        "dew_guard_action": "disable_radiant",
-                        "dew_guard_reason": "missing_result",
-                    }
-                )
-            elif not dew_guard.radiant_allowed:
+            if not dew_guard.radiant_allowed:
                 # FAIL-SAFE: if radiant is not allowed, force the mixing circuit off.
                 if dew_guard.reason == "missing_dp_max":
                     dec.warnings.append("dew_guard_missing_dp_max_radiant_disabled")

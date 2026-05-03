@@ -37,7 +37,7 @@ class ZoneValvesCommandBuilder:
         demand: PlantDemandSignals,
         zones_decision: Optional[ZonesDecision],
         *,
-        dew_guard: Optional[DewGuardResult] = None,
+        dew_guard: DewGuardResult,
     ) -> None:
         v = dec.valves
         v.by_zone.clear()
@@ -47,7 +47,7 @@ class ZoneValvesCommandBuilder:
             v.debug.update({"source": "mode_off_or_vent_only"})
             return
 
-        if dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST) and dew_guard is not None and not dew_guard.radiant_allowed:
+        if dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST) and not dew_guard.radiant_allowed:
             v.debug.update(
                 {
                     "source": "dew_guard_disable_radiant",
@@ -85,13 +85,13 @@ class ZoneValvesCommandBuilder:
             return
 
         if dec.mode == PlantMode.HEATING:
-            thr = as_float(getattr(demand, "heat_on_thr_c", None))
+            thr = as_float(getattr(dec.gating, "heat_on_thr_c", None))
             if thr is None:
                 thr = float(self.cfg.comfort.heat_on_deficit_c)
             by_zone = getattr(demand, "heat_def_by_zone_c", None) or {}
             metric_key = "heat_def_by_zone_c"
         elif dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST):
-            thr = as_float(getattr(demand, "cool_on_thr_c", None))
+            thr = as_float(getattr(dec.gating, "cool_on_thr_c", None))
             if thr is None:
                 thr = float(self.cfg.comfort.cool_on_surplus_c)
             by_zone = getattr(demand, "cool_sur_by_zone_c", None) or {}

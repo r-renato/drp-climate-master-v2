@@ -65,7 +65,11 @@ class PdcCommandBuilder:
             # If MPC-lite KPIs are available, scale feedback when only a few zones are expected to be active.
             # Thermo rationale: with many zone valves closed the circuit shortens and the delivered power
             # saturates quickly -> avoid chasing the mean deficit too aggressively to reduce cycling.
-            activity_pct = demand.zones_on_now_pct if demand.zones_on_now_pct is not None else demand.zones_duty_avg_pct
+            activity_pct = (
+                dec.gating.zones_on_now_pct
+                if dec.gating.zones_on_now_pct is not None
+                else dec.gating.zones_duty_avg_pct
+            )
             activity_scale = 1.0
             if activity_pct is not None:
                 # 0..50% -> 0.5..1.0, >=50% -> 1.0
@@ -129,9 +133,9 @@ class PdcCommandBuilder:
                     "heat_def_max_c": float(heat_def_max),
                     "feedback_c": float(fb),
                     "feedback_unscaled_c": float(fb_unscaled),
-                    "zones_on_now_pct": demand.zones_on_now_pct,
-                    "zones_duty_avg_pct": demand.zones_duty_avg_pct,
-                    "zones_first_on_step": demand.zones_first_on_step,
+                    "zones_on_now_pct": dec.gating.zones_on_now_pct,
+                    "zones_duty_avg_pct": dec.gating.zones_duty_avg_pct,
+                    "zones_first_on_step": dec.gating.zones_first_on_step,
                     "activity_scale": float(activity_scale),
                     "kick_c": float(kick),
                     "regime_hint": regime_hint,

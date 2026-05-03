@@ -154,18 +154,8 @@ class PlantDemandSignals:
     - vmc_dehum_feasible : whether dehumidification can work (coil vs ventilation-only constraints)
     - vmc_req_* : what VMC is asking from hydronics/plant (heat/cool/dehum/water)
 
-    Cluster D - User intent & decision diagnostics (filled by `ModeResolver.decide()`)
-    -------------------------------------------------------------------------
-    - user_hvac_mode / user_profile / user_forced_off : HA intent mapping
-    - ctrl_aggr, *_on_thr_c, quorum_cov_req : thresholds after profile scaling
-    - *_override, *_quorum_ok, *_mean_ok : internal gating booleans (mostly for ECO/SLEEP/AWAY/VACATION)
-    - any_heat/any_cool/any_dehum, heat_sensible/cool_sensible : final flags consumed by regime logic
-    - runtime_season / operative_season : season mapping used for gating/conflict resolution
-
-    Cluster E - MPC/ZonesPlan hints (optional)
-    -----------------------------------------
-    - zones_any_heat_demand, zones_full_on_pct, zones_mpc_heat_preheat_ok :
-      allow integrating a zone-level MPC plan without making it silently override comfort logic.
+    Decision diagnostics produced by `ModeResolver.decide()` live in
+    `GatingDiagnostics`, attached to `PlantDecision.gating`.
     """
 
     # --- Worst-case (max across zones) ---
@@ -461,230 +451,20 @@ class PlantDemandSignals:
         },
     )
 
-    zones_any_heat_demand: bool = field(
-        default=False,
+    vmc_t_ref_c: float = field(
+        default=22.0,
         metadata={
-            "doc": "True if the zone planner (MPC/ZonesPlan) scheduled at least one valve ON for heating.",
-            "unit": "bool",
-            "source": "ZonesDecision",
-        },
-    )
-    zones_full_on_pct: Optional[float] = field(
-        default=None,
-        metadata={
-            "doc": "Percentage of zones in FULL-ON state (duty=1.0) in MPC plan, if available.",
-            "unit": "%",
-            "range": "[0..100]",
-            "source": "ZonesDecision.meta",
-        },
-    )
-    zones_duty_avg_pct: Optional[float] = field(
-        default=None,
-        metadata={
-            "doc": "Mean duty across all zones and horizon steps (0..100), if MPC plan is available.",
-            "unit": "%",
-            "range": "[0..100]",
-            "source": "ZonesDecision.meta",
-        },
-    )
-    zones_on_now_pct: Optional[float] = field(
-        default=None,
-        metadata={
-            "doc": "Percentage of zones ON at the first MPC step (now) (0..100), if available.",
-            "unit": "%",
-            "range": "[0..100]",
-            "source": "ZonesDecision.meta",
-        },
-    )
-    zones_first_on_step: Optional[int] = field(
-        default=None,
-        metadata={
-            "doc": "Earliest MPC horizon step where any zone is scheduled ON (0..h-1), if available.",
-            "unit": "step",
-            "range": "[0..h-1]",
-            "source": "ZonesDecision.meta",
-        },
-    )
-    zones_mpc_heat_preheat_ok: Optional[bool] = field(
-        default=None,
-        metadata={
-            "doc": "True if MPC heating is accepted as 'preheat' (only when close to the lower bound).",
-            "unit": "bool",
-            "values": ["True", "False", "None(not evaluated)"],
-            "source": "ModeResolver.decide",
-        },
-    )
-
-    # --- Other ---
-    user_hvac_mode: str = field(
-        default="off",
-        metadata={
-            "doc": "User HVAC mode as seen by the HA Climate entity (normalized string, e.g. 'off'/'auto').",
-            "unit": "-",
-            "source": "ModeResolver.decide",
-        },
-    )
-    user_profile: str = field(
-        default="off",
-        metadata={
-            "doc": "User preset/profile (HVACOperatingProfile.value), stored as a string for logs.",
-            "unit": "-",
-            "source": "ModeResolver.decide",
-        },
-    )
-    user_forced_off: bool = field(
-        default=False,
-        metadata={
-            "doc": "True when the user explicitly forces HVAC OFF (absolute override).",
-            "unit": "bool",
-            "source": "ModeResolver.decide",
-        },
-    )
-    ctrl_aggr: float = field(
-        default=0.0,
-        metadata={
-            "doc": "Control aggressiveness factor derived from profile (BOOST > 1, AWAY/VACATION < 1).",
-            "unit": "1",
-            "range": "(0..+inf)",
-            "source": "ModeResolver.decide",
-        },
-    )
-    heat_on_thr_c: float = field(
-        default=0.0,
-        metadata={
-            "doc": "Effective heating ON threshold after profile scaling.",
+            "doc": "Temperatura indoor di riferimento calcolata da VmcPolicy (per setpoint VMC).",
             "unit": "°C",
-            "range": "[0..+inf)",
-            "source": "ModeResolver.decide",
+            "source": "VmcPolicy",
         },
     )
-    cool_on_thr_c: float = field(
-        default=0.0,
+    vmc_rh_target_pct: float = field(
+        default=50.0,
         metadata={
-            "doc": "Effective cooling ON threshold after profile scaling.",
-            "unit": "°C",
-            "range": "[0..+inf)",
-            "source": "ModeResolver.decide",
-        },
-    )
-    quorum_cov_req: float = field(
-        default=0.0,
-        metadata={
-            "doc": "Required coverage (0..1) for energy-saving profiles (ECO/SLEEP/AWAY/VACATION).",
-            "unit": "1",
-            "range": "[0..1]",
-            "source": "ModeResolver.decide",
-        },
-    )
-    heat_override: Optional[bool] = field(
-        default=None,
-        metadata={
-            "doc": "Heating override triggered by large worst-case deficit (bypasses quorum).",
-            "unit": "bool",
-            "values": ["True", "False", "None(not applicable)"],
-            "source": "ModeResolver.decide",
-        },
-    )
-    heat_quorum_ok: Optional[bool] = field(
-        default=None,
-        metadata={
-            "doc": "Heating quorum check: heat_cov >= quorum_cov_req (energy-saving profiles).",
-            "unit": "bool",
-            "values": ["True", "False", "None(not applicable)"],
-            "source": "ModeResolver.decide",
-        },
-    )
-    heat_mean_ok: Optional[bool] = field(
-        default=None,
-        metadata={
-            "doc": "Heating mean check: heat_def_wmean >= heat_on_thr * mean_factor (energy-saving profiles).",
-            "unit": "bool",
-            "values": ["True", "False", "None(not applicable)"],
-            "source": "ModeResolver.decide",
-        },
-    )
-    cool_override: Optional[bool] = field(
-        default=None,
-        metadata={
-            "doc": "Cooling override triggered by large worst-case surplus (bypasses quorum).",
-            "unit": "bool",
-            "values": ["True", "False", "None(not applicable)"],
-            "source": "ModeResolver.decide",
-        },
-    )
-    cool_quorum_ok: Optional[bool] = field(
-        default=None,
-        metadata={
-            "doc": "Cooling quorum check: cool_cov >= quorum_cov_req (energy-saving profiles).",
-            "unit": "bool",
-            "values": ["True", "False", "None(not applicable)"],
-            "source": "ModeResolver.decide",
-        },
-    )
-    cool_mean_ok: Optional[bool] = field(
-        default=None,
-        metadata={
-            "doc": "Cooling mean check: cool_sur_wmean >= cool_on_thr * mean_factor (energy-saving profiles).",
-            "unit": "bool",
-            "values": ["True", "False", "None(not applicable)"],
-            "source": "ModeResolver.decide",
-        },
-    )
-    any_heat: bool = field(
-        default=False,
-        metadata={
-            "doc": "Final aggregated flag: any heating reason exists (sensible, VMC, or MPC-preheat).",
-            "unit": "bool",
-            "source": "ModeResolver.decide",
-        },
-    )
-    any_cool: bool = field(
-        default=False,
-        metadata={
-            "doc": "Final aggregated flag: any cooling reason exists (sensible or VMC).",
-            "unit": "bool",
-            "source": "ModeResolver.decide",
-        },
-    )
-    any_dehum: bool = field(
-        default=False,
-        metadata={
-            "doc": "Final aggregated flag: any dehumidification reason exists (latent control).",
-            "unit": "bool",
-            "source": "ModeResolver.decide",
-        },
-    )
-    heat_sensible: bool = field(
-        default=False,
-        metadata={
-            "doc": "True if sensible heating demand is considered significant under current profile.",
-            "unit": "bool",
-            "source": "ModeResolver.decide",
-        },
-    )
-    cool_sensible: bool = field(
-        default=False,
-        metadata={
-            "doc": "True if sensible cooling demand is considered significant under current profile.",
-            "unit": "bool",
-            "source": "ModeResolver.decide",
-        },
-    )
-    runtime_season: str = field(
-        default="--",
-        metadata={
-            "doc": "Runtime season raw value coming from snapshot (e.g. 'winter', 'summer', ...).",
-            "unit": "-",
-            "source": "ModeResolver.decide",
-        },
-    )
-    operative_season: str = field(
-        default="--",
-        metadata={
-            "doc": "Operative bucket derived from runtime season (winter/summer/shoulder) used for gating.",
-            "unit": "-",
-            "values": ["winter", "summer", "shoulder", "--"],
-            "source": "ModeResolver.decide",
+            "doc": "Target UR% calcolato da VmcPolicy per profilo e stagione correnti.",
+            "unit": "%",
+            "source": "VmcPolicy",
         },
     )
 
@@ -758,22 +538,6 @@ class PlantDemandSignals:
         lines: list[str] = ["PlantDemandSignals", "------------------------------------------------------------------", "Signals"]
 
         # -------------------------
-        # Cluster: User intent
-        # -------------------------
-        lines += ["User intent"]
-        emit(lines, "User HVAC mode", "user_hvac_mode", fstr(self.user_hvac_mode))
-        emit(lines, "User profile", "user_profile", fstr(self.user_profile))
-        emit(lines, "User forced off", "user_forced_off", fbool(self.user_forced_off, "True", "False"))
-        emit(lines, "Ctrl aggress", "ctrl_aggr", fnum(self.ctrl_aggr, 2))
-
-        # -------------------------
-        # Cluster: Season
-        # -------------------------
-        lines += ["Season"]
-        emit(lines, "Runtime season", "runtime_season", fstr(self.runtime_season))
-        emit(lines, "Operative season", "operative_season", fstr(self.operative_season))
-
-        # -------------------------
         # Cluster: Sensible demand (worst-case + headroom)
         # -------------------------
         lines += ["Demand (sensible)"]
@@ -793,7 +557,6 @@ class PlantDemandSignals:
             "heat_cov",
             f"{fpct01(self.heat_cov, 0)} ({fmb(self.heat_metric_basis)})",
         )
-        emit(lines, "Heat on thr", "heat_on_thr_c", f"{fnum(self.heat_on_thr_c)} °C")
         emit(lines, "Cool sur mean", "cool_sur_wmean_c", f"{fnum(self.cool_sur_wmean_c)} °C")
         emit(
             lines,
@@ -801,19 +564,6 @@ class PlantDemandSignals:
             "cool_cov",
             f"{fpct01(self.cool_cov, 0)} ({fmb(self.cool_metric_basis)})",
         )
-        emit(lines, "Cool on thr", "cool_on_thr_c", f"{fnum(self.cool_on_thr_c)} °C")
-
-        # -------------------------
-        # Cluster: Gating / quorum (ECO/SLEEP/AWAY/VACATION)
-        # -------------------------
-        lines += ["Gating"]
-        emit(lines, "Quorum cov req", "quorum_cov_req", fpct01(self.quorum_cov_req, 0))
-        emit(lines, "Heat override", "heat_override", fbool(self.heat_override, "True", "False"))
-        emit(lines, "Heat quorum ok", "heat_quorum_ok", fbool(self.heat_quorum_ok, "True", "False"))
-        emit(lines, "Heat mean ok", "heat_mean_ok", fbool(self.heat_mean_ok, "True", "False"))
-        emit(lines, "Cool override", "cool_override", fbool(self.cool_override, "True", "False"))
-        emit(lines, "Cool quorum ok", "cool_quorum_ok", fbool(self.cool_quorum_ok, "True", "False"))
-        emit(lines, "Cool mean ok", "cool_mean_ok", fbool(self.cool_mean_ok, "True", "False"))
 
         # -------------------------
         # Cluster: Dew point / latent
@@ -856,27 +606,6 @@ class PlantDemandSignals:
         emit(lines, "Free heat feasible", "free_heat_feasible", fbool(self.free_heat_feasible, "True", "False"))
 
         # -------------------------
-        # Cluster: MPC / ZonesPlan hints
-        # -------------------------
-        lines += ["MPC hints"]
-        emit(lines, "Zones MPC heat", "zones_any_heat_demand", fbool(self.zones_any_heat_demand, "True", "False"))
-        emit(lines, "Zones MPC full-on", "zones_full_on_pct", f"{fnum(self.zones_full_on_pct, 1)} %")
-        emit(lines, "Zones MPC duty avg", "zones_duty_avg_pct", f"{fnum(self.zones_duty_avg_pct, 1)} %")
-        emit(lines, "Zones MPC on-now", "zones_on_now_pct", f"{fnum(self.zones_on_now_pct, 1)} %")
-        emit(lines, "Zones MPC first ON", "zones_first_on_step", fint(self.zones_first_on_step))
-        emit(lines, "Zones MPC preheat", "zones_mpc_heat_preheat_ok", fbool(self.zones_mpc_heat_preheat_ok, "True", "False"))
-
-        # -------------------------
-        # Cluster: Final flags
-        # -------------------------
-        lines += ["Flags"]
-        emit(lines, "Any heat", "any_heat", fbool(self.any_heat, "True", "False"))
-        emit(lines, "Any cool", "any_cool", fbool(self.any_cool, "True", "False"))
-        emit(lines, "Any dehum", "any_dehum", fbool(self.any_dehum, "True", "False"))
-        emit(lines, "Heat sensible", "heat_sensible", fbool(self.heat_sensible, "True", "False"))
-        emit(lines, "Cool sensible", "cool_sensible", fbool(self.cool_sensible, "True", "False"))
-
-        # -------------------------
         # Cluster: Per-zone maps (compatte)
         # -------------------------
         lines += ["By zone"]
@@ -884,6 +613,62 @@ class PlantDemandSignals:
         emit(lines, "Cool sur by zone", "cool_sur_by_zone_c", fdict_compact(self.cool_sur_by_zone_c, nd=1))
 
         return "\n".join(lines)
+
+
+@dataclass(slots=True, frozen=True)
+class GatingDiagnostics:
+    """Output immutabile del ModeResolver: soglie, flag di gating e contesto utente.
+
+    Separato da PlantDemandSignals per garantire che il DTO di osservazione (F3)
+    rimanga read-only dopo la costruzione. I command builders leggono da qui
+    invece di dipendere implicitamente dall'ordine di esecuzione del resolver.
+
+    Tutti i campi hanno default safe: la struttura è costruibile senza che il
+    resolver sia mai stato chiamato (utile nei test unitari dei command builders).
+    """
+
+    # -- Contesto utente ------------------------------------------------------
+    user_hvac_mode: str = "off"
+    user_profile: str = "comfort"
+    user_forced_off: bool = False
+
+    # -- Stagione operativa ---------------------------------------------------
+    runtime_season: str = "--"
+    operative_season: str = "--"
+
+    # -- Soglie effettive post-profilo ---------------------------------------
+    ctrl_aggr: float = 1.0
+    heat_on_thr_c: float = 0.0
+    cool_on_thr_c: float = 0.0
+    quorum_cov_req: float = 0.0
+
+    # -- Gating dettagliato (None = non calcolato / profilo COMFORT/BOOST) ---
+    heat_override: Optional[bool] = None
+    heat_quorum_ok: Optional[bool] = None
+    heat_mean_ok: Optional[bool] = None
+    cool_override: Optional[bool] = None
+    cool_quorum_ok: Optional[bool] = None
+    cool_mean_ok: Optional[bool] = None
+
+    # -- Flag finali verso ModeResolver --------------------------------------
+    any_heat: bool = False
+    any_cool: bool = False
+    any_dehum: bool = False
+    heat_sensible: bool = False
+    cool_sensible: bool = False
+
+    # -- KPI MPC zona (propagati da GatingResult) ----------------------------
+    zones_any_heat_demand: bool = False
+    zones_full_on_pct: Optional[float] = None
+    zones_mpc_heat_preheat_ok: Optional[bool] = None
+    zones_duty_avg_pct: Optional[float] = None
+    zones_on_now_pct: Optional[float] = None
+    zones_first_on_step: Optional[int] = None
+
+    # -- Campi VMC propagati da VmcDemand (evita risalita a VmcPolicy in F7) -
+    vmc_t_ref_c: float = 22.0
+    vmc_rh_target_pct: float = 50.0
+
 
 @dataclass(slots=True)
 class PdcCommand:
@@ -990,6 +775,7 @@ class PlantDecision:
     zones: Optional[ZonesDecision] = None
 
     signals: PlantDemandSignals = field(default_factory=PlantDemandSignals)
+    gating: GatingDiagnostics = field(default_factory=GatingDiagnostics)
     warnings: List[str] = field(default_factory=list)
 
     def to_log_dict(self) -> Dict[str, Any]:
@@ -1080,62 +866,41 @@ class PlantDecision:
         s = self.signals
         if s is not None:
             lines += s.__str__().splitlines()[1:]  # skip header line
-            # lines += [
-            #     f"------------------------------------------------------------------",
-            #     f"Signals",
-            #     # user
-            #     f"  User HVAC mode     :: {fstr(s.user_hvac_mode)}",
-            #     f"  User profile       :: {fstr(s.user_profile)}",
-            #     f"  User forced off    :: {fbool(s.user_forced_off, 'True', 'False')}",
-            #     # season / runtime
-            #     f"  Runtime season     :: {fstr(s.runtime_season)}",
-            #     f"  Operative season   :: {fstr(s.operative_season)}",
-            #     # demand worst-case
-            #     f"  Heat def max       :: {fnum(s.heat_def_max_c)} °C",
-            #     f"  Cool sur max       :: {fnum(s.cool_sur_max_c)} °C",
-            #     f"  Heat headroom min  :: {fnum(getattr(s, 'heat_headroom_min_c', None))} °C",
-            #     f"  Cool headroom min  :: {fnum(getattr(s, 'cool_headroom_min_c', None))} °C",
-            #     # demand means + quorum
-            #     f"  Heat def mean      :: {fnum(s.heat_def_wmean_c)} °C",
-            #     f"  Heat coverage      :: {fpct01(s.heat_cov, 0)} ({fmb(s.heat_metric_basis)})",
-            #     f"  Heat on thr        :: {fnum(s.heat_on_thr_c)} °C",
-            #     f"  Heat quorum req    :: {fpct01(s.quorum_cov_req, 0)}",
-            #     f"  Heat override      :: {fbool(s.heat_override, 'True', 'False')}",
-            #     f"  Heat quorum ok     :: {fbool(s.heat_quorum_ok, 'True', 'False')}",
-            #     f"  Heat mean ok       :: {fbool(s.heat_mean_ok, 'True', 'False')}",
-            #     f"  Cool sur mean      :: {fnum(s.cool_sur_wmean_c)} °C",
-            #     f"  Cool coverage      :: {fpct01(s.cool_cov, 0)} ({fmb(s.cool_metric_basis)})",
-            #     f"  Cool on thr        :: {fnum(s.cool_on_thr_c)} °C",
-            #     f"  Cool override      :: {fbool(s.cool_override, 'True', 'False')}",
-            #     f"  Cool quorum ok     :: {fbool(s.cool_quorum_ok, 'True', 'False')}",
-            #     f"  Cool mean ok       :: {fbool(s.cool_mean_ok, 'True', 'False')}",
-            #     # any / sensible
-            #     f"  Any heat           :: {fbool(s.any_heat, 'True', 'False')}",
-            #     f"  Any cool           :: {fbool(s.any_cool, 'True', 'False')}",
-            #     f"  Any dehum          :: {fbool(s.any_dehum, 'True', 'False')}",
-            #     f"  Heat sensible      :: {fbool(s.heat_sensible, 'True', 'False')}",
-            #     f"  Cool sensible      :: {fbool(s.cool_sensible, 'True', 'False')}",
-            #     # dew point safety
-            #     f"  DP max             :: {fnum(s.dp_max_c)} °C",
-            #     f"  DP dehum           :: {fnum(getattr(s, 'dp_dehum_c', None))} °C",
-            #     f"  Outdoor DP         :: {fnum(getattr(s, 'outdoor_dp_c', None))} °C",
-            #     f"  VMC dehum feasible :: {fbool(getattr(s, 'vmc_dehum_feasible', None), 'True', 'False')}",
-            #     # VMC debug thresholds
-            #     f"  VMC DP sp          :: {fnum(getattr(s, 'vmc_dp_sp_c', None))} °C",
-            #     f"  VMC dehum ON thr   :: {fnum(getattr(s, 'vmc_dehum_on_thr_c', None))} °C",
-            #     f"  VMC dehum OFF thr  :: {fnum(getattr(s, 'vmc_dehum_off_thr_c', None))} °C",
-            #     # VMC requests
-            #     f"  VMC req heating    :: {fbool(s.vmc_req_heating, 'True', 'False')}",
-            #     f"  VMC req cooling    :: {fbool(s.vmc_req_cooling, 'True', 'False')}",
-            #     f"  VMC req dehumidif  :: {fbool(s.vmc_req_dehumidif, 'True', 'False')}",
-            #     f"  VMC req water      :: {fbool(s.vmc_req_water, 'True', 'False')}",
-            #     f"  Zones MPC heat     :: {fbool(getattr(s, 'zones_any_heat_demand', False), 'True', 'False')}",
-            #     f"  Zones MPC full-on  :: {fnum(getattr(s, 'zones_full_on_pct', None), 1)} %",
-            #     f"  Zones MPC preheat  :: {fbool(getattr(s, 'zones_mpc_heat_preheat_ok', None), 'True', 'False')}",
-            #     # per-zone maps (compatte)
-            #     f"  Heat def by zone   :: {fdict_compact(s.heat_def_by_zone_c, nd=1)}",
-            #     f"  Cool sur by zone   :: {fdict_compact(s.cool_sur_by_zone_c, nd=1)}",
-            # ]
+
+        g = getattr(self, "gating", None)
+        if g is not None:
+            lines += [
+                f"------------------------------------------------------------------",
+                f"Gating",
+                f"  User HVAC mode     :: {fstr(g.user_hvac_mode)}",
+                f"  User profile       :: {fstr(g.user_profile)}",
+                f"  User forced off    :: {fbool(g.user_forced_off, 'True', 'False')}",
+                f"  Runtime season     :: {fstr(g.runtime_season)}",
+                f"  Operative season   :: {fstr(g.operative_season)}",
+                f"  Ctrl aggress       :: {fnum(g.ctrl_aggr, 2)}",
+                f"  Heat on thr        :: {fnum(g.heat_on_thr_c)} °C",
+                f"  Cool on thr        :: {fnum(g.cool_on_thr_c)} °C",
+                f"  Quorum cov req     :: {fpct01(g.quorum_cov_req, 0)}",
+                f"  Heat override      :: {fbool(g.heat_override, 'True', 'False')}",
+                f"  Heat quorum ok     :: {fbool(g.heat_quorum_ok, 'True', 'False')}",
+                f"  Heat mean ok       :: {fbool(g.heat_mean_ok, 'True', 'False')}",
+                f"  Cool override      :: {fbool(g.cool_override, 'True', 'False')}",
+                f"  Cool quorum ok     :: {fbool(g.cool_quorum_ok, 'True', 'False')}",
+                f"  Cool mean ok       :: {fbool(g.cool_mean_ok, 'True', 'False')}",
+                f"  Any heat           :: {fbool(g.any_heat, 'True', 'False')}",
+                f"  Any cool           :: {fbool(g.any_cool, 'True', 'False')}",
+                f"  Any dehum          :: {fbool(g.any_dehum, 'True', 'False')}",
+                f"  Heat sensible      :: {fbool(g.heat_sensible, 'True', 'False')}",
+                f"  Cool sensible      :: {fbool(g.cool_sensible, 'True', 'False')}",
+                f"  Zones MPC heat     :: {fbool(g.zones_any_heat_demand, 'True', 'False')}",
+                f"  Zones MPC full-on  :: {fnum(g.zones_full_on_pct, 1)} %",
+                f"  Zones MPC duty avg :: {fnum(g.zones_duty_avg_pct, 1)} %",
+                f"  Zones MPC on-now   :: {fnum(g.zones_on_now_pct, 1)} %",
+                f"  Zones MPC first ON :: {g.zones_first_on_step if g.zones_first_on_step is not None else '-'}",
+                f"  Zones MPC preheat  :: {fbool(g.zones_mpc_heat_preheat_ok, 'True', 'False')}",
+                f"  VMC T ref          :: {fnum(g.vmc_t_ref_c)} °C",
+                f"  VMC RH target      :: {fnum(g.vmc_rh_target_pct, 0)} %",
+            ]
 
         # --- derived inputs ---
         if getattr(self, "derived_input", None) is not None:

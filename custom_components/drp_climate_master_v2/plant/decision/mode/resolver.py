@@ -10,7 +10,7 @@ from ....domain.enums import HVACOperatingProfile
 from ....plant.monitor.plant import PlantSnapshot
 
 from ..config import PlantPlannerConfig
-from ..contracts import PlantDemandSignals, PlantMode
+from ..contracts import GatingDiagnostics, PlantDemandSignals, PlantMode
 from ..zone.model import ZonesDecision
 
 from .gating import compute_gating
@@ -22,7 +22,7 @@ class ModeResolver:
 
     Responsibility
     - Decide the high-level regime ONLY (no actuator commands).
-    - Populate diagnostic fields in PlantDemandSignals for observability.
+    - Return immutable `GatingDiagnostics` for observability and command builders.
 
     Notes
     - This module deliberately remains HA-aware (HVACMode mapping), because it is
@@ -31,7 +31,11 @@ class ModeResolver:
 
     cfg: PlantPlannerConfig
 
-    def _iaq_mode(self, snapshot: PlantSnapshot) -> PlantMode:
+    def _iaq_mode(
+        self,
+        snapshot: PlantSnapshot,
+        gating: GatingDiagnostics,
+    ) -> tuple[PlantMode, GatingDiagnostics]:
         """Restituisce IAQ_ONLY o OFF in base a occupazione e stato finestre.
 
         Logica:
@@ -41,16 +45,16 @@ class ModeResolver:
         - Altrimenti -> IAQ_ONLY (ricambio aria minimo garantito)
         """
         if bool(snapshot.presence_vacation):
-            return PlantMode.OFF
+            return (PlantMode.OFF, gating)
 
         windows_open_min = as_float(
             getattr(snapshot, "windows_close_minutes_off", None)
         )
         threshold = float(self.cfg.windows_open_off_minutes)
         if windows_open_min is not None and float(windows_open_min) >= threshold:
-            return PlantMode.OFF
+            return (PlantMode.OFF, gating)
 
-        return PlantMode.IAQ_ONLY
+        return (PlantMode.IAQ_ONLY, gating)
 
     def decide(
         self,
@@ -58,7 +62,7 @@ class ModeResolver:
         snapshot: PlantSnapshot,
         demand: PlantDemandSignals,
         zones_decision: Optional[ZonesDecision] = None,
-    ) -> PlantMode:
+    ) -> tuple[PlantMode, GatingDiagnostics]:
         cfg = self.cfg
 
         heat_def = float(demand.heat_def_max_c)
@@ -77,15 +81,17 @@ class ModeResolver:
             or HVACOperatingProfile.COMFORT
         )
 
-        # Expose to signals for observability (ends up in PlantDecision.signals)
-        demand.user_hvac_mode = hvac_mode_s
-        demand.user_profile = profile.value
-
         # Absolute override: hvac_mode OFF spegne tutto inclusa VMC
-        if hvac_mode_s == HVACMode.OFF.value:
-            demand.user_forced_off = True
-            return PlantMode.OFF
-        demand.user_forced_off = False
+        # Off non deve spegnere nulla
+        # if hvac_mode_s == HVACMode.OFF.value:
+        #     gating = GatingDiagnostics(
+        #         user_hvac_mode=hvac_mode_s,
+        #         user_profile=profile.value,
+        #         user_forced_off=True,
+        #         vmc_t_ref_c=float(getattr(demand, "vmc_t_ref_c", 22.0)),
+        #         vmc_rh_target_pct=float(getattr(demand, "vmc_rh_target_pct", 50.0)),
+        #     )
+        #     return (PlantMode.OFF, gating)
 
         # --------------------
         # 1) Profile-aware gating (thresholds + booleans)
@@ -104,49 +110,51 @@ class ModeResolver:
             regime_hint=_regime_hint,
         )
 
-        demand.ctrl_aggr = g.ctrl_aggr
-        demand.heat_on_thr_c = g.heat_thr_c
-        demand.cool_on_thr_c = g.cool_thr_c
-        demand.quorum_cov_req = g.quorum_cov_req
-
-        demand.heat_override = g.heat_override
-        demand.heat_quorum_ok = g.heat_quorum_ok
-        demand.heat_mean_ok = g.heat_mean_ok
-
-        demand.cool_override = g.cool_override
-        demand.cool_quorum_ok = g.cool_quorum_ok
-        demand.cool_mean_ok = g.cool_mean_ok
-
-        demand.zones_any_heat_demand = g.zones_any_heat
-        demand.zones_full_on_pct = g.zones_full_on_pct
-        demand.zones_mpc_heat_preheat_ok = g.zones_preheat_ok
-
-        # Extra MPC-lite KPIs (for observability and plant-side tuning)
-        demand.zones_duty_avg_pct = g.zones_duty_avg_pct
-        demand.zones_on_now_pct = g.zones_on_now_pct
-        demand.zones_first_on_step = g.zones_first_on_step
-
-        demand.any_heat = g.any_heat
-        demand.any_cool = g.any_cool
-        demand.any_dehum = g.vmc_req_dehum
-        demand.heat_sensible = g.heat_sensible
-        demand.cool_sensible = g.cool_sensible
-
         # --------------------
         # 2) Season gating / conflict resolution
         # --------------------
         season = getattr(getattr(snapshot, "season", None), "season", None)
         season_val = getattr(season, "value", None)
-        demand.runtime_season = season_val or "unknown"
+        runtime_season = season_val or "unknown"
 
         # Map Seasons -> operative buckets
         if season_val == "winter":
-            operative = "winter"
+            operative_season = "winter"
         elif season_val == "summer":
-            operative = "summer"
+            operative_season = "summer"
         else:
-            operative = "shoulder"
-        demand.operative_season = operative
+            operative_season = "shoulder"
+
+        gating = GatingDiagnostics(
+            user_hvac_mode=hvac_mode_s,
+            user_profile=profile.value,
+            user_forced_off=False,
+            runtime_season=runtime_season,
+            operative_season=operative_season,
+            ctrl_aggr=g.ctrl_aggr,
+            heat_on_thr_c=g.heat_thr_c,
+            cool_on_thr_c=g.cool_thr_c,
+            quorum_cov_req=g.quorum_cov_req,
+            heat_override=g.heat_override,
+            heat_quorum_ok=g.heat_quorum_ok,
+            heat_mean_ok=g.heat_mean_ok,
+            cool_override=g.cool_override,
+            cool_quorum_ok=g.cool_quorum_ok,
+            cool_mean_ok=g.cool_mean_ok,
+            any_heat=g.any_heat,
+            any_cool=g.any_cool,
+            any_dehum=g.vmc_req_dehum,
+            heat_sensible=g.heat_sensible,
+            cool_sensible=g.cool_sensible,
+            zones_any_heat_demand=g.zones_any_heat,
+            zones_full_on_pct=g.zones_full_on_pct,
+            zones_mpc_heat_preheat_ok=g.zones_preheat_ok,
+            zones_duty_avg_pct=g.zones_duty_avg_pct,
+            zones_on_now_pct=g.zones_on_now_pct,
+            zones_first_on_step=g.zones_first_on_step,
+            vmc_t_ref_c=float(getattr(demand, "vmc_t_ref_c", 22.0)),
+            vmc_rh_target_pct=float(getattr(demand, "vmc_rh_target_pct", 50.0)),
+        )
 
         any_cool_or_dehum = g.any_cool_or_dehum
 
@@ -165,70 +173,71 @@ class ModeResolver:
 
             if dew_risk:
                 # Winter: avoid active cooling; keep ventilation only.
-                if operative == "winter":
-                    return PlantMode.VENT_ONLY
+                if operative_season == "winter":
+                    return (PlantMode.VENT_ONLY, gating)
                 # Summer/shoulder: allow latent assist if configured and dehumidification is requested.
                 if bool(cfg.vacation.allow_dehum_assist) and bool(demand.vmc_req_dehumidif):
-                    return PlantMode.DEHUM_ASSIST
-                return PlantMode.VENT_ONLY
+                    return (PlantMode.DEHUM_ASSIST, gating)
+                return (PlantMode.VENT_ONLY, gating)
 
             # No dew risk in vacation: fully OFF (including VMC)
-            return PlantMode.OFF
+            return (PlantMode.OFF, gating)
 
         # --------------------
         # 2.b) Main season gating
         # --------------------
-        if operative == "winter":
+        if operative_season == "winter":
             if g.any_heat:
-                return PlantMode.HEATING
+                return (PlantMode.HEATING, gating)
             if any_cool_or_dehum:
                 # Avoid active cooling in winter: prefer ventilation only.
-                return PlantMode.VENT_ONLY
+                return (PlantMode.VENT_ONLY, gating)
             # Profili AWAY: rispetta la scelta utente ma garantisce IAQ se occupato
             if profile in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
-                return self._iaq_mode(snapshot)
+                return self._iaq_mode(snapshot, gating)
             # Free cooling/heating intenzionale (bypass recuperatore VMC)
             if demand.vmc_req_free_cooling:
-                return PlantMode.VENT_ONLY
+                return (PlantMode.VENT_ONLY, gating)
             if demand.vmc_req_free_heating:
-                return PlantMode.VENT_ONLY
+                return (PlantMode.VENT_ONLY, gating)
             # Idle inverno occupato: IAQ minimo garantito
-            return self._iaq_mode(snapshot)
+            return self._iaq_mode(snapshot, gating)
 
-        if operative == "summer":
+        if operative_season == "summer":
             if any_cool_or_dehum:
-                return PlantMode.DEHUM_ASSIST if g.vmc_req_dehum else PlantMode.COOLING
+                return (PlantMode.DEHUM_ASSIST if g.vmc_req_dehum else PlantMode.COOLING, gating)
             if g.any_heat:
                 # Avoid active heating in summer: ventilation only.
-                return PlantMode.VENT_ONLY
+                return (PlantMode.VENT_ONLY, gating)
             if profile in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
-                return self._iaq_mode(snapshot)
+                return self._iaq_mode(snapshot, gating)
             # Free cooling intenzionale in estate (free heating non applicabile)
             if demand.vmc_req_free_cooling:
-                return PlantMode.VENT_ONLY
+                return (PlantMode.VENT_ONLY, gating)
             # Idle estate occupata: IAQ minimo garantito
-            return self._iaq_mode(snapshot)
+            return self._iaq_mode(snapshot, gating)
 
         # SHOULDER: allow both, resolve conflicts by dominant error
         if g.any_heat and not any_cool_or_dehum:
-            return PlantMode.HEATING
+            return (PlantMode.HEATING, gating)
 
         if any_cool_or_dehum and not g.any_heat:
-            return PlantMode.DEHUM_ASSIST if g.vmc_req_dehum else PlantMode.COOLING
+            return (PlantMode.DEHUM_ASSIST if g.vmc_req_dehum else PlantMode.COOLING, gating)
 
         if g.any_heat and any_cool_or_dehum:
             # If latent is requested and we are also warm, prioritize dehumidification.
             if g.vmc_req_dehum and cool_sur >= 0.1:
-                return PlantMode.DEHUM_ASSIST
-            return (
+                return (PlantMode.DEHUM_ASSIST, gating)
+            mode = (
                 PlantMode.HEATING
                 if heat_def >= cool_sur
                 else (PlantMode.DEHUM_ASSIST if g.vmc_req_dehum else PlantMode.COOLING)
             )
+            return (mode, gating)
 
         # Idle shoulder: free cooling/heating se fattibile, altrimenti IAQ
         if demand.vmc_req_free_cooling:
-            return PlantMode.VENT_ONLY
+            return (PlantMode.VENT_ONLY, gating)
         if demand.vmc_req_free_heating:
-            return PlantMode.VENT_ONLY
-        return self._iaq_mode(snapshot)
+            return (PlantMode.VENT_ONLY, gating)
+        return self._iaq_mode(snapshot, gating)

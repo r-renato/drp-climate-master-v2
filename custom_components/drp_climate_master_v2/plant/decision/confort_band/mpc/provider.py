@@ -53,11 +53,12 @@ class ZonesMpcProvider:
             return None
 
         # User OFF -> do not spend CPU computing a plan that cannot be applied.
-        hvac_mode_raw = getattr(snapshot, "climate_hvac_mode", None)
-        hvac_mode_val = getattr(hvac_mode_raw, "value", hvac_mode_raw)
-        hvac_mode_s = str(hvac_mode_val).strip().lower() if hvac_mode_val is not None else "auto"
-        if bool(getattr(self.cfg, "skip_if_user_off", True)) and hvac_mode_s == HVACMode.OFF.value:
-            return None
+        # ATTENZIONE! Il piano deve sempre essere calcolato
+        # hvac_mode_raw = getattr(snapshot, "climate_hvac_mode", None)
+        # hvac_mode_val = getattr(hvac_mode_raw, "value", hvac_mode_raw)
+        # hvac_mode_s = str(hvac_mode_val).strip().lower() if hvac_mode_val is not None else "auto"
+        # if bool(getattr(self.cfg, "skip_if_user_off", True)) and hvac_mode_s == HVACMode.OFF.value:
+        #     return None
 
         # Season gating (operative bucket): winter/summer/shoulder
         season = getattr(getattr(snapshot, "season", None), "season", None)

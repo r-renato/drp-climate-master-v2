@@ -317,7 +317,8 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                         )
                         log_debug(_LOGGER, "PlantDecision %s", self._last_plant_decision)
 
-                        await self._plant_actuator.async_apply(snapshot=snap, decision=self._last_plant_decision)
+                        if self.current_hvac_mode == HVACMode.AUTO:
+                            await self._plant_actuator.async_apply(snapshot=snap, decision=self._last_plant_decision)
 
                         # dash = build_dashboard(snap, self._last_zones_decision, self._last_plant_decision)
                         # log_debug(_LOGGER, "\n%s", render_dashboard_text(dash))
@@ -337,7 +338,6 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
 
             # log_debug(_LOGGER, "ControlPlan %s", plan)
             
-
             if plan is None:
                 return
 

@@ -169,11 +169,12 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
     # def hvac_mode(self) -> HVACMode:
     #     return self._supervisor.current_hvac_mode
 
-    def set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """Set new target hvac mode."""
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        """Imposta la modalità HVAC e aggiorna immediatamente la UI."""
         self.map_on_hvac_mode = hvac_mode
         self._attr_hvac_mode = hvac_mode
-        self._coordinator.set_hvac_mode( hvac_mode )
+        self._coordinator.set_hvac_mode(hvac_mode)
+        self.async_write_ha_state()
     
     def set_preset_mode(self, preset_mode: str) -> None:
         self._preset_mode = preset_mode
@@ -203,37 +204,6 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
     def target_temperature(self) -> float | None:
         self._attr_target_temperature_high
         return self._target_temp
-
-    # @property
-    # def preset_mode(self) -> str | None:
-    #     return self._supervisor.current_profile.value if self._supervisor.current_profile else None
-
-    # @property
-    # def extra_state_attributes(self) -> dict[str, Any]:
-    #     snap = self.coordinator.snapshot
-    #     return {
-    #         "dewpoint_guard": snap.dew_guard_active,
-    #         "free_cooling_possible": snap.free_cooling_possible,
-    #         "faults": snap.faults,
-    #         "vmc_on": snap.vmc_on,
-    #         "pdc_on": snap.pdc_on,
-    #     }
-
-    # async def async_set_temperature(self, **kwargs: Any) -> None:
-    #     temp = kwargs.get("temperature")
-    #     if temp is None:
-    #         return
-    #     self._target_temp = float(temp)
-    #     await self._supervisor.async_set_target_temperature(self._target_temp)
-    #     self.async_write_ha_state()
-
-    # async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-    #     await self._supervisor.async_set_hvac_mode(hvac_mode)
-    #     self.async_write_ha_state()
-
-    # async def async_set_preset_mode(self, preset_mode: str) -> None:
-    #     await self._supervisor.async_set_profile(preset_mode)
-    #     self.async_write_ha_state()
 
     @property
     def available(self) -> bool:

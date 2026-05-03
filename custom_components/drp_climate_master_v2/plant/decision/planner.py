@@ -127,7 +127,7 @@ class PlantDecisionPlanner:
         self._pdc_cmd = PdcCommandBuilder(self.cfg)
         self._valves_cmd = ZoneValvesCommandBuilder(self.cfg)
         self._supply_cmd = SupplyCommandBuilder(self.cfg)
-        self._vmc_cmd = VmcCommandBuilder(self.cfg, self._vmc_policy)
+        self._vmc_cmd = VmcCommandBuilder(self.cfg)
 
         # Dew-point safety (single source of truth)
         self._dew_guard = DewGuardPolicy(self.cfg)
@@ -208,8 +208,9 @@ class PlantDecisionPlanner:
             dec.warnings.extend([f"zones_mpc_{w}" for w in zones_decision.warnings])
 
         # --- Determine regime
-        mode = self._mode_resolver.decide(snapshot=snapshot, demand=demand, zones_decision=zones_decision)
+        mode, gating = self._mode_resolver.decide(snapshot=snapshot, demand=demand, zones_decision=zones_decision)
         dec.mode = mode
+        dec.gating = gating
 
         # Arricchisce reason con il motivo specifico del VENT_ONLY se free vent attivo.
         # Distingue il VENT_ONLY intenzionale (free cooling/heating) dal fallback di sicurezza.
@@ -222,7 +223,7 @@ class PlantDecisionPlanner:
         # Diagnostics / warnings derived from enriched demand
         if getattr(demand, "vmc_dehum_feasible", None) is False:
             dec.warnings.append("vmc_dehum_unfeasible_outdoor_dp")
-        if demand.zones_any_heat_demand and getattr(demand, "zones_mpc_heat_preheat_ok", None) is False:
+        if gating.zones_any_heat_demand and gating.zones_mpc_heat_preheat_ok is False:
             dec.warnings.append("zones_mpc_heat_ignored_headroom")
 
         log_debug(_LOGGER, "Computed plant demands: %s", demand)
@@ -360,3 +361,6 @@ class PlantDecisionPlanner:
         demand.vmc_req_water = vmc_dem.req_water
         demand.vmc_req_free_cooling = vmc_dem.req_free_cooling
         demand.vmc_req_free_heating = vmc_dem.req_free_heating
+        # Propagati per VmcCommandBuilder (evita risalita a VmcPolicy in F7).
+        demand.vmc_t_ref_c = float(vmc_dem.t_ref_c)
+        demand.vmc_rh_target_pct = float(vmc_dem.rh_target_pct)

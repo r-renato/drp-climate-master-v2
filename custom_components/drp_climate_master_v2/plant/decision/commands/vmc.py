@@ -4,12 +4,10 @@ from dataclasses import dataclass
 from typing import Optional
 
 from ....helpers.utils import as_bool, as_float, clamp
-from ....domain.enums import HVACOperatingProfile
 from ....plant.monitor.plant import PlantSnapshot
 
 from ..config import PlantPlannerConfig
 from ..contracts import PlantDecision, PlantDemandSignals, PlantMode
-from ..vmc.policy import VmcPolicy
 
 
 @dataclass(slots=True)
@@ -17,7 +15,6 @@ class VmcCommandBuilder:
     """Build VMC commands based on PlantMode and VMC policy outputs."""
 
     cfg: PlantPlannerConfig
-    vmc_policy: VmcPolicy
 
     def fill(self, dec: PlantDecision, snapshot: PlantSnapshot, demand: PlantDemandSignals) -> None:
         """Populate VMC commands.
@@ -55,9 +52,9 @@ class VmcCommandBuilder:
                     float(cfg.vmc.speed.speed_max),
                 )
             )
-            if demand.operative_season == "winter":
+            if dec.gating.operative_season == "winter":
                 iaq_mode = cfg.vmc.mode_winter
-            elif demand.operative_season == "summer":
+            elif dec.gating.operative_season == "summer":
                 iaq_mode = cfg.vmc.mode_summer
             else:
                 iaq_mode = getattr(snapshot.vmc, "processing_mode", None) or cfg.vmc.mode_winter
@@ -113,11 +110,11 @@ class VmcCommandBuilder:
         v.enable_free_cooling = False
         v.force_free_cooling = False
 
-        if demand.operative_season == "winter":
+        if dec.gating.operative_season == "winter":
             mode = cfg.vmc.mode_winter
-        elif demand.operative_season == "summer":
+        elif dec.gating.operative_season == "summer":
             mode = cfg.vmc.mode_summer
-        elif demand.operative_season == "shoulder":
+        elif dec.gating.operative_season == "shoulder":
             mode = cfg.vmc.mode_shoulder
         else:
             mode = getattr(snapshot.vmc, "processing_mode", None) or cfg.vmc.mode_winter
@@ -135,16 +132,15 @@ class VmcCommandBuilder:
         # Questo è corretto fisicamente: in mezza stagione con DP elevato il
         # comportamento termico desiderato è quello estivo (raffrescamento latente),
         # non lo spegnimento del trattamento.
-        if demand.vmc_req_dehumidif and demand.operative_season == "shoulder":
+        if demand.vmc_req_dehumidif and dec.gating.operative_season == "shoulder":
             mode = cfg.vmc.mode_summer
 
-        t_ref_c = float(self.vmc_policy.get_indoor_reference_temp_c(snapshot))
-        profile = HVACOperatingProfile.from_value(demand.user_profile, default=HVACOperatingProfile.COMFORT) or HVACOperatingProfile.COMFORT
-        rh_target_pct = float(self.vmc_policy.rh_target_pct(demand.operative_season, profile))
+        t_ref_c = float(getattr(dec.gating, "vmc_t_ref_c", 22.0))
+        rh_target_pct = float(getattr(dec.gating, "vmc_rh_target_pct", 50.0))
 
         dp_sp_c = float(
             getattr(demand, "vmc_dp_sp_c", None)
-            or self.vmc_policy.compute_dp_setpoint_c_from(t_ref_c, rh_target_pct)
+            or cfg.vmc.dehum.setpoint_dp_c
         )
         ddp_sp_c = float(getattr(demand, "vmc_ddp_cmd_c", None) or cfg.vmc.dehum.setpoint_ddp_c)
 

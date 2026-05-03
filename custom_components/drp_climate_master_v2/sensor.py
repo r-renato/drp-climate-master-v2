@@ -833,9 +833,10 @@ class PDCSensor(BaseSensor):
         if last_plant_decision is not None and last_plant_decision.pdc is not None:
             pdc = last_plant_decision.pdc
             signals = last_plant_decision.signals
+            gating = last_plant_decision.gating
 
-            data["hvac mode"] = f"{signals.user_hvac_mode}"
-            data["hvac preset"] = f"{signals.user_profile}"
+            data["hvac mode"] = f"{gating.user_hvac_mode}"
+            data["hvac preset"] = f"{gating.user_profile}"
 
             data["mode"] = f"{pdc.mode}"
 
@@ -845,25 +846,25 @@ class PDCSensor(BaseSensor):
             data["cool-Δt"]   = f"{fnum(pdc.cool_dt_c, nd=1)} °C"
 
             # Stagione e profilo (contesto decisione)
-            data["operative season"] = f"{signals.operative_season}"
-            data["runtime season"]   = f"{signals.runtime_season}"
-            data["ctrl aggressiveness"] = f"{fnum(signals.ctrl_aggr, nd=2)}"
+            data["operative season"] = f"{gating.operative_season}"
+            data["runtime season"]   = f"{gating.runtime_season}"
+            data["ctrl aggressiveness"] = f"{fnum(gating.ctrl_aggr, nd=2)}"
 
             # Domanda sensibile (il "perché" la PDC è accesa)
             data["heat def max"]   = f"{fnum(signals.heat_def_max_c, nd=1)} °C"
             data["heat def mean"]  = f"{fnum(signals.heat_def_wmean_c, nd=1)} °C"
             data["heat coverage"]  = f"{fnum(signals.heat_cov, nd=0)} %"
-            data["heat on thr"]    = f"{fnum(signals.heat_on_thr_c, nd=1)} °C"
+            data["heat on thr"]    = f"{fnum(gating.heat_on_thr_c, nd=1)} °C"
             data["cool sur max"]   = f"{fnum(signals.cool_sur_max_c, nd=1)} °C"
             data["cool coverage"]  = f"{fnum(signals.cool_cov, nd=0)} %"
 
             # Gating / quorum (il "se" la PDC parte)
-            data["heat override"]  = signals.heat_override
-            data["heat quorum ok"] = signals.heat_quorum_ok
-            data["heat mean ok"]   = signals.heat_mean_ok
-            data["quorum cov req"] = f"{fnum(signals.quorum_cov_req, nd=0)} %"
-            data["any heat"]       = signals.any_heat
-            data["any cool"]       = signals.any_cool
+            data["heat override"]  = gating.heat_override
+            data["heat quorum ok"] = gating.heat_quorum_ok
+            data["heat mean ok"]   = gating.heat_mean_ok
+            data["quorum cov req"] = f"{fnum(gating.quorum_cov_req, nd=0)} %"
+            data["any heat"]       = gating.any_heat
+            data["any cool"]       = gating.any_cool
 
             # Curva climatica WOT (estratta dal debug — già calcolata)
             if isinstance(pdc.debug, dict):
@@ -883,10 +884,10 @@ class PDCSensor(BaseSensor):
                 data["zones duty avg"]   = f"{fnum(dbg.get('zones_duty_avg_pct', 0), nd=1)} %"
 
             # MPC hints (attività zone — utile per leggere il carico richiesto)
-            data["zones mpc heat"]     = signals.zones_any_heat_demand
-            data["zones mpc on now"]   = f"{fnum(signals.zones_full_on_pct, nd=1)} %"
-            data["zones mpc duty avg"] = f"{fnum(signals.zones_duty_avg_pct, nd=1)} %"
-            data["zones mpc preheat"]  = signals.zones_mpc_heat_preheat_ok
+            data["zones mpc heat"]     = gating.zones_any_heat_demand
+            data["zones mpc on now"]   = f"{fnum(gating.zones_full_on_pct, nd=1)} %"
+            data["zones mpc duty avg"] = f"{fnum(gating.zones_duty_avg_pct, nd=1)} %"
+            data["zones mpc preheat"]  = gating.zones_mpc_heat_preheat_ok
 
         return data
 
@@ -958,11 +959,12 @@ class VMCSensor(BaseSensor):
         if last_plant_decision is not None and last_plant_decision.vmc is not None:
             vmc = last_plant_decision.vmc
             signals = last_plant_decision.signals
+            gating = last_plant_decision.gating
 
             # --- Contesto ---
-            data["hvac mode"]        = f"{signals.user_hvac_mode}"
-            data["hvac preset"]      = f"{signals.user_profile}"
-            data["operative season"] = f"{signals.operative_season}"
+            data["hvac mode"]        = f"{gating.user_hvac_mode}"
+            data["hvac preset"]      = f"{gating.user_profile}"
+            data["operative season"] = f"{gating.operative_season}"
 
             # --- Comando VMC ---
             data["mode"]    = f"{vmc.mode}"
@@ -1065,11 +1067,12 @@ class RadiantSensor(BaseSensor):
         if last_plant_decision is not None and last_plant_decision.supply is not None:
             supply = last_plant_decision.supply
             signals = last_plant_decision.signals
+            gating = last_plant_decision.gating
 
             # --- Contesto ---
-            data["hvac mode"]        = f"{signals.user_hvac_mode}"
-            data["hvac preset"]      = f"{signals.user_profile}"
-            data["operative season"] = f"{signals.operative_season}"
+            data["hvac mode"]        = f"{gating.user_hvac_mode}"
+            data["hvac preset"]      = f"{gating.user_profile}"
+            data["operative season"] = f"{gating.operative_season}"
 
             # --- Comandi supply ---
             data["pump direct"]      = f"{fbool(supply.direct_pump_on)}"
@@ -1108,18 +1111,18 @@ class RadiantSensor(BaseSensor):
             data["dp outdoor"]       = f"{fnum(signals.outdoor_dp_c, nd=1)} °C"
 
             # --- Flag finali ---
-            data["any heat"]         = signals.any_heat
-            data["any cool"]         = signals.any_cool
-            data["heat sensible"]    = signals.heat_sensible
-            data["cool sensible"]    = signals.cool_sensible
-            data["heat override"]    = signals.heat_override
+            data["any heat"]         = gating.any_heat
+            data["any cool"]         = gating.any_cool
+            data["heat sensible"]    = gating.heat_sensible
+            data["cool sensible"]    = gating.cool_sensible
+            data["heat override"]    = gating.heat_override
 
             # --- Zone MPC (guidano valvole e target supply) ---
-            data["zones on now"]     = f"{fnum(signals.zones_on_now_pct, nd=1)} %"
-            data["zones duty avg"]   = f"{fnum(signals.zones_duty_avg_pct, nd=1)} %"
-            data["zones full on"]    = f"{fnum(signals.zones_full_on_pct, nd=1)} %"
-            data["zones mpc heat"]   = signals.zones_any_heat_demand
-            data["zones mpc preheat"]= signals.zones_mpc_heat_preheat_ok
+            data["zones on now"]     = f"{fnum(gating.zones_on_now_pct, nd=1)} %"
+            data["zones duty avg"]   = f"{fnum(gating.zones_duty_avg_pct, nd=1)} %"
+            data["zones full on"]    = f"{fnum(gating.zones_full_on_pct, nd=1)} %"
+            data["zones mpc heat"]   = gating.zones_any_heat_demand
+            data["zones mpc preheat"]= gating.zones_mpc_heat_preheat_ok
 
             # --- VMC water request (determina pompa diretta) ---
             data["vmc req water"]    = signals.vmc_req_water
