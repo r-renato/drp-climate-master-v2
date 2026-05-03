@@ -88,10 +88,19 @@ class DemandGatingConfig:
 
         then the plant is allowed to start with an easier condition.
 
+    ctrl_aggr_by_profile:
+        Aggressività di controllo per profilo (adimensionale, 1.0 = COMFORT nominale).
+        Scala tutte le soglie di attivazione e i pesi MPC: valori > 1.0 rendono il
+        controllo più reattivo (BOOST), valori < 1.0 lo rendono più conservativo
+        (ECO/SLEEP/AWAY). Unica fonte di verità: usato da ``gating.py`` e da
+        ``zone/planner.py`` tramite ``ZoneDecisionPlanner.gating_cfg``.
+
     Methods
     -------
     quorum_cov(profile):
         Returns the quorum coverage required for the given profile.
+    ctrl_aggr(profile):
+        Returns the control aggressiveness factor for the given profile.
     """
 
     quorum_cov_by_profile: dict[HVACOperatingProfile, float] = field(
@@ -127,6 +136,21 @@ class DemandGatingConfig:
     """T_ext (degC) sopra la quale si applica demand_override_factor_mild senza interpolazione."""
 
     demand_mean_factor: float = 0.60
+
+    ctrl_aggr_by_profile: dict[HVACOperatingProfile, float] = field(
+        default_factory=lambda: {
+            HVACOperatingProfile.COMFORT: 1.00,
+            HVACOperatingProfile.BOOST: 1.35,
+            HVACOperatingProfile.ECO: 0.85,
+            HVACOperatingProfile.SLEEP: 0.75,
+            HVACOperatingProfile.AWAY: 0.50,
+            HVACOperatingProfile.VACATION: 0.50,
+        }
+    )
+    """Fattore di aggressività per profilo (adimensionale).
+    Modula soglie e pesi MPC: > 1.0 = più reattivo, < 1.0 = più conservativo.
+    Valore di fallback (profilo sconosciuto): 1.0 (COMFORT nominale).
+    """
 
     def _alpha(self, t_ext: float) -> float:
         """Interpolazione lineare normalizzata [0..1] tra t_override_cold_c e t_override_mild_c."""
@@ -204,6 +228,17 @@ class DemandGatingConfig:
         """
 
         return float(self.quorum_cov_by_profile.get(profile, 0.0))
+
+    def ctrl_aggr(self, profile: HVACOperatingProfile) -> float:
+        """Restituisce il fattore di aggressività di controllo per il profilo dato.
+
+        Args:
+            profile: profilo operativo HVAC attivo.
+
+        Returns:
+            Fattore adimensionale (0.2..1.35). Fallback 1.0 per profili sconosciuti.
+        """
+        return float(self.ctrl_aggr_by_profile.get(profile, 1.0))
 
 
 @dataclass(slots=True)

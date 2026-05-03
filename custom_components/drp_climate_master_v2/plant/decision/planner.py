@@ -17,6 +17,7 @@ from .zone.model import ZonesDecision
 from .confort_band.builder import build_confort_zones
 from .confort_band.policy_layer import ComfortPolicyLayer, ConfortPolicyConfig
 from .confort_band.mpc.provider import ZonesMpcProvider
+from .zone.planner import ZoneDecisionPlanner
 from .confort_band.trm import ZoneTrmTracker
 from .confort_band.config import (
     T_RM_TAU_HOURS,
@@ -132,7 +133,10 @@ class PlantDecisionPlanner:
         self._dew_guard = DewGuardPolicy(self.cfg)
 
         # Zones MPC provider (optional)
-        self._zones_mpc = ZonesMpcProvider(cfg=self.cfg.zones_mpc)
+        self._zones_mpc = ZonesMpcProvider(
+            cfg=self.cfg.zones_mpc,
+            planner=ZoneDecisionPlanner(gating_cfg=self.cfg.gating),
+        )
 
         # S3 — Adaptive CLO: tracker running mean T_op per zona.
         # Parametri letti da config.py (tau, warmup, clamp) per coerenza

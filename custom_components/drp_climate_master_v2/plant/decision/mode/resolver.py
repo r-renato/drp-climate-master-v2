@@ -90,12 +90,18 @@ class ModeResolver:
         # --------------------
         # 1) Profile-aware gating (thresholds + booleans)
         # --------------------
+        # Legge regime_hint da snapshot.season.weather (stesso pattern di PdcCommandBuilder).
+        # Fail-safe: "mild" se il campo non è disponibile.
+        _rh_weather = getattr(getattr(snapshot, "season", None), "weather", None)
+        _regime_hint: str = str(getattr(_rh_weather, "regime_hint", "mild")) if _rh_weather else "mild"
+
         g = compute_gating(
             cfg=cfg,
             demand=demand,
             profile=profile,
             zones_decision=zones_decision,
             t_ext=as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None)),
+            regime_hint=_regime_hint,
         )
 
         demand.ctrl_aggr = g.ctrl_aggr

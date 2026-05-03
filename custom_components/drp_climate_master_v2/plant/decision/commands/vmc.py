@@ -122,6 +122,22 @@ class VmcCommandBuilder:
         else:
             mode = getattr(snapshot.vmc, "processing_mode", None) or cfg.vmc.mode_winter
 
+        # Override stagione spalla con deumidifica richiesta.
+        #
+        # Problema: mode_shoulder mappa su "Off" nella config Eneren (autumn="Off"),
+        # che disabilita il trattamento VMC (solo ventilazione). Con trattamento
+        # disabilitato la VMC non può deumidificare né usare la batteria idraulica,
+        # indipendentemente dai setpoint DP scritti: il device riporta sempre
+        # request_dehumidification=False e l'umidità non viene controllata.
+        #
+        # Soluzione: quando la policy ha già deciso che la deumidifica è necessaria
+        # (DP > soglia igrometrica), si forza mode_summer che abilita il trattamento.
+        # Questo è corretto fisicamente: in mezza stagione con DP elevato il
+        # comportamento termico desiderato è quello estivo (raffrescamento latente),
+        # non lo spegnimento del trattamento.
+        if demand.vmc_req_dehumidif and demand.operative_season == "shoulder":
+            mode = cfg.vmc.mode_summer
+
         t_ref_c = float(self.vmc_policy.get_indoor_reference_temp_c(snapshot))
         profile = HVACOperatingProfile.from_value(demand.user_profile, default=HVACOperatingProfile.COMFORT) or HVACOperatingProfile.COMFORT
         rh_target_pct = float(self.vmc_policy.rh_target_pct(demand.operative_season, profile))

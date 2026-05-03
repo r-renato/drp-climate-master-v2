@@ -113,13 +113,47 @@ class PlantActuator:
     # ------------------------- low-level device actuation -------------------------
 
     async def _async_pdc_actuator(self, pdc_command: PdcCommand) -> None:
-        """Applica un comando PDC alle entità Home Assistant."""
+        """Applica un comando PDC alle entità Home Assistant.
 
-        # NON MODIFICARE: la potenza viene gestita altrove o da altri vincoli.
-        # await self._heatpump.async_set_power(fm_power=pdc_command.fm_power, power=pdc_command.power)
+        Sequenza di accensione/spegnimento (vincolo protocollo Aermec HMI080)
+        ----------------------------------------------------------------------
+        Il protocollo Modbus specifica che il cambio di modalità (Word 2) è
+        valido **solo quando l'unità è spenta**. La sequenza corretta è quindi:
+
+        Spegnimento  (power=False):
+            1. power OFF  — unità si ferma
+            2. mode + setpoints — aggiornamento a caldo mentre è spenta
+
+        Accensione (power=True):
+            1. mode + setpoints — impostati mentre unità è ancora spenta
+            2. power ON  — avvio con i parametri già scritti
+
+        Nessun cambio di potenza (power=None):
+            Solo mode + setpoints (comportamento invariato, retrocompatibile).
+
+        Il rate-limiting fisico (no-op se stato invariato) è delegato a
+        ``set_entity_bool`` che confronta lo stato corrente HA prima di
+        invocare il servizio.
+        """
+
+        # --- Spegnimento: prima interrompi la PDC, poi aggiorna parametri ---
+        if pdc_command.power is False:
+            log_debug(_LOGGER, "PDC power → OFF")
+            await self._heatpump.async_set_power(
+                fm_power=pdc_command.fm_power, power=False
+            )
+
+        # --- Parametri: modo e setpoints (validi mentre unità è spenta o stabile) ---
         await self._heatpump.async_set_processing_mode(mode=pdc_command.mode)
         await self._heatpump.async_set_heat_setpoints(t=pdc_command.heat_wot_c, dt=pdc_command.heat_dt_c)
         await self._heatpump.async_set_cool_setpoints(t=pdc_command.cool_wot_c, dt=pdc_command.cool_dt_c)
+
+        # --- Accensione: prima scrivi parametri (sopra), poi avvia la PDC ---
+        if pdc_command.power is True:
+            log_debug(_LOGGER, "PDC power → ON (mode=%s wot=%s)", pdc_command.mode, pdc_command.heat_wot_c)
+            await self._heatpump.async_set_power(
+                fm_power=pdc_command.fm_power, power=True
+            )
 
     async def _async_vmc_actuator(self, vmc_command: VmcCommand) -> None:
         """Applica un comando VMC alle entità Home Assistant.

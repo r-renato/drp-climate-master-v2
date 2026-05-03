@@ -227,10 +227,17 @@ class DemandSignalsBuilder:
             t_max = as_float(getattr(band, "t_op_max", None))
 
             # headroom (margine rispetto ai limiti banda)
-            if t_meas is not None and t_min is not None:
+            # Guard is_reference_zone: simmetrico a heat_def_max e cool_sur_max.
+            # Le zone a weight=0 sono zone di riferimento/aggregate, visibili al
+            # planner per dew-point guard e log ma escluse da tutti i segnali di
+            # domanda quantitativa (deficit, coverage, headroom).
+            # Senza questo guard una zona weight=0 vicina al bordo può triggerare
+            # il preheat MPC pur non contribuendo ad alcun deficit misurato,
+            # producendo avvii spurii (bug osservato: riscaldamento a T_int=23.7°C).
+            if not is_reference_zone and t_meas is not None and t_min is not None:
                 hh = float(t_meas) - float(t_min)
                 heat_headroom_min_c = hh if heat_headroom_min_c is None else min(heat_headroom_min_c, hh)
-            if t_meas is not None and t_max is not None:
+            if not is_reference_zone and t_meas is not None and t_max is not None:
                 ch = float(t_max) - float(t_meas)
                 cool_headroom_min_c = ch if cool_headroom_min_c is None else min(cool_headroom_min_c, ch)
 
