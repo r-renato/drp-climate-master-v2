@@ -130,7 +130,7 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
         self._instance_id: str = f"{id(self):x}"
 
         self.state = _State(
-            hvac_mode=HVACMode.AUTO,
+            hvac_mode=HVACMode.OFF,
             hvac_action=HVACAction.IDLE,
         )
 
@@ -192,6 +192,12 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
     @property
     def last_plant_decision(self) -> PlantDecision | None:
         return self._last_plant_decision
+
+    def set_preset_mode(self, preset_mode: HVACOperatingProfile) -> None:
+        self.state.hvac_profile = preset_mode
+
+    def set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        self.state.hvac_mode = hvac_mode
 
     # -----------------------------
     # HA lifecycle
@@ -319,6 +325,8 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
 
                         if self.current_hvac_mode == HVACMode.AUTO:
                             await self._plant_actuator.async_apply(snapshot=snap, decision=self._last_plant_decision)
+                        else:
+                            self.state.hvac_action = HVACAction.IDLE
 
                         # dash = build_dashboard(snap, self._last_zones_decision, self._last_plant_decision)
                         # log_debug(_LOGGER, "\n%s", render_dashboard_text(dash))
@@ -344,7 +352,5 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
             # Expose to UI
             if getattr(plan, "any_heat_demand", False):
                 self.state.hvac_action = HVACAction.HEATING
-            else:
-                self.state.hvac_action = HVACAction.IDLE
 
             # TODO: qui puoi aggiornare hvac_mode / profile quando li colleghi a plan/state machine

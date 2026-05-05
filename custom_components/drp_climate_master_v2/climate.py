@@ -174,6 +174,7 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
         self.map_on_hvac_mode = hvac_mode
         self._attr_hvac_mode = hvac_mode
         self._coordinator.set_hvac_mode(hvac_mode)
+        self._supervisor.set_hvac_mode(hvac_mode)
         self.async_write_ha_state()
     
     def set_preset_mode(self, preset_mode: str) -> None:
@@ -183,6 +184,7 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
         profile = HVACOperatingProfile.from_value(preset_mode)
         if profile is not None:
             self._coordinator.set_preset_mode( profile )
+            self._supervisor.set_preset_mode( profile )
 
     @property
     def hvac_action(self) -> HVACAction:
