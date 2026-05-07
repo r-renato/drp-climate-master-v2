@@ -236,6 +236,9 @@ class GatingResult:
     # Motivo di inibizione del preheat (diagnostica/log). None = non inibito.
     zones_preheat_skipped_reason: Optional[str]
 
+    # True se il guard shoulder ha soppresso heat_sensible (diagnostica/log).
+    shoulder_heat_suppressed: bool = False
+
     # MPC-lite KPIs (copiati da ZonesDecision.meta quando disponibili)
     zones_duty_avg_pct: Optional[float] = None
     zones_on_now_pct: Optional[float] = None
@@ -505,6 +508,26 @@ def compute_gating(
             (cool_sur >= cool_thr) and (bool(cool_quorum_ok) or bool(cool_mean_ok))
         )
 
+    # -- Fase 2b: Guard shoulder (soppressione riscaldamento a T_ext alta) -----
+    # Se T_ext e' sopra la soglia "recupero spontaneo" (default 12°C) E la media
+    # pesata del deficit e' sotto la soglia minima (default 0.30°C), il deficit e'
+    # probabilmente transitorio e si recupera senza avviare la PDC.
+    #
+    # Fisica: a T_ext >= 12°C in mezza stagione mediterranea, la dispersione termica
+    # e' ridotta e gli apporti interni (persone, elettrodomestici) sommati agli
+    # apporti solari diffusi bilanciano deficit < 0.30°C in ~20-40 min senza impianto.
+    # Il guard NON opera in inverno (T_ext < soglia) e NON blocca il preheat MPC
+    # (calcolato nella Fase 4 in modo indipendente).
+    #
+    # Disabilitazione: shoulder_heat_suppress_t_ext_c = 0.0 (mai soppresso).
+    shoulder_heat_suppressed = False
+    _suppress_t_ext = float(getattr(cfg.gating, "shoulder_heat_suppress_t_ext_c", 12.0))
+    _suppress_wmean = float(getattr(cfg.gating, "shoulder_heat_min_wmean_c", 0.30))
+    if bool(heat_sensible) and t_ext is not None and t_ext >= _suppress_t_ext:
+        if heat_def_wmean < _suppress_wmean:
+            heat_sensible = False
+            shoulder_heat_suppressed = True
+
     # -- Fase 3: KPI MPC zona (lettura passiva) -----------------------------
     # Propagati nel GatingResult per diagnostica e per PdcCommandBuilder
     # (activity_scale sul feedback WOT). Nessuna logica decisionale qui.
@@ -586,6 +609,7 @@ def compute_gating(
         zones_full_on_pct=float(zones_full_on_pct) if zones_full_on_pct is not None else None,
         zones_preheat_ok=bool(zones_preheat_ok),
         zones_preheat_skipped_reason=zones_preheat_skipped_reason,
+        shoulder_heat_suppressed=bool(shoulder_heat_suppressed),
         zones_duty_avg_pct=float(zones_duty_avg_pct) if zones_duty_avg_pct is not None else None,
         zones_on_now_pct=float(zones_on_now_pct) if zones_on_now_pct is not None else None,
         zones_first_on_step=int(zones_first_on_step) if zones_first_on_step is not None else None,

@@ -137,6 +137,22 @@ class DemandGatingConfig:
 
     demand_mean_factor: float = 0.60
 
+    shoulder_heat_suppress_t_ext_c: float = 12.0
+    """T_ext (°C) sopra la quale il guard shoulder sopprime la domanda di
+    riscaldamento quando il deficit medio pesato e' sotto la soglia minima.
+    Fisica: a T_ext >= 12°C in mezza stagione (Roma), i deficit lievi tendono
+    a recuperarsi spontaneamente per apporti interni e solari. Il guard evita
+    avvii di PDC per micro-domanda transitoria in primavera/autunno tardiva.
+    Disabilita il guard: impostare a 0.0 (mai soppresso) o a un valore molto alto."""
+
+    shoulder_heat_min_wmean_c: float = 0.30
+    """Soglia minima (°C) per heat_def_wmean sotto la quale il guard shoulder
+    sopprime heat_sensible. Se la media pesata del deficit e' sotto questa soglia
+    con T_ext >= shoulder_heat_suppress_t_ext_c, l'impianto non viene avviato.
+    Fisica: wmean bassa significa che solo una/poche zone sono fuori banda; con
+    T_ext alta il recupero spontaneo e' probabile. Default 0.30°C (ECO: ~85% del
+    deficit medio recuperato da apporti interni in ~30 min a 15°C outdoor)."""
+
     ctrl_aggr_by_profile: dict[HVACOperatingProfile, float] = field(
         default_factory=lambda: {
             HVACOperatingProfile.COMFORT: 1.00,
