@@ -120,6 +120,16 @@ class VmcPolicy:
         # DP control uses robust dp_dehum, fallback to dp_max
         dp_current = dp_dehum_c if dp_dehum_c is not None else dp_max_c
         need_dehum = self.need_dehumidification(dp_current, on_thr, off_thr)
+        # Gate fisico: need_dehum è necessario ma non sufficiente.
+        # La deumidifica è autorizzata solo se almeno una condizione fisica è vera.
+        # raw_req_dehum è intenzionalmente escluso dal gate: il dispositivo
+        # ha priorità di sicurezza autonoma e bypassa questo filtro.
+        need_dehum = need_dehum and self._dehum_condition_met(
+            snapshot=snapshot,
+            dp_max_c=dp_max_c,
+            cool_sur_max_c=cool_sur_max_c,
+            cool_cov=cool_cov,
+        )
 
         # Boost eligibility
         allow_heat = self.allow_heat_boost(snapshot, heat_def_max_c, heat_def_wmean_c, heat_cov)
@@ -207,6 +217,60 @@ class VmcPolicy:
         turn_on = cur > float(on_thr_c)
         self._state.dehum_on = bool(turn_on)
         return bool(turn_on)
+
+    def _dehum_condition_met(
+        self,
+        *,
+        snapshot: PlantSnapshot,
+        dp_max_c: Optional[float],
+        cool_sur_max_c: float,
+        cool_cov: float,
+    ) -> bool:
+        """Verifica se almeno una condizione fisica giustifica la deumidifica.
+
+        Condizione A — Cooling attivo o imminente.
+            Con soffitto fermo non esiste superficie fredda su cui formarsi
+            condensa: abbassare il DP in anticipo non protegge nulla.
+            Il gate si apre quando almeno una zona supera la comfort band in
+            raffrescamento (cool_sur_max > 0) oppure la copertura cooling e'
+            positiva (cool_cov > 0).
+
+        Condizione B — Disagio igienico assoluto (UR indoor max > soglia).
+            Indipendente dal cooling: UR > 67% causa disagio percepito
+            (ISO 7730) e favorisce muffe su superfici parzialmente fredde.
+            Soglia: VmcDehumConfig.rh_dehum_absolute_threshold_pct (67%).
+
+        Condizione C — Rischio condensa su superfici passive.
+            DP indoor > 16.5 degC: superfici a <=16 degC (vetri notturna,
+            evaporatori aperti) possono andare in condensa. Guardrail
+            pre-avvio estivo del cooling per attico romano con vetri moderni.
+            Soglia: VmcDehumConfig.dp_dehum_critical_threshold_c (16.5 degC).
+
+        Returns:
+            True se almeno una condizione e' soddisfatta, False altrimenti.
+            Il chiamante applica questo gate su need_dehum (post-isteresi DP).
+        """
+        # --- Condizione A: cooling attivo o imminente ---
+        if float(cool_sur_max_c) > 0.0 or float(cool_cov) > 0.0:
+            return True
+
+        # --- Condizione B: disagio igienico assoluto ---
+        rh_thr = float(getattr(self.cfg.dehum, "rh_dehum_absolute_threshold_pct", 67.0))
+        rh_max: Optional[float] = None
+        zones = getattr(snapshot, "indoor_zones", None) or {}
+        for z in zones.values():
+            rh_val = as_float(getattr(getattr(z, "humidity", None), "value", None))
+            if rh_val is not None:
+                rh_max = rh_val if rh_max is None else max(rh_max, rh_val)
+        if rh_max is not None and rh_max > rh_thr:
+            return True
+
+        # --- Condizione C: rischio condensa su superfici passive ---
+        dp_crit = float(getattr(self.cfg.dehum, "dp_dehum_critical_threshold_c", 16.5))
+        if dp_max_c is not None and float(dp_max_c) > dp_crit:
+            return True
+
+        return False
 
     def allow_free_cooling(
         self,

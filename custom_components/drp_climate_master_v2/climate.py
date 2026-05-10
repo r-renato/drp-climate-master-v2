@@ -21,7 +21,7 @@ from custom_components.drp_climate_master_v2.plant.monitor.plant import PlantSna
 
 from .controller.coordinator import ClimateCoordinator
 
-from .helpers.logger import log_info
+from .helpers.logger import log_info, log_warning
 
 from .helpers.utils import slugify
 
@@ -170,21 +170,63 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
     #     return self._supervisor.current_hvac_mode
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """Imposta la modalità HVAC e aggiorna immediatamente la UI."""
+        """
+        Riceve il cambio modalità HVAC dalla UI e lo propaga a coordinator e supervisor.
+        Lo stato viene aggiornato dal coordinator al prossimo tick: nessuna scrittura
+        ottimistica su _attr_hvac_mode.
+        """
+        if hvac_mode not in self.hvac_modes:
+            _LOGGER.warning(
+                "Modalità HVAC '%s' non supportata da questa entità, ignorata.",
+                hvac_mode,
+            )
+            return
+
         self.map_on_hvac_mode = hvac_mode
         self._attr_hvac_mode = hvac_mode
+
         self._coordinator.set_hvac_mode(hvac_mode)
         self._supervisor.set_hvac_mode(hvac_mode)
+        
         self.async_write_ha_state()
+        await self._coordinator.async_request_refresh()
+
+    # async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+    #     """Imposta la modalità HVAC e aggiorna immediatamente la UI."""
+    #     self.map_on_hvac_mode = hvac_mode
+    #     self._attr_hvac_mode = hvac_mode
+    #     self._coordinator.set_hvac_mode(hvac_mode)
+    #     self._supervisor.set_hvac_mode(hvac_mode)
+    #     self.async_write_ha_state()
     
-    def set_preset_mode(self, preset_mode: str) -> None:
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        """
+        Riceve il cambio preset dalla UI e lo propaga a coordinator e supervisor.
+        Non imposta _attr_preset_mode direttamente: lo stato viene aggiornato
+        dal coordinator al prossimo tick tramite async_write_ha_state().
+        """
+        profile = HVACOperatingProfile.from_value(preset_mode)
+        if profile is None:
+            log_warning(_LOGGER, "Preset '%s' non riconosciuto da HVACOperatingProfile, ignorato.", preset_mode)
+            return
+
         self._preset_mode = preset_mode
         self._attr_preset_mode = preset_mode
 
-        profile = HVACOperatingProfile.from_value(preset_mode)
-        if profile is not None:
-            self._coordinator.set_preset_mode( profile )
-            self._supervisor.set_preset_mode( profile )
+        self._coordinator.set_preset_mode(profile)
+        self._supervisor.set_preset_mode(profile)
+        
+        self.async_write_ha_state()
+        await self._coordinator.async_request_refresh()
+
+    # def set_preset_mode(self, preset_mode: str) -> None:
+    #     self._preset_mode = preset_mode
+    #     self._attr_preset_mode = preset_mode
+
+    #     profile = HVACOperatingProfile.from_value(preset_mode)
+    #     if profile is not None:
+    #         self._coordinator.set_preset_mode( profile )
+    #         self._supervisor.set_preset_mode( profile )
 
     @property
     def hvac_action(self) -> HVACAction:

@@ -6,7 +6,7 @@ import contextlib
 import json
 import logging
 from dataclasses import fields, replace
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from datetime import datetime, timezone
 
 # psychrolib non viene importato qui: SetUnitSystem(SI) è gestito a livello
@@ -513,3 +513,11 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def set_season_state(self, season_state: SeasonState) -> None:
         self._season_state = season_state
+
+    @property
+    def current_hvac_mode(self) -> Optional[HVACMode]:
+        return self._climate_hvac_mode
+
+    @property
+    def current_profile(self) -> Optional[HVACOperatingProfile]:
+        return self._climate_preset_mode

@@ -725,6 +725,27 @@ class VmcDehumConfig:
     water_on_for_dehumid: bool = False
     outdoor_dp_headroom_c: float = 0.2
 
+    # ------------------------------------------------------------------
+    # Soglie gate deumidifica (condizioni fisicamente motivate).
+    # Calibrate su: attico romano, vetri doppio/triplo, nessun ponte
+    # termico critico, VMC RER020i efficace in 1-2h.
+    # ------------------------------------------------------------------
+
+    rh_dehum_absolute_threshold_pct: float = 67.0
+    """Condizione B: soglia UR indoor max (%) oltre la quale la deumidifica
+    e' autorizzata indipendentemente dallo stato del cooling.
+    Fisica: UR > 67% causa disagio percepito (Fanger ISO 7730) e favorisce
+    muffe su superfici parzialmente fredde.
+    Default 67%: con VMC efficace in 1-2h garantisce ritorno sotto 63%."""
+
+    dp_dehum_critical_threshold_c: float = 16.5
+    """Condizione C: soglia DP indoor max (degC) oltre la quale la deumidifica
+    e' autorizzata come guardrail preventivo su superfici passive.
+    Fisica: DP > 16.5 degC -> superfici a <=16 degC (vetri notturna,
+    evaporatori aperti) possono andare in condensa. Per attico romano
+    e' anche il guardrail pre-avvio estivo del cooling.
+    Default 16.5 degC ~= UR 61% a 26 degC (coerente con soglia B)."""
+
     def rh_target_pct(self, season: Optional[str], profile: HVACOperatingProfile) -> float:
         """Resolve target RH (%) given season and operating profile."""
 

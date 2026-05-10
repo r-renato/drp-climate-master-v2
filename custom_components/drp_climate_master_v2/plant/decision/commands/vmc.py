@@ -43,7 +43,14 @@ class VmcCommandBuilder:
             v.debug.update({"reason": "plant_mode_off"})
             return
 
-        # IAQ_ONLY: ricambio aria minimo, nessun setpoint termico, nessun bypass.
+        # IAQ_ONLY: ricambio aria minimo, nessun trattamento attivo, nessun bypass.
+        # Tutti i setpoint (T, RH, DP, DeltaDP) vengono scritti con i valori calcolati
+        # dall'algoritmo corrente perche':
+        #   a) la VMC usa setpoint_t_c come soglia per decidere se intervenire
+        #      termicamente: un valore stale altera il comportamento autonomo del device;
+        #   b) la soglia Alarm Dew Point riflette le comfort band correnti;
+        #   c) alla transizione verso un modo attivo non c'e' finestra di inconsistenza
+        #      di un tick dovuta a setpoint stale sul device.
         if dec.mode == PlantMode.IAQ_ONLY:
             iaq_speed = int(
                 clamp(
@@ -59,13 +66,39 @@ class VmcCommandBuilder:
             else:
                 iaq_mode = getattr(snapshot.vmc, "processing_mode", None) or cfg.vmc.mode_winter
 
+            # Setpoint termico: t_ref_c con deadband applicata in base alla stagione,
+            # stessa logica del path normale: e' la soglia di intervento termico del device.
+            t_ref_c = float(dec.gating.vmc_t_ref_c)
+            dead = float(cfg.vmc.temp_neutral_deadband_c)
+            if iaq_mode == cfg.vmc.mode_winter:
+                iaq_t_sp_c = t_ref_c - dead
+            elif iaq_mode == cfg.vmc.mode_summer:
+                iaq_t_sp_c = t_ref_c + dead
+            else:
+                iaq_t_sp_c = t_ref_c
+            iaq_t_sp_c = float(clamp(iaq_t_sp_c, float(cfg.vmc.temp_min_c), float(cfg.vmc.temp_max_c)))
+
+            # Setpoint igrometrici: usa valori calcolati dall'algoritmo corrente,
+            # fallback a config se demand non ancora disponibile (degradazione).
+            iaq_dp_sp_c = (
+                demand.vmc_dp_sp_c
+                if demand.vmc_dp_sp_c is not None
+                else float(cfg.vmc.dehum.setpoint_dp_c)
+            )
+            iaq_ddp_c = (
+                demand.vmc_ddp_cmd_c
+                if demand.vmc_ddp_cmd_c is not None
+                else float(cfg.vmc.dehum.setpoint_ddp_c)
+            )
+            iaq_rh_pct = float(dec.gating.vmc_rh_target_pct)
+
             v.power = True
             v.mode = iaq_mode
             v.air_speed = iaq_speed
-            v.setpoint_t_c = None
-            v.setpoint_rh_pct = None
-            v.setpoint_dp_c = None
-            v.setpoint_ddp_c = None
+            v.setpoint_t_c = round(iaq_t_sp_c, 1)
+            v.setpoint_rh_pct = round(iaq_rh_pct, 0)
+            v.setpoint_dp_c = round(iaq_dp_sp_c, 1)
+            v.setpoint_ddp_c = int(round(iaq_ddp_c, 0))
             v.force_treatment_off = False
             v.enable_free_cooling = False
             v.force_free_cooling = False
@@ -73,6 +106,10 @@ class VmcCommandBuilder:
                 {
                     "reason": "iaq_only",
                     "iaq_speed": iaq_speed,
+                    "iaq_t_sp_c": round(iaq_t_sp_c, 1),
+                    "iaq_dp_sp_c": round(iaq_dp_sp_c, 1),
+                    "iaq_ddp_c": int(round(iaq_ddp_c, 0)),
+                    "iaq_rh_pct": round(iaq_rh_pct, 0),
                 }
             )
             return

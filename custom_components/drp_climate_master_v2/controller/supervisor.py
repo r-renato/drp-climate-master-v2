@@ -59,7 +59,7 @@ import asyncio
 import contextlib
 import functools
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Callable, Optional
 
@@ -88,11 +88,42 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class _State:
-    """Stato corrente (esposto a ClimateEntity)."""
+    """
+    Stato corrente esposto a ClimateEntity.
+    I setter centralizzano validazione e rendono espliciti i contratti
+    sui valori ammessi per ciascun campo.
+    """
+    _hvac_mode: HVACMode = field(default=HVACMode.OFF)
+    _hvac_action: HVACAction = field(default=HVACAction.IDLE)
+    _hvac_profile: HVACOperatingProfile | None = field(default=None)
 
-    hvac_mode: HVACMode = HVACMode.AUTO
-    hvac_action: HVACAction = HVACAction.IDLE
-    hvac_profile: Optional[HVACOperatingProfile] = None
+    @property
+    def hvac_mode(self) -> HVACMode:
+        return self._hvac_mode
+
+    @hvac_mode.setter
+    def hvac_mode(self, value: HVACMode) -> None:
+        if not isinstance(value, HVACMode):
+            raise TypeError(f"hvac_mode deve essere HVACMode, ricevuto {type(value)}")
+        self._hvac_mode = value
+
+    @property
+    def hvac_action(self) -> HVACAction:
+        return self._hvac_action
+
+    @hvac_action.setter
+    def hvac_action(self, value: HVACAction) -> None:
+        if not isinstance(value, HVACAction):
+            raise TypeError(f"hvac_action deve essere HVACAction, ricevuto {type(value)}")
+        self._hvac_action = value
+
+    @property
+    def hvac_profile(self) -> HVACOperatingProfile | None:
+        return self._hvac_profile
+
+    @hvac_profile.setter
+    def hvac_profile(self, value: HVACOperatingProfile | None) -> None:
+        self._hvac_profile = value
 
 
 class ClimateSupervisor(IntervalGatedSchedulerBase):
@@ -129,10 +160,7 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
         self._unit_system = coordinator.unit_system
         self._instance_id: str = f"{id(self):x}"
 
-        self.state = _State(
-            hvac_mode=HVACMode.OFF,
-            hvac_action=HVACAction.IDLE,
-        )
+        self._state = _State()
 
         self._plant_decision_planner: PlantDecisionPlanner = PlantDecisionPlanner()
         
@@ -179,25 +207,25 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
 
     @property
     def current_hvac_mode(self) -> HVACMode:
-        return self.state.hvac_mode
+        return self._state.hvac_mode
 
     @property
     def current_hvac_action(self) -> HVACAction:
-        return self.state.hvac_action
+        return self._state.hvac_action
 
     @property
     def current_profile(self) -> Optional[HVACOperatingProfile]:
-        return self.state.hvac_profile
+        return self._state.hvac_profile
 
     @property
     def last_plant_decision(self) -> PlantDecision | None:
         return self._last_plant_decision
 
     def set_preset_mode(self, preset_mode: HVACOperatingProfile) -> None:
-        self.state.hvac_profile = preset_mode
+        self._state.hvac_profile = preset_mode
 
     def set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        self.state.hvac_mode = hvac_mode
+        self._state.hvac_mode = hvac_mode
 
     # -----------------------------
     # HA lifecycle
@@ -217,6 +245,12 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
         """
         if self._stop_event.is_set():
             return
+
+        # Allinea _state con il coordinator all'avvio
+        if self._coordinator.current_hvac_mode is not None:
+            self._state.hvac_mode = self._coordinator.current_hvac_mode
+        if self._coordinator.current_profile is not None:
+            self._state.hvac_profile = self._coordinator.current_profile
 
         if self._unsub_coordinator is None:
             self._unsub_coordinator = self._coordinator.async_add_listener(self._on_coordinator_update)
@@ -326,7 +360,7 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                         if self.current_hvac_mode == HVACMode.AUTO:
                             await self._plant_actuator.async_apply(snapshot=snap, decision=self._last_plant_decision)
                         else:
-                            self.state.hvac_action = HVACAction.IDLE
+                            self._state.hvac_action = HVACAction.IDLE
 
                         # dash = build_dashboard(snap, self._last_zones_decision, self._last_plant_decision)
                         # log_debug(_LOGGER, "\n%s", render_dashboard_text(dash))
@@ -351,6 +385,6 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
 
             # Expose to UI
             if getattr(plan, "any_heat_demand", False):
-                self.state.hvac_action = HVACAction.HEATING
+                self._state.hvac_action = HVACAction.HEATING
 
             # TODO: qui puoi aggiornare hvac_mode / profile quando li colleghi a plan/state machine

@@ -10,7 +10,7 @@ from ..domain.models.runtime_schema import VMCConfig
 from ..helpers.builders.config_entries import RuntimeConfig
 from ..helpers.formatter import fbool
 from ..helpers.ha import log_warning, set_entity_bool, set_entity_number, set_entity_select
-from ..helpers.logger import log_info
+from ..helpers.logger import log_debug, log_info
 
 from .vmc import ControlledMechanicalVentilationDevice
 
@@ -62,9 +62,12 @@ class EnerenRER020I(ControlledMechanicalVentilationDevice):
 
     async def async_set_dew_point(self, target: float | None = None) -> None:
         if target is not None and self._vmc is not None and self._vmc.t_dew_point_setpoint is not None:
-            changed = await set_entity_number(hass=self._hass, entity_id=self._vmc.t_dew_point_setpoint, value=target, tol=1)
+            log_debug(_LOGGER, f"target={target} t_dew_point_setpoint={self._vmc.t_dew_point_setpoint}")
+            changed = await set_entity_number(hass=self._hass, entity_id=self._vmc.t_dew_point_setpoint, value=target, tol=0.1)
             if changed:
                 log_info(_LOGGER, "Dew Point set to %.1f", target)
+        elif _LOGGER.isEnabledFor(logging.DEBUG) and self._vmc is not None:
+            log_warning(_LOGGER, f"target={target} t_dew_point_setpoint={self._vmc.t_dew_point_setpoint}")
 
     async def async_set_delta_dew_point(self, target: int | None = None) -> None:
         if target is not None and self._vmc is not None and self._vmc.delta_t_dew_point_setpoint is not None:
