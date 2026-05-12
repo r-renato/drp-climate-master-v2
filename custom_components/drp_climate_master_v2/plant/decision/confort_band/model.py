@@ -146,6 +146,34 @@ class PolicyContext:
     ``config.T_RM_SKIP_PROFILES``).
     """
 
+    season_progress: Optional[float] = None
+    """Progresso stagionale corrente in percentuale [0..100] (S4).
+
+    Estratto da ``SeasonState.progress`` e propagato fino alla policy per
+    abilitare l'interpolazione CLO shoulder -> summer/winter (Strategia S4).
+
+    - ``None``: progresso non disponibile (season_state assente o in fault)
+      -> la policy usa il CLO base shoulder invariato (fail-safe).
+    - ``float`` in [0..100]: valore percentuale; 0 = primo giorno della
+      stagione, 100 = ultimo giorno.
+
+    Nota: ``SeasonState.progress`` restituisce valori in [0..100] (scala %),
+    NON [0..1]. Il docstring di ``SeasonState.progress`` indica erroneamente
+    [0, 1] - è un bug di documentazione nel modello di dominio.
+    """
+
+    shoulder_direction: Optional[str] = None
+    """Direzione della transizione shoulder per l'interpolazione CLO (S4).
+
+    Valori attesi: ``"spring"`` (shoulder di primavera, CLO -> estate) oppure
+    ``"autumn"`` (shoulder d'autunno, CLO -> inverno). ``None`` se la stagione
+    non è shoulder o il dato non è disponibile.
+
+    Estratto da ``SeasonState.season.value`` (``Seasons.SPRING`` /
+    ``Seasons.AUTUMN``) nel builder e propagato qui per evitare che la policy
+    debba risalire all'enum ``Seasons`` (che non è importato in questo modulo).
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class PolicyDecision:

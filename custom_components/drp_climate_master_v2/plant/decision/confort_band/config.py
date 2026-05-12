@@ -406,6 +406,39 @@ Valori utili: 0.25 (variazione debole) … 0.60 (variazione forte).
 ma non raggiungono il livello pieno invernale in una giornata transitoria.
 """
 
+# --- S4: interpolazione CLO shoulder -> summer/winter con progresso stagionale ---
+CLO_SHOULDER_RAMP_ENABLED: bool = False
+"""Abilita l'interpolazione progressiva del CLO base in stagione shoulder (S4).
+
+Se True, il CLO shoulder non è più fisso a ``CLO_BASE_SHOULDER`` per tutta la
+stagione: viene interpolato linearmente verso il valore target (estate o inverno)
+man mano che il progresso stagionale supera ``CLO_SHOULDER_RAMP_START``.
+
+Disabilitare per tornare al comportamento pre-S4 (CLO fisso per tutta la shoulder).
+"""
+
+CLO_SHOULDER_RAMP_START: float = 50.0
+"""Progresso stagionale (%) oltre il quale inizia la rampa CLO shoulder (S4).
+
+Sotto questa soglia il CLO rimane al valore base shoulder invariato.
+Sopra questa soglia il CLO scala linearmente verso il target stagionale:
+  - spring shoulder -> CLO_BASE_SUMMER  (le persone si vestono sempre più leggero)
+  - autumn shoulder -> CLO invernale per zona climatica (sempre più pesante)
+
+La rampa è lineare tra (ramp_start, CLO_base) e (100%, CLO_target):
+
+    blend = max(0, (progress - ramp_start) / (100 - ramp_start))
+    clo_eff = CLO_base + blend * (CLO_target - CLO_base)
+
+Esempio spring, progress=77.2%, ramp_start=50%:
+    blend = (77.2-50)/(100-50) = 0.544
+    clo_eff = 0.82 + 0.544*(0.50-0.82) = 0.646 clo
+
+Fisica: a metà stagione (progress=50%) l'abbigliamento è ancora da mezza stagione.
+Oltre il 50% la transizione verso l'estate/inverno è percepibile nel vestiario.
+Default 50.0%: calibrato su clima mediterraneo (Roma, zona D).
+"""
+
 
 # =============================================================================
 # SEZIONE D — Metabolismo (MET): overrides per profilo operativo

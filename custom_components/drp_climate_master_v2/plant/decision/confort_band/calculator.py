@@ -612,6 +612,8 @@ class ComfortBandCalculator:
         humidity_solve_mode: HumiditySolveMode | str | None = None,
         cold_snap: bool = False,
         t_op_rm_by_zone: Mapping[str, float] | None = None,
+        season_progress: float | None = None,
+        shoulder_direction: str | None = None,
     ) -> Dict[str, ComfortBandResult]:
         """Calcola la comfort band per più zone.
 
@@ -687,6 +689,8 @@ class ComfortBandCalculator:
                 mode=mode,
                 cold_snap=bool(cold_snap),
                 t_op_running_mean=t_rm,
+                season_progress=season_progress,
+                shoulder_direction=shoulder_direction,
             )
             decision: PolicyDecision = policy_layer.decide(ctx)
 

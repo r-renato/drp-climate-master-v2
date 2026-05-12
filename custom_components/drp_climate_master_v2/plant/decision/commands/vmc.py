@@ -81,8 +81,8 @@ class VmcCommandBuilder:
             # Setpoint igrometrici: usa valori calcolati dall'algoritmo corrente,
             # fallback a config se demand non ancora disponibile (degradazione).
             iaq_dp_sp_c = (
-                demand.dp_max_c
-                if demand.dp_max_c is not None
+                demand.vmc_dehum_on_thr_c
+                if demand.vmc_dehum_on_thr_c is not None
                 else float(cfg.vmc.dehum.setpoint_dp_c)
             )
             iaq_ddp_c = (
@@ -179,7 +179,7 @@ class VmcCommandBuilder:
         rh_target_pct = float(getattr(dec.gating, "vmc_rh_target_pct", 50.0))
 
         dp_sp_c = float(
-            getattr(demand, "dp_max_c", None)
+            getattr(demand, "vmc_dehum_on_thr_c", None)
             or cfg.vmc.dehum.setpoint_dp_c
         )
         ddp_sp_c = float(getattr(demand, "vmc_ddp_cmd_c", None) or cfg.vmc.dehum.setpoint_ddp_c)

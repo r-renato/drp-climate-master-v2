@@ -83,6 +83,22 @@ def build_confort_zones(
 
     cold_snap: bool = bool(getattr(season_state, "weather_cold_snap", False))
 
+    # S4 - Progresso stagionale e direzione shoulder per interpolazione CLO.
+    # season_state.progress restituisce [0..100] (scala %, non 0-1).
+    # shoulder_direction: "spring" o "autumn" estratto da Seasons.value.
+    _season_progress: float | None = None
+    _shoulder_direction: str | None = None
+    _raw_season = getattr(season_state, "season", None)
+    _season_val: str = str(getattr(_raw_season, "value", _raw_season or "")).lower()
+    if _season_val in ("spring", "autumn"):
+        _raw_progress = getattr(season_state, "progress", None)
+        if _raw_progress is not None:
+            try:
+                _season_progress = float(_raw_progress)
+            except (TypeError, ValueError):
+                pass
+        _shoulder_direction = _season_val
+
     bands = calculator.compute_many(
         now=(now or datetime.now(timezone.utc)),
         season=season_state.season,
@@ -95,6 +111,8 @@ def build_confort_zones(
         include_global=True,
         cold_snap=cold_snap,
         t_op_rm_by_zone=t_op_rm_by_zone,
+        season_progress=_season_progress,
+        shoulder_direction=_shoulder_direction,
         # humidity_solve_mode=None,        # None = usa la policy (estate/inverno PA_CONST; shoulder AUTO)
         # humidity_solve_mode="rh_const",  # override forzato per commissioning
     )

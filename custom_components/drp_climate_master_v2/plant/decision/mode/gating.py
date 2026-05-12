@@ -528,6 +528,34 @@ def compute_gating(
             heat_sensible = False
             shoulder_heat_suppressed = True
 
+    # -- Fase 2c: Guard shoulder DINAMICO (soglia wmean progressiva con T_ext) ----
+    # A T_ext crescente verso la soglia estiva, anche deficit wmean > 0.30°C non
+    # giustificano l'avvio della PDC: la dispersione termica verso l'esterno
+    # diminuisce e gli apporti solari compensano spontaneamente il deficit.
+    # La soglia wmean scala linearmente tra:
+    #   (t_ext_lo, wmean_lo) -> (t_ext_hi, wmean_hi)
+    # dove t_ext_lo/wmean_lo sono gli stessi della Fase 2b (base), e
+    # t_ext_hi/wmean_hi sono i nuovi parametri di ancoraggio superiore.
+    #
+    # Esempio Roma, fine maggio (T_ext=21.7°C, t_ext_lo=12°C, t_ext_hi=20°C):
+    #   alpha = clamp((21.7-12)/(20-12), 0, 1) = 1.0
+    #   soglia_dinamica = 0.30 + 1.0*(1.00-0.30) = 1.00°C
+    #   wmean=0.9°C < 1.00°C -> heat_sensible soppresso: PDC non avviata
+    # Esempio Roma, inizio primavera (T_ext=14°C):
+    #   alpha = clamp((14-12)/(20-12), 0, 1) = 0.25
+    #   soglia_dinamica = 0.30 + 0.25*0.70 = 0.475°C
+    #   wmean=0.9°C > 0.475°C -> NOT soppresso: il freddo è reale
+    # Nota: Fase 2c è no-op se t_ext < t_ext_lo (stesso gate della Fase 2b).
+    if bool(heat_sensible) and t_ext is not None and t_ext >= _suppress_t_ext:
+        _t_ext_hi = float(getattr(cfg.gating, "shoulder_heat_suppress_t_ext_hi_c", 20.0))
+        _wmean_hi = float(getattr(cfg.gating, "shoulder_heat_min_wmean_hi_c", 1.00))
+        if _t_ext_hi > _suppress_t_ext:
+            alpha = min(1.0, max(0.0, (float(t_ext) - _suppress_t_ext) / (_t_ext_hi - _suppress_t_ext)))
+            _dynamic_wmean_thr = _suppress_wmean + alpha * (_wmean_hi - _suppress_wmean)
+            if heat_def_wmean < _dynamic_wmean_thr:
+                heat_sensible = False
+                shoulder_heat_suppressed = True
+
     # -- Fase 3: KPI MPC zona (lettura passiva) -----------------------------
     # Propagati nel GatingResult per diagnostica e per PdcCommandBuilder
     # (activity_scale sul feedback WOT). Nessuna logica decisionale qui.

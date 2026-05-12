@@ -41,6 +41,9 @@ from .config import (
     CLO_CAP_SLEEP,
     CLO_CAP_DEFAULT,
     COLD_SNAP_CLO_FRACTION,
+    # S4: interpolazione CLO shoulder con progresso stagionale
+    CLO_SHOULDER_RAMP_ENABLED,
+    CLO_SHOULDER_RAMP_START,
     # Tabella CLO per zona climatica
     CLO_WINTER_BY_ZONE,
     # MET per profilo
@@ -298,6 +301,42 @@ class ComfortPolicyLayer:
                     clo_winter = float(self._cfg.default_clo_winter)
                 clo = clo + COLD_SNAP_CLO_FRACTION * (clo_winter - clo)
                 reasons.append(f"clo:cold_snap:interp={clo:.2f}")
+
+            # S4 - Interpolazione progressiva CLO shoulder -> target stagionale.
+            # Attiva solo se abilitata in config e il progresso è disponibile.
+            # spring -> CLO_BASE_SUMMER (meno vestiti verso estate)
+            # autumn -> CLO invernale per zona climatica (più vestiti verso inverno)
+            # La rampa inizia a CLO_SHOULDER_RAMP_START% e arriva a target al 100%.
+            # Applicata DOPO cold_snap: il cold_snap è una correzione giornaliera
+            # rispetto al base, S4 corregge il base stesso su scala stagionale.
+            if CLO_SHOULDER_RAMP_ENABLED and ctx.season_progress is not None and ctx.shoulder_direction is not None:
+                _ramp_start = float(CLO_SHOULDER_RAMP_START)
+                _progress = float(ctx.season_progress)
+                if _progress > _ramp_start:
+                    blend = (_progress - _ramp_start) / (100.0 - _ramp_start)
+                    blend = max(0.0, min(1.0, blend))
+                    if ctx.shoulder_direction == "spring":
+                        _clo_target = float(self._cfg.base_clo_summer)
+                    else:
+                        # autumn -> inverno
+                        if self._cfg.climate_zone and self._cfg.zone_clo_delta_enabled:
+                            _clo_target = float(CLO_WINTER_BY_ZONE.get(self._cfg.climate_zone, self._cfg.default_clo_winter))
+                        else:
+                            _clo_target = float(self._cfg.default_clo_winter)
+                    clo_s4 = float(self._cfg.base_clo_shoulder) + blend * (_clo_target - float(self._cfg.base_clo_shoulder))
+                    # cold_snap preservato: S4 agisce sul base, il delta cold_snap
+                    # viene ricalcolato sulla nuova base interpolata.
+                    if ctx.cold_snap:
+                        clo = clo_s4 + COLD_SNAP_CLO_FRACTION * (_clo_target - clo_s4)
+                    else:
+                        clo = clo_s4
+                    reasons.append(
+                        f"clo:s4:{ctx.shoulder_direction}"
+                        f":progress={_progress:.1f}%"
+                        f":blend={blend:.3f}"
+                        f":target={_clo_target:.2f}"
+                        f" -> {clo:.3f}"
+                    )
         else:
             # Inverno: usa la tabella per zona climatica se abilitata
             if self._cfg.climate_zone and self._cfg.zone_clo_delta_enabled:

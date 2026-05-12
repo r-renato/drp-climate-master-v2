@@ -153,6 +153,22 @@ class DemandGatingConfig:
     T_ext alta il recupero spontaneo e' probabile. Default 0.30°C (ECO: ~85% del
     deficit medio recuperato da apporti interni in ~30 min a 15°C outdoor)."""
 
+    shoulder_heat_suppress_t_ext_hi_c: float = 20.0
+    """T_ext (°C) di ancoraggio superiore per la soglia wmean dinamica.
+    A T_ext >= questo valore la soglia wmean raggiunge il massimo
+    ``shoulder_heat_min_wmean_hi_c``. Fisica: sopra 20°C (tarda primavera
+    mediterranea) anche deficit wmean > 0.5°C si recuperano senza PDC grazie
+    agli apporti solari diffusi e alla dispersione quasi nulla verso l'esterno.
+    Disabilita la modulazione dinamica: impostare uguale a
+    ``shoulder_heat_suppress_t_ext_c`` (0.0 per disabilitare il guard stesso)."""
+
+    shoulder_heat_min_wmean_hi_c: float = 1.00
+    """Soglia wmean (°C) al punto di ancoraggio superiore T_ext_hi.
+    A T_ext >= shoulder_heat_suppress_t_ext_hi_c il guard sopprime riscaldamento
+    a meno che la media pesata del deficit non superi questo valore.
+    Default 1.00°C: a T_ext=22°C (fine maggio Roma) un deficit wmean < 1°C
+    si recupera tipicamente in 20-40 min senza avviare la PDC."""
+
     ctrl_aggr_by_profile: dict[HVACOperatingProfile, float] = field(
         default_factory=lambda: {
             HVACOperatingProfile.COMFORT: 1.00,
