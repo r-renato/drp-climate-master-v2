@@ -190,6 +190,16 @@ class PlantDecisionPlanner:
         # I risultati sono scritti flat su demand per compatibilità logging.
         # DemandSignalsBuilder rimane osservazione-only; la logica VMC è separata.
         self._enrich_vmc_signals(snapshot, demand)
+        log_debug(
+            _LOGGER,
+            "VMC DP sp (cmd): %.1f °C | dehum ON: %.1f °C | dehum OFF: %.1f °C"
+            " | radiant_active: %s | req_dehum: %s",
+            demand.vmc_dp_sp_c,
+            demand.vmc_dehum_on_thr_c,
+            demand.vmc_dehum_off_thr_c,
+            demand.vmc_radiant_cooling_active,
+            demand.vmc_req_dehumidif,
+        )
 
         # ── FASE 5 ─ Piano zone MPC-lite e risoluzione modo impianto ──────────
         # ZonesMpcProvider produce il piano zone (opzionale, può restituire None).
@@ -332,6 +342,17 @@ class PlantDecisionPlanner:
             default=HVACOperatingProfile.COMFORT,
         ) or HVACOperatingProfile.COMFORT
 
+        # Contesto radiante: True se la pompa miscelatrice è fisicamente on
+        # (adjustable_su_power_on) OPPURE esiste domanda cooling attiva.
+        # Usato da VmcPolicy per scegliere il profilo soglie DP (protettivo vs permissivo).
+        _su = getattr(snapshot, "supply_unit", None)
+        radiant_phy_on = bool(getattr(_su, "adjustable_su_power_on", False) or False)
+        radiant_demanded = (
+            float(demand.cool_sur_max_c) > 0.0
+            or float(demand.cool_cov) > 0.0
+        )
+        radiant_cooling_active = radiant_phy_on or radiant_demanded
+
         vmc_dem = self._vmc_policy.compute(
             snapshot=snapshot,
             profile=profile,
@@ -346,6 +367,7 @@ class PlantDecisionPlanner:
             outdoor_dp_c=getattr(demand, "outdoor_dp_c", None),
             free_cool_feasible=bool(getattr(demand, "free_cool_feasible", False)),
             free_heat_feasible=bool(getattr(demand, "free_heat_feasible", False)),
+            radiant_cooling_active=bool(radiant_cooling_active),
         )
 
         # PlantDemandSignals stores VMC policy outputs flat for logging/backward-compat.
@@ -364,3 +386,5 @@ class PlantDecisionPlanner:
         # Propagati per VmcCommandBuilder (evita risalita a VmcPolicy in F7).
         demand.vmc_t_ref_c = float(vmc_dem.t_ref_c)
         demand.vmc_rh_target_pct = float(vmc_dem.rh_target_pct)
+        # Contesto radiante: per dashboard e diagnostica.
+        demand.vmc_radiant_cooling_active = bool(vmc_dem.radiant_cooling_active)

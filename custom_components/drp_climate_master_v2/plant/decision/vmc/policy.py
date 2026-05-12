@@ -41,6 +41,10 @@ class VmcDemand:
     t_ref_c: float
     raw_req_dehumidif: bool
 
+    # Contesto radiante (True se cooling fisicamente attivo o in domanda).
+    # Calibra le soglie DP verso il profilo passivo quando il radiante è fermo.
+    radiant_cooling_active: bool = False
+
 
 class VmcPolicy:
     """VMC policy domain.
@@ -79,6 +83,7 @@ class VmcPolicy:
         outdoor_dp_c: Optional[float],
         free_cool_feasible: bool = False,
         free_heat_feasible: bool = False,
+        radiant_cooling_active: bool = False,
     ) -> VmcDemand:
         operative = self.infer_operative_bucket(snapshot)
 
@@ -98,9 +103,26 @@ class VmcPolicy:
         else:
             # Quantize UP to avoid triggering dehumidification earlier than intended.
             ddp_cmd = step * math.ceil(ddp_policy / step - 1e-12)
-        # Adjust commanded DP setpoint so that dp_sp_cmd + ddp_cmd ~= dp_sp_raw + ddp_policy
-        dp_sp_cmd_c = float(dp_sp_raw_c) + float(ddp_policy) - float(ddp_cmd)
-        dp_sp_cmd_c = float(clamp(dp_sp_cmd_c, float(self.cfg.dehum.dp_sp_min_c), float(self.cfg.dehum.dp_sp_max_c)))
+
+        # Setpoint DP contestuale al radiante.
+        #
+        # Quando il radiante è ATTIVO (cooling fisico o in domanda): usa il target
+        # psicrometrico (da RH% comfort), calibrato per proteggere le superfici fredde.
+        #
+        # Quando il radiante è INATTIVO: non esistono superfici fredde, quindi il rischio
+        # di condensa è nullo. Il setpoint passivo (dp_sp_max_c = 15.0°C) porta la soglia
+        # ON a ~16.0°C, ben sopra il DP primaverile romano tipico (14-15°C).
+        # Questo elimina l'allarme falso su dashboard e device senza alterare la logica
+        # di protezione quando il cooling è davvero in corso.
+        # Il valore psicrometrico rimane in dp_sp_raw_c per diagnostica.
+        if radiant_cooling_active:
+            # Caso attivo: protezione condensazione -> soglia da RH target
+            dp_sp_cmd_c = float(dp_sp_raw_c) + float(ddp_policy) - float(ddp_cmd)
+            dp_sp_cmd_c = float(clamp(dp_sp_cmd_c, float(self.cfg.dehum.dp_sp_min_c), float(self.cfg.dehum.dp_sp_max_c)))
+        else:
+            # Caso passivo: nessuna superficie fredda -> soglia permissiva
+            dp_sp_cmd_c = float(self.cfg.dehum.dp_sp_max_c)
+
         hyst = max(0.0, float(self.cfg.dehum.hysteresis_c))
         on_thr = float(dp_sp_cmd_c) + float(ddp_cmd)
         off_thr = float(on_thr) - hyst
@@ -166,6 +188,7 @@ class VmcPolicy:
             rh_target_pct=float(rh_target_pct),
             t_ref_c=float(t_ref_c),
             raw_req_dehumidif=bool(raw_req_dehum),
+            radiant_cooling_active=bool(radiant_cooling_active),
         )
 
     # -----------------

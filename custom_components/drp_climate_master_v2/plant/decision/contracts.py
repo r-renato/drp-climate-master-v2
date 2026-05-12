@@ -451,6 +451,20 @@ class PlantDemandSignals:
         },
     )
 
+    vmc_radiant_cooling_active: bool = field(
+        default=False,
+        metadata={
+            "doc": (
+                "True se il radiante cooling è fisicamente attivo (pompa miscelatrice on)"
+                " oppure in domanda (cool_sur_max>0 o cool_cov>0). "
+                "Determina se le soglie DP VMC usano il profilo protettivo (radiante on)"
+                " o permissivo (radiante off, nessun rischio condensa su superfici)."
+            ),
+            "unit": "bool",
+            "source": "VmcPolicy",
+        },
+    )
+
     vmc_t_ref_c: float = field(
         default=22.0,
         metadata={
@@ -583,6 +597,7 @@ class PlantDemandSignals:
         emit(lines, "VMC DP sp (raw)", "vmc_dp_sp_raw_c", f"{fnum(self.vmc_dp_sp_raw_c)} °C")
         emit(lines, "VMC dehum ON", "vmc_dehum_on_thr_c", f"{fnum(self.vmc_dehum_on_thr_c)} °C")
         emit(lines, "VMC dehum OFF", "vmc_dehum_off_thr_c", f"{fnum(self.vmc_dehum_off_thr_c)} °C")
+        emit(lines, "VMC radiant active", "vmc_radiant_cooling_active", fbool(self.vmc_radiant_cooling_active, "True", "False"))
 
         # -------------------------
         # Cluster: VMC requests

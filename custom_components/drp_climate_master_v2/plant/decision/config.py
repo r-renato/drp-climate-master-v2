@@ -712,8 +712,8 @@ class VmcDehumConfig:
         }
     )
 
-    setpoint_dp_c: float = 12.0
-    setpoint_ddp_c: float = 0.3
+    setpoint_dp_c: float = 16.0
+    setpoint_ddp_c: float = 1.0
     ddp_device_step_c: float = 1.0
     hysteresis_c: float = 0.2
 
