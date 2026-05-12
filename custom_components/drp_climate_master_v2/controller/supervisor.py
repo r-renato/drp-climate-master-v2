@@ -70,7 +70,7 @@ from homeassistant.core import HomeAssistant, Event, callback
 from ..plant.control.actuator import PlantActuator
 from ..plant.decision.zone.model import ZonesDecision
 
-from ..plant.decision.contracts import PlantDecision
+from ..plant.decision.contracts import PlantDecision, PlantMode
 from ..plant.decision.planner import PlantDecisionPlanner
 from ..plant.decision.context import DecisionDerivedInputs
 
@@ -359,8 +359,19 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
 
                         if self.current_hvac_mode == HVACMode.AUTO:
                             await self._plant_actuator.async_apply(snapshot=snap, decision=self._last_plant_decision)
+
+                            if self._last_plant_decision.mode == PlantMode.IAQ_ONLY or self._last_plant_decision.mode == PlantMode.VENT_ONLY:
+                                self._state.hvac_action = HVACAction.FAN
+                            elif self._last_plant_decision.mode == PlantMode.HEATING:
+                                self._state.hvac_action = HVACAction.HEATING
+                            elif self._last_plant_decision.mode == PlantMode.COOLING:
+                                self._state.hvac_action = HVACAction.COOLING
+                            elif self._last_plant_decision.mode == PlantMode.DEHUM_ASSIST:
+                                self._state.hvac_action = HVACAction.DRYING
+                            elif self._last_plant_decision.mode == PlantMode.OFF:
+                                self._state.hvac_action = HVACAction.OFF
                         else:
-                            self._state.hvac_action = HVACAction.IDLE
+                            self._state.hvac_action = HVACAction.OFF
 
                         # dash = build_dashboard(snap, self._last_zones_decision, self._last_plant_decision)
                         # log_debug(_LOGGER, "\n%s", render_dashboard_text(dash))

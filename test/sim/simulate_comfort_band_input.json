@@ -1,5 +1,5 @@
 {
-  "_comment": "Input di simulazione per simulate_confort_band.py — versione 2.0.",
+  "_comment": "Input di simulazione per simulate_comfort_band.py — versione 2.0.",
   "_version": "2.0",
   "_t_op_stagionali": {
     "_note": "T_op realistiche zona D (Roma) con impianto radiante a soffitto attivo.",

@@ -14,12 +14,12 @@ from ...plant.monitor.plant import PlantSnapshot
 from ...domain.enums import HVACOperatingProfile
 
 from .zone.model import ZonesDecision
-from .confort_band.builder import build_confort_zones
-from .confort_band.policy_layer import ComfortPolicyLayer, ConfortPolicyConfig
-from .confort_band.mpc.provider import ZonesMpcProvider
+from .comfort_band.builder import build_confort_zones
+from .comfort_band.policy_layer import ComfortPolicyLayer, ConfortPolicyConfig
+from .comfort_band.mpc.provider import ZonesMpcProvider
 from .zone.planner import ZoneDecisionPlanner
-from .confort_band.trm import ZoneTrmTracker
-from .confort_band.config import (
+from .comfort_band.trm import ZoneTrmTracker
+from .comfort_band.config import (
     T_RM_TAU_HOURS,
     T_RM_WARMUP_TICKS,
     T_RM_CLAMP_MIN,

@@ -16,8 +16,8 @@ from ....domain.enums import HVACOperatingProfile
 from .model import ZoneCommand, ZonesDecision
 from .config import ControlConfig, MpcConfig
 from ..config import DemandGatingConfig
-from ..confort_band.mpc.rc_model import RcZoneModel
-from ..confort_band.model import ComfortBandResult
+from ..comfort_band.mpc.rc_model import RcZoneModel
+from ..comfort_band.model import ComfortBandResult
 
 def _binary_sequences(n: int) -> Iterable[list[int]]:
     """Generate all binary sequences of length n (as lists of 0/1)."""
@@ -188,7 +188,7 @@ class ZoneDecisionPlanner:
         all_in_band = True
         for zn in plan.zones.keys():
             z = (snapshot.indoor_zones or {}).get(zn)
-            band = (comfort_bands_by_zone or {}).get(zn) if comfort_bands_by_zone is not None else (getattr(z, "confort_band", None) if z else None)
+            band = (comfort_bands_by_zone or {}).get(zn) if comfort_bands_by_zone is not None else (getattr(z, "comfort_band", None) if z else None)
             ok = getattr(band, "ok", None) if band is not None else None
             if ok is not True:
                 all_in_band = False
@@ -320,7 +320,7 @@ class ZoneDecisionPlanner:
             return None
 
         # Comfort band bounds
-        band = (comfort_bands_by_zone or {}).get(zone_key) if comfort_bands_by_zone is not None else getattr(zone, "confort_band", None)
+        band = (comfort_bands_by_zone or {}).get(zone_key) if comfort_bands_by_zone is not None else getattr(zone, "comfort_band", None)
         t_min = as_float(getattr(band, "t_op_min", None))
         t_max = as_float(getattr(band, "t_op_max", None))
         if t_min is None or t_max is None:

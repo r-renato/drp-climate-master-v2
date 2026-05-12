@@ -222,7 +222,7 @@ class DemandSignalsBuilder:
             if t_meas is None:
                 t_meas = as_float(getattr(getattr(z, "temperature", None), "value", None))
 
-            band = (comfort_bands_by_zone or {}).get(zone_key) if comfort_bands_by_zone is not None else getattr(z, "confort_band", None)
+            band = (comfort_bands_by_zone or {}).get(zone_key) if comfort_bands_by_zone is not None else getattr(z, "comfort_band", None)
             t_min = as_float(getattr(band, "t_op_min", None))
             t_max = as_float(getattr(band, "t_op_max", None))
 

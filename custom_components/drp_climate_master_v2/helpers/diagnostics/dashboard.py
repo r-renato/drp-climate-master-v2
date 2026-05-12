@@ -58,11 +58,11 @@ def build_dashboard(
         rh = as_float(getattr(getattr(z, "humidity", None), "value", None))
         dp = as_float(getattr(getattr(z, "dew_point", None), "value", None))
         t_op = as_float(getattr(getattr(z, "t_op", None), "value", None))
-        pmv = as_float(getattr(getattr(z, "confort_band", None), "pmv", None))
-        ppd = as_float(getattr(getattr(z, "confort_band", None), "ppd", None))
-        ok = getattr(getattr(z, "confort_band", None), "ok", None)
-        t_min = as_float(getattr(getattr(z, "confort_band", None), "t_op_min", None))
-        t_max = as_float(getattr(getattr(z, "confort_band", None), "t_op_max", None))
+        pmv = as_float(getattr(getattr(z, "comfort_band", None), "pmv", None))
+        ppd = as_float(getattr(getattr(z, "comfort_band", None), "ppd", None))
+        ok = getattr(getattr(z, "comfort_band", None), "ok", None)
+        t_min = as_float(getattr(getattr(z, "comfort_band", None), "t_op_min", None))
+        t_max = as_float(getattr(getattr(z, "comfort_band", None), "t_op_max", None))
 
         # quality markers (AggregatedValue flags)
         for k, av in [

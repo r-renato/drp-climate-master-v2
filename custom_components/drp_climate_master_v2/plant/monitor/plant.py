@@ -570,7 +570,7 @@ class PlantSnapshot:
                 self.global_outdoor_dew_point,
             ]):
                 z = self.global_indoor_zone
-                # cb = z.confort_band
+                # cb = z.comfort_band
                 lines += [
                     f"------------------------------------------------------------------",
                     f"Global aggregates",

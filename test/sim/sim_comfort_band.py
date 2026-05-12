@@ -4,29 +4,29 @@ Scopo
 -----
 Strumento di simulazione/esplorazione: mostra come la comfort band varia al
 variare degli input.  Non contiene assert — nessun test fallisce mai.
-Gli input base sono in ``simulate_confort_band_input.json`` nella stessa
+Gli input base sono in ``simulate_comfort_band_input.json`` nella stessa
 directory; possono essere sovrascritti a riga di comando senza modificare
 file su disco.
 
 Utilizzo
 --------
     # Esecuzione base (legge il JSON di default)
-    python3 -m pytest test/sim/sim_confort_band.py -s -v
+    python3 -m pytest test/sim/sim_comfort_band.py -s -v
 
     # File JSON alternativo
-    python3 -m pytest test/sim/sim_confort_band.py -s \\
-        --sim-input test/sim/simulate_confort_band_input.json
+    python3 -m pytest test/sim/sim_comfort_band.py -s \\
+        --sim-input test/sim/simulate_comfort_band_input.json
 
     # Override puntuali (ripetibili, senza toccare il file)
-    python3 -m pytest test/sim/sim_confort_band.py -s \\
+    python3 -m pytest test/sim/sim_comfort_band.py -s \\
         --sim-override global.climate_zone=E \\
         --sim-override global.default_t_op=19.5 \\
         --sim-override global.default_rh_pct=65 \\
         --sim-override "sim_06_adaptive_clo_s3.t_rm_values_by_season.winter=[10,14,17,null,24,28]"
 
     # Solo alcune simulazioni (-k filtra per nome funzione)
-    python3 -m pytest test/sim/sim_confort_band.py -s -k "sim_01 or sim_10"
-    python3 -m pytest test/sim/sim_confort_band.py -s -k "scenario"
+    python3 -m pytest test/sim/sim_comfort_band.py -s -k "sim_01 or sim_10"
+    python3 -m pytest test/sim/sim_comfort_band.py -s -k "scenario"
 
 Opzioni a riga di comando
 --------------------------
@@ -40,7 +40,7 @@ Opzioni a riga di comando
 
 File di input
 -------------
-``simulate_confort_band_input.json`` contiene:
+``simulate_comfort_band_input.json`` contiene:
 - sezione ``global`` con i default condivisi
 - sezioni ``sim_01_...`` … ``sim_10_...`` per le simulazioni base
 - sezioni ``scenario_*`` per scenari tematici (rientro vacanza, sleep floor, ecc.)
@@ -101,22 +101,22 @@ if str(_STUBS) not in sys.path:
 # Import moduli
 # ---------------------------------------------------------------------------
 
-from custom_components.drp_climate_master_v2.plant.decision.confort_band.calculator import (
+from custom_components.drp_climate_master_v2.plant.decision.comfort_band.calculator import (
     ComfortBandCalculator,
 )
-from custom_components.drp_climate_master_v2.plant.decision.confort_band.policy_layer import (
+from custom_components.drp_climate_master_v2.plant.decision.comfort_band.policy_layer import (
     ComfortPolicyLayer,
     ConfortPolicyConfig,
 )
-from custom_components.drp_climate_master_v2.plant.decision.confort_band.model import (
+from custom_components.drp_climate_master_v2.plant.decision.comfort_band.model import (
     ClimateZoneIT,
     PolicyContext,
     HumiditySolveMode,
 )
-from custom_components.drp_climate_master_v2.plant.decision.confort_band.trm import (
+from custom_components.drp_climate_master_v2.plant.decision.comfort_band.trm import (
     ZoneTrmTracker,
 )
-from custom_components.drp_climate_master_v2.plant.decision.confort_band.config import (
+from custom_components.drp_climate_master_v2.plant.decision.comfort_band.config import (
     T_RM_NEUTRAL_BY_SEASON,
     CLO_WINTER_BY_ZONE,
 )
@@ -127,7 +127,7 @@ from custom_components.drp_climate_master_v2.domain.models.season import Operati
 # Caricamento e override del JSON di input
 # ---------------------------------------------------------------------------
 
-_DEFAULT_INPUT = _HERE / "simulate_confort_band_input.json"
+_DEFAULT_INPUT = _HERE / "simulate_comfort_band_input.json"
 
 
 def _load_json(path: pathlib.Path) -> dict[str, Any]:

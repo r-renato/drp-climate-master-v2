@@ -1,4 +1,4 @@
-"""Test unitari del modulo confort_band.
+"""Test unitari del modulo comfort_band.
 
 Copertura
 ---------
@@ -35,11 +35,11 @@ if str(_STUBS) not in sys.path:
 # Import moduli sotto test
 # ---------------------------------------------------------------------------
 
-from custom_components.drp_climate_master_v2.plant.decision.confort_band.trm import (
+from custom_components.drp_climate_master_v2.plant.decision.comfort_band.trm import (
     ZoneTrmTracker,
     ZoneTrmState,
 )
-from custom_components.drp_climate_master_v2.plant.decision.confort_band.config import (
+from custom_components.drp_climate_master_v2.plant.decision.comfort_band.config import (
     # S3
     T_RM_TAU_HOURS,
     T_RM_WARMUP_TICKS,
@@ -77,18 +77,18 @@ from custom_components.drp_climate_master_v2.plant.decision.confort_band.config 
     V_AIR_HI_OTHER,
     V_AIR_LO_DEFAULT,
 )
-from custom_components.drp_climate_master_v2.plant.decision.confort_band.model import (
+from custom_components.drp_climate_master_v2.plant.decision.comfort_band.model import (
     PolicyContext,
     PolicyDecision,
     ClimateZoneIT,
     ComplianceMode,
     is_living,
 )
-from custom_components.drp_climate_master_v2.plant.decision.confort_band.policy_layer import (
+from custom_components.drp_climate_master_v2.plant.decision.comfort_band.policy_layer import (
     ComfortPolicyLayer,
     ConfortPolicyConfig,
 )
-from custom_components.drp_climate_master_v2.plant.decision.confort_band.calculator import (
+from custom_components.drp_climate_master_v2.plant.decision.comfort_band.calculator import (
     ComfortBandCalculator,
 )
 from custom_components.drp_climate_master_v2.domain.enums import HVACOperatingProfile
@@ -780,7 +780,7 @@ class TestComputeSingle:
         """La temperatura neutra (PMV≈0) deve cadere dentro la banda per condizioni neutre."""
         calc = _calc()
         # Usiamo pmv_center=0, pmv_band=0.5 (ISO Cat. B)
-        from custom_components.drp_climate_master_v2.plant.decision.confort_band.model import (
+        from custom_components.drp_climate_master_v2.plant.decision.comfort_band.model import (
             PolicyDecision, HumiditySolveMode,
         )
         policy = PolicyDecision(
@@ -847,7 +847,7 @@ class TestComputeSingle:
 
     def test_policy_override_met_clo(self):
         """Un override di met/clo nella PolicyDecision deve prevalere sui default."""
-        from custom_components.drp_climate_master_v2.plant.decision.confort_band.model import (
+        from custom_components.drp_climate_master_v2.plant.decision.comfort_band.model import (
             PolicyDecision, HumiditySolveMode,
         )
         calc = _calc()
@@ -892,7 +892,7 @@ class TestS3Integration:
         )
         decision = layer.decide(ctx)
 
-        from custom_components.drp_climate_master_v2.plant.decision.confort_band.model import HumiditySolveMode
+        from custom_components.drp_climate_master_v2.plant.decision.comfort_band.model import HumiditySolveMode
         res = calc.compute_single(
             vmc_air_speed=2,
             room="camera_1",
@@ -942,7 +942,7 @@ class TestS3Integration:
         layer = _layer(ClimateZoneIT.D)
         calc  = _calc()
 
-        from custom_components.drp_climate_master_v2.plant.decision.confort_band.model import HumiditySolveMode
+        from custom_components.drp_climate_master_v2.plant.decision.comfort_band.model import HumiditySolveMode
 
         def _band(t_rm):
             ctx = _ctx(

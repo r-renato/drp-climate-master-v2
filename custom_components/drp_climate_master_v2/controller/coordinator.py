@@ -94,7 +94,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._season_state = None
 
         # self._policy_layer: ComfortPolicyLayer = build_policy_layer()
-        # self._confort_bands = ComfortBandCalculator()
+        # self._comfort_bands = ComfortBandCalculator()
 
         self._plant_snapshot: PlantSnapshot | None = None
 
@@ -489,7 +489,7 @@ class ClimateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     season=self._season_state,
                     entities_state=self._entities_state_store,
                     sensor_aggr=self._sensor_aggregator,
-                    # confort_bands=self._compute_confort_band(),
+                    # comfort_bands=self._compute_comfort_band(),
                     climate_hvac_mode=self._climate_hvac_mode,
                     climate_preset_mode=self._climate_preset_mode,
                 )

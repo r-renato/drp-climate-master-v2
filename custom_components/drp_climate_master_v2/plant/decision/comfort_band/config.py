@@ -1,7 +1,7 @@
 """Costanti di configurazione del modulo comfort-band (ISO 7730 PMV/PPD).
 
 Questo file raccoglie **tutte** le costanti numeriche usate dal modulo
-``confort_band``: tabelle di lookup, valori seed dei parametri termoigrometrici,
+``comfort_band``: tabelle di lookup, valori seed dei parametri termoigrometrici,
 soglie di policy e limiti difensivi fisici.
 
 Struttura

@@ -5,7 +5,7 @@ from datetime import time
 from typing import Optional
 
 from ...domain.enums import HVACOperatingProfile
-from .confort_band.policy_layer import ClimateZoneIT, ComplianceMode, ConfortPolicyConfig
+from .comfort_band.policy_layer import ClimateZoneIT, ComplianceMode, ConfortPolicyConfig
 
 # -----------------------------------------------------------------------------
 # Option A: nested, domain-oriented config blocks
