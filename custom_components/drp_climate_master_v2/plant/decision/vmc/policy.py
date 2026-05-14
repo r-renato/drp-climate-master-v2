@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 from typing import Optional
 
@@ -10,44 +9,21 @@ from ....helpers.psychrometric import dew_point_celsius
 from ....helpers.utils import as_float, clamp
 
 from ..config import VmcConfig
+from ..contracts import VmcDemand
 
 from .state import VmcState
 
-@dataclass(slots=True)
-class VmcDemand:
-    """Policy output for VMC demand (requests + DP control thresholds)."""
-
-    # DP control (commanded / effective on device)
-    dp_sp_c: Optional[float]
-    ddp_cmd_c: Optional[float]
-    dehum_on_thr_c: Optional[float]
-    dehum_off_thr_c: Optional[float]
-    dehum_feasible: Optional[bool]
-
-    # DP control (raw, pre-quantization)
-    dp_sp_raw_c: Optional[float]
-
-    # Requests (towards hydronics / plant)
-    req_heating: bool
-    req_cooling: bool
-    req_dehumidif: bool
-    req_water: bool
-    req_free_cooling: bool
-    req_free_heating: bool
-
-    # Useful diagnostics
-    operative_season: str
-    rh_target_pct: float
-    t_ref_c: float
-    raw_req_dehumidif: bool
-
-    # Contesto radiante (True se cooling fisicamente attivo o in domanda).
-    # Calibra le soglie DP verso il profilo passivo quando il radiante è fermo.
-    radiant_cooling_active: bool = False
-
-
 class VmcPolicy:
-    """VMC policy domain.
+    """Politica di controllo per la VMC (Ventilazione Meccanica Controllata).
+
+    Classe di policy pura per la VMC Eneren RER020i: riceve i segnali di domanda
+    già calcolati (deficit/surplus termici, DP indoor/outdoor, copertura cooling)
+    e produce un ``VmcDemand`` con tutte le richieste da inviare al dispositivo.
+
+    Non conosce i dettagli di attuazione Modbus né la struttura del ``PlantDecision``;
+    il suo unico stato persistente è ``VmcState.dehum_on`` (isteresi deumidifica).
+    Viene invocata dal ``PlantDecisionPlanner`` nella fase di VMC enrichment della
+    pipeline a sette fasi.
 
     Responsibilities
     - resolve operative season bucket (winter/summer/shoulder)
@@ -60,6 +36,14 @@ class VmcPolicy:
     """
 
     def __init__(self, cfg: VmcConfig, *, state: VmcState) -> None:
+        """Inizializza la policy con la configurazione e lo stato persistente.
+
+        Args:
+            cfg: Configurazione VMC (soglie DP, RH target, parametri boost e
+                 free cooling).
+            state: Oggetto di stato condiviso con il ciclo precedente; contiene
+                   ``dehum_on`` per l'isteresi anti-flapping della deumidifica.
+        """
         self.cfg = cfg
         self._state = state
 
@@ -85,6 +69,66 @@ class VmcPolicy:
         free_heat_feasible: bool = False,
         radiant_cooling_active: bool = False,
     ) -> VmcDemand:
+        """Calcola la domanda VMC completa per il ciclo corrente.
+
+        Flusso interno (in ordine):
+
+        1. **Stagione operativa** — classifica il tick in winter/summer/shoulder.
+        2. **T_ref e RH target** — temperatura interna di riferimento (global zone)
+           e target di umidità relativa da configurazione stagionale.
+        3. **Setpoint DP psicrometrico** — ``dp_sp_raw_c`` è il punto di rugiada
+           corrispondente a (T_ref, RH_target): rappresenta il massimo DP ammissibile
+           affinché l'aria interna non condensa sulle superfici fredde del radiante.
+        4. **Quantizzazione ΔDP** — il dispositivo accetta ΔDP solo a step interi
+           (1°C). Per non anticipare la soglia ON, il ΔDP comandato viene arrotondato
+           *verso l'alto* (``math.ceil``), e il setpoint DP comandato viene corretto
+           di conseguenza: ``dp_sp_cmd = dp_sp_raw + ddp_policy - ddp_cmd``.
+           In questo modo ``on_thr = dp_sp_cmd + ddp_cmd`` rimane uguale all'intento
+           originale indipendentemente dalla granularità del dispositivo.
+        5. **Profilo contestuale radiante** — se il radiante è attivo o in domanda
+           (``radiant_cooling_active=True``), viene usato il setpoint psicrometrico
+           protettivo; altrimenti si usa ``dp_sp_max_c`` (profilo passivo/permissivo)
+           per evitare falsi allarmi nei periodi di spalla in cui non vi sono superfici
+           fredde su cui possa formarsi condensa.
+        6. **Soglie ON/OFF deumidifica** — ``on_thr = dp_sp_cmd + ddp_cmd``,
+           ``off_thr = on_thr - hysteresis``.
+        7. **Fattibilità deumidifica** — acqua disponibile (batteria idraulica VMC)
+           oppure DP outdoor sufficientemente basso da permettere ventilazione pura.
+        8. **Isteresi deumidifica** — ``need_dehumidification`` applica la memoria
+           del ciclo precedente per evitare flapping on/off.
+        9. **Gate fisico deumidifica** — ``_dehum_condition_met`` blocca la richiesta
+           se non vi è né cooling attivo né disagio igienico né rischio condensa critico.
+        10. **Boost riscaldamento/raffreddamento VMC** — autorizzati solo se
+            abilitati in configurazione e le soglie di deficit/surplus sono superate.
+        11. **Free cooling/heating** — bypass recuperatore; mutuamente esclusivo con
+            i boost idronici; disabilitato se è già attiva una richiesta di trattamento.
+
+        Args:
+            snapshot: Osservazione istantanea coerente dell'impianto.
+            profile: Profilo operativo attivo (Eco, Comfort, ...).
+            heat_def_max_c: Deficit termico massimo tra le zone [°C].
+            heat_def_wmean_c: Deficit termico medio pesato [°C].
+            heat_cov: Copertura riscaldamento (frazione zone in deficit, 0..1).
+            cool_sur_max_c: Surplus termico massimo tra le zone [°C].
+            cool_sur_wmean_c: Surplus termico medio pesato [°C].
+            cool_cov: Copertura raffrescamento (frazione zone in surplus, 0..1).
+            dp_dehum_c: Punto di rugiada robusto (percentile zone) per controllo
+                        latente [°C]; preferito a dp_max per la stabilità numerica.
+            dp_max_c: Punto di rugiada massimo tra le zone [°C]; usato come
+                      fallback se dp_dehum_c è None.
+            outdoor_dp_c: Punto di rugiada esterno [°C]; usato per valutare la
+                          fattibilità della deumidifica per ventilazione.
+            free_cool_feasible: Flag prodotto dal DemandSignalsBuilder: True se il
+                                free cooling ventilativo è fattibile (delta T e DP
+                                outdoor idonei, finestre chiuse).
+            free_heat_feasible: Analogo per il free heating ventilativo.
+            radiant_cooling_active: True se la pompa miscelatrice è attiva oppure
+                                    se esiste domanda di cooling (cool_sur_max > 0
+                                    o cool_cov > 0). Determina il profilo DP VMC.
+
+        Returns:
+            ``VmcDemand`` con tutti i setpoint e le richieste per il tick corrente.
+        """
         operative = self.infer_operative_bucket(snapshot)
 
         # reference indoor temperature + RH target
@@ -196,6 +240,16 @@ class VmcPolicy:
     # -----------------
 
     def infer_operative_bucket(self, snapshot: PlantSnapshot) -> str:
+        """Classifica il tick corrente in uno dei tre bucket stagionali operativi.
+
+        Mappa la stagione di runtime (da ``PlantSnapshot.season``) nei tre bucket
+        usati dalla VMC policy: ``"winter"`` / ``"summer"`` / ``"shoulder"``.
+        Il bucket ``shoulder`` copre primavera e autunno e si comporta in modo
+        conservativo: non attiva trattamenti aggressivi né in caldo né in freddo.
+
+        Returns:
+            Stringa ``"winter"``, ``"summer"`` o ``"shoulder"``.
+        """
         season = getattr(getattr(snapshot, "season", None), "season", None)
         season_val = getattr(season, "value", None)
         if season_val == "winter":
@@ -205,9 +259,34 @@ class VmcPolicy:
         return "shoulder"
 
     def rh_target_pct(self, operative: Optional[str], profile: HVACOperatingProfile) -> float:
+        """Restituisce il target di umidità relativa [%] per stagione e profilo.
+
+        Delega interamente a ``VmcConfig.dehum.rh_target_pct``; non contiene logica
+        propria per separare la configurazione dalla policy.
+
+        Args:
+            operative: Bucket stagionale (``"winter"`` / ``"summer"`` / ``"shoulder"``).
+            profile: Profilo operativo attivo.
+
+        Returns:
+            Target RH in percentuale (es. 50.0).
+        """
         return float(self.cfg.dehum.rh_target_pct(operative, profile))
 
     def get_indoor_reference_temp_c(self, snapshot: PlantSnapshot) -> float:
+        """Restituisce la temperatura operativa indoor di riferimento [°C].
+
+        Utilizza ``t_op`` (temperatura operativa ISO 7730 = media pesata tra T_aria e
+        MRT) della zona globale aggregata come riferimento psicrometrico per il calcolo
+        del setpoint DP. In assenza del dato, ricade su ``cfg.setpoint_t_c``.
+
+        La temperatura operativa è preferita alla sola T_aria perché incorpora
+        l'effetto radiante: con soffitto caldo o freddo la T_op è più rappresentativa
+        della condizione percepita e della temperatura superficiale stimata.
+
+        Returns:
+            Temperatura operativa media indoor [°C], o setpoint fisso di fallback.
+        """
         z = snapshot.global_indoor_zone
         if z is not None:
             for av in (getattr(z, "t_op", None), getattr(z, "temperature", None)):
@@ -217,6 +296,30 @@ class VmcPolicy:
         return float(self.cfg.setpoint_t_c)
 
     def compute_dp_setpoint_c_from(self, t_c: float, rh_pct: float) -> float:
+        """Calcola il setpoint di dew point [°C] per la protezione anti-condensa.
+
+        Se ``cfg.dehum.dp_setpoint_from_psychrometrics`` è True, inverte la formula
+        psicrometrica di Magnus-Tetens per ricavare il DP corrispondente alla coppia
+        (T_ref, RH_target) tramite ``dew_point_celsius(T, RH)``.
+
+        Il valore prodotto rappresenta il **massimo DP ammissibile** nell'aria indoor
+        affinché le superfici a T_mandata_radiante non vadano in condensa: se
+        DP_aria <= DP_sp, la superficie rimane asciutta a qualunque T_mandata
+        superiore al DP_sp stesso.
+
+        Se il calcolo psicrometrico non è abilitato (o lancia eccezione), viene usato
+        il valore fisso ``cfg.dehum.setpoint_dp_c`` come fallback.
+
+        Il risultato è clampato nell'intervallo [dp_sp_min_c, dp_sp_max_c] definito
+        in configurazione per evitare setpoint fisicamente impossibili.
+
+        Args:
+            t_c: Temperatura operativa indoor di riferimento [°C].
+            rh_pct: Target di umidità relativa [%].
+
+        Returns:
+            Setpoint DP [°C] clampato nei limiti di configurazione.
+        """
         if bool(self.cfg.dehum.dp_setpoint_from_psychrometrics):
             try:
                 dp = float(dew_point_celsius(float(t_c), float(rh_pct)))
@@ -227,7 +330,32 @@ class VmcPolicy:
         return float(clamp(dp, float(self.cfg.dehum.dp_sp_min_c), float(self.cfg.dehum.dp_sp_max_c)))
 
     def need_dehumidification(self, dp_current_c: Optional[float], on_thr_c: float, off_thr_c: float) -> bool:
-        """Dehumidification hysteresis (anti-flapping) using minimal memory."""
+        """Valuta se la deumidifica è necessaria applicando isteresi anti-flapping.
+
+        Implementa un trigger con soglie asimmetriche (Schmitt trigger):
+
+        - **Attivazione**: DP_corrente > on_thr  ->  ``dehum_on = True``
+        - **Mantenimento**: se già attiva, rimane True finché DP_corrente > off_thr
+        - **Spegnimento**: DP_corrente <= off_thr  ->  ``dehum_on = False``
+
+        L'isteresi (on_thr - off_thr) evita oscillazioni rapide della deumidifica
+        quando il DP è vicino alla soglia, riducendo i cicli compressore VMC e il
+        consumo energetico.
+
+        Lo stato ``_state.dehum_on`` è l'unica memoria persistente della classe;
+        viene aggiornato ad ogni chiamata.
+
+        Se ``dp_current_c`` è None (sensore non disponibile), la deumidifica viene
+        disattivata per sicurezza e lo stato resettato a False.
+
+        Args:
+            dp_current_c: Punto di rugiada indoor corrente [°C]; None se indisponibile.
+            on_thr_c: Soglia di attivazione DP [°C] (= dp_sp_cmd + ddp_cmd).
+            off_thr_c: Soglia di disattivazione DP [°C] (= on_thr - hysteresis).
+
+        Returns:
+            True se la deumidifica è richiesta in questo tick.
+        """
         if dp_current_c is None:
             self._state.dehum_on = False
             return False
@@ -249,29 +377,40 @@ class VmcPolicy:
         cool_sur_max_c: float,
         cool_cov: float,
     ) -> bool:
-        """Verifica se almeno una condizione fisica giustifica la deumidifica.
+        """Gate fisico: verifica se almeno una condizione giustifica la deumidifica.
 
-        Condizione A — Cooling attivo o imminente.
-            Con soffitto fermo non esiste superficie fredda su cui formarsi
-            condensa: abbassare il DP in anticipo non protegge nulla.
-            Il gate si apre quando almeno una zona supera la comfort band in
-            raffrescamento (cool_sur_max > 0) oppure la copertura cooling e'
-            positiva (cool_cov > 0).
+        Questo gate viene applicato *dopo* l'isteresi DP (``need_dehumidification``):
+        anche se il DP indoor supera la soglia, la deumidifica non viene autorizzata
+        a meno che una delle tre condizioni fisiche sotto sia verificata.
 
-        Condizione B — Disagio igienico assoluto (UR indoor max > soglia).
-            Indipendente dal cooling: UR > 67% causa disagio percepito
-            (ISO 7730) e favorisce muffe su superfici parzialmente fredde.
-            Soglia: VmcDehumConfig.rh_dehum_absolute_threshold_pct (67%).
+        La logica evita di attivare il compressore VMC in primavera/autunno quando
+        il DP è leggermente sopra soglia ma non esiste alcuna superficie fredda su
+        cui possa formarsi condensa (soffitto a temperatura ambiente, nessun cooling).
 
-        Condizione C — Rischio condensa su superfici passive.
-            DP indoor > 16.5 degC: superfici a <=16 degC (vetri notturna,
-            evaporatori aperti) possono andare in condensa. Guardrail
-            pre-avvio estivo del cooling per attico romano con vetri moderni.
-            Soglia: VmcDehumConfig.dp_dehum_critical_threshold_c (16.5 degC).
+        **Condizione A — Cooling attivo o imminente** (``cool_sur_max > 0`` o
+        ``cool_cov > 0``): con il soffitto radiante a T_mandata < T_dp esiste una
+        superficie fredda reale. Deumidificare preventivamente è corretto.
+
+        **Condizione B — Disagio igienico assoluto** (UR_max > soglia, tipicamente
+        67%): indipendente dal cooling. Oltre questa soglia l'aria è percepita come
+        soffocante (ISO 7730) e aumenta il rischio biologico (muffe) su superfici
+        parzialmente fredde (vetri, davanzali).
+        Soglia: ``VmcDehumConfig.rh_dehum_absolute_threshold_pct`` (default 67%).
+
+        **Condizione C — Rischio condensa su superfici passive** (DP_max > soglia
+        critica, tipicamente 16.5°C): superfici che possono trovarsi sotto i 16°C
+        anche senza cooling attivo (vetri notturni, superfici non isolate) sono a
+        rischio. Funziona da guardrail pre-avvio estivo.
+        Soglia: ``VmcDehumConfig.dp_dehum_critical_threshold_c`` (default 16.5°C).
+
+        Args:
+            snapshot: Osservazione istantanea usata per leggere UR per zona.
+            dp_max_c: DP massimo indoor tra le zone [°C]; None se indisponibile.
+            cool_sur_max_c: Surplus termico massimo tra le zone [°C].
+            cool_cov: Copertura raffrescamento (frazione zone in surplus, 0..1).
 
         Returns:
-            True se almeno una condizione e' soddisfatta, False altrimenti.
-            Il chiamante applica questo gate su need_dehum (post-isteresi DP).
+            True se almeno una condizione è soddisfatta; False blocca la deumidifica.
         """
         # --- Condizione A: cooling attivo o imminente ---
         if float(cool_sur_max_c) > 0.0 or float(cool_cov) > 0.0:
@@ -301,17 +440,32 @@ class VmcPolicy:
         outdoor_dp_c: Optional[float],
         dp_max_c: Optional[float],
     ) -> bool:
-        """Valuta se il free cooling ventilativo (bypass recuperatore) è attivabile.
+        """Verifica le precondizioni locali per il free cooling ventilativo.
 
-        Condizioni necessarie (tutte e tre):
-        1. free_cool_feasible è già calcolato nel FreeVentCluster del DemandSignalsBuilder;
-           qui ricalcoliamo solo il flag DP per non accoppiare la policy al builder.
-        2. Finestre chiuse.
-        3. Non in vacanza / assenza prolungata.
+        Il free cooling (bypass recuperatore con aria esterna fredda) è una modalità
+        di raffrescamento gratuito: la VMC immette aria esterna più fredda di quella
+        interna senza attivare compressori.
 
-        Il delta T viene letto da `snapshot.vmc` (T_outdoor vs T_indoor reference)
-        oppure dal segnale `free_cool_feasible` già presente nel demand se disponibile.
-        La policy non duplica il calcolo del delta T: legge il flag prodotto dal builder.
+        Questo metodo verifica solo le condizioni di *sicurezza e contesto* che la
+        policy può valutare autonomamente: stato finestre, occupazione, e controllo
+        DP dell'aria esterna (l'aria esterna non deve aggiungere umidità ->
+        DP_outdoor < DP_indoor_max - margine).
+
+        Il delta T (T_indoor - T_outdoor > soglia minima) non viene ricalcolato qui:
+        è già valutato dal ``DemandSignalsBuilder`` nel flag ``free_cool_feasible``
+        che il caller usa come condizione necessaria aggiuntiva, evitando
+        duplicazione di logica tra strati.
+
+        Fail-safe: se DP_outdoor è sconosciuto, la funzione restituisce False per
+        non rischiare di peggiorare l'umidità interna.
+
+        Args:
+            snapshot: Usato per leggere stato finestre, vacanza, assenza prolungata.
+            outdoor_dp_c: DP esterno [°C]; None -> fail-safe False.
+            dp_max_c: DP indoor massimo [°C]; usato per il margine di sicurezza DP.
+
+        Returns:
+            True se le precondizioni locali sono soddisfatte.
         """
         # Guardie identiche ai boost esistenti
         if not bool(getattr(snapshot, "windows_close_state", True)):
@@ -332,10 +486,24 @@ class VmcPolicy:
         return True
 
     def allow_free_heating(self, snapshot: PlantSnapshot) -> bool:
-        """Valuta se il free heating ventilativo (bypass recuperatore) è attivabile.
+        """Verifica le precondizioni locali per il free heating ventilativo.
 
-        Condizioni: finestre chiuse, non vacanza, non estate.
-        Il delta T è valutato dal caller tramite free_heat_feasible del demand.
+        Il free heating (bypass recuperatore con aria esterna calda) è utile in
+        primavera/autunno quando l'esterno è più caldo dell'interno: la VMC
+        immette calore gratuito senza attivare la batteria idraulica.
+
+        Condizioni necessarie: finestre chiuse (aria controllata), assenza di
+        vacanza, stagione non estiva (in estate l'aria esterna calda peggiorerebbe
+        il comfort anziché migliorarlo).
+
+        Come per ``allow_free_cooling``, il delta T minimo non viene ricalcolato
+        qui: è responsabilità del caller tramite il flag ``free_heat_feasible``.
+
+        Args:
+            snapshot: Usato per leggere stato finestre, vacanza, stagione.
+
+        Returns:
+            True se le precondizioni locali sono soddisfatte.
         """
         if not bool(getattr(snapshot, "windows_close_state", True)):
             return False
@@ -347,6 +515,25 @@ class VmcPolicy:
         return True
 
     def allow_heat_boost(self, snapshot: PlantSnapshot, heat_def_max_c: float, heat_def_wmean_c: float, heat_cov: float) -> bool:
+        """Autorizza il boost di riscaldamento tramite batteria idraulica VMC.
+
+        Il boost VMC integra il riscaldamento principale nei periodi di spalla:
+        la VMC scalda l'aria di mandata con acqua calda dell'impianto radiante,
+        aggiungendo capacità termica senza avviare un ciclo separato della PDC.
+
+        Condizioni di attivazione (OR tra le due):
+
+        - Deficit massimo zona >= ``cfg.boost.heat_def_max_thr_c``: zona singola
+          molto fuori banda -> intervento immediato.
+        - Deficit medio pesato >= ``cfg.boost.heat_def_wmean_thr_c`` E copertura
+          >= 60%: disagio diffuso ma moderato -> intervento distribuito.
+
+        Gate di sicurezza: boost non abilitato se ``cfg.boost.enabled=False``,
+        finestre aperte (il ricambio naturale compensa) o casa vuota/in vacanza.
+
+        Returns:
+            True se il boost di riscaldamento VMC è autorizzato.
+        """
         if not bool(self.cfg.boost.enabled):
             return False
         if not bool(snapshot.windows_close_state):
@@ -360,6 +547,26 @@ class VmcPolicy:
         return False
 
     def allow_cool_boost(self, snapshot: PlantSnapshot, cool_sur_max_c: float, cool_sur_wmean_c: float, cool_cov: float) -> bool:
+        """Autorizza il boost di raffrescamento tramite batteria idraulica VMC.
+
+        Simmetrico ad ``allow_heat_boost``: la VMC raffredda l'aria di mandata con
+        acqua fredda dell'impianto, integrando il raffreddamento radiante o
+        sostituendolo nei periodi di spalla in cui il radiante non è ancora attivo
+        ma il surplus termico indoor è già significativo.
+
+        Condizioni di attivazione (OR tra le due):
+
+        - Surplus massimo zona >= ``cfg.boost.cool_sur_max_thr_c``: zona singola
+          molto sopra banda -> intervento immediato.
+        - Surplus medio pesato >= ``cfg.boost.cool_sur_wmean_thr_c`` E copertura
+          >= 60%: disagio diffuso ma moderato -> intervento distribuito.
+
+        Gate di sicurezza: boost non abilitato se ``cfg.boost.enabled=False``,
+        finestre aperte o casa vuota/in vacanza.
+
+        Returns:
+            True se il boost di raffrescamento VMC è autorizzato.
+        """
         if not bool(self.cfg.boost.enabled):
             return False
         if not bool(snapshot.windows_close_state):

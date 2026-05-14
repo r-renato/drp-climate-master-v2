@@ -112,6 +112,39 @@ class PlantMode(str, Enum):
 
 
 @dataclass(slots=True)
+class VmcDemand:
+    """Policy output for VMC demand (requests + DP control thresholds)."""
+
+    # DP control (commanded / effective on device)
+    dp_sp_c: Optional[float]
+    ddp_cmd_c: Optional[float]
+    dehum_on_thr_c: Optional[float]
+    dehum_off_thr_c: Optional[float]
+    dehum_feasible: Optional[bool]
+
+    # DP control (raw, pre-quantization)
+    dp_sp_raw_c: Optional[float]
+
+    # Requests (towards hydronics / plant)
+    req_heating: bool
+    req_cooling: bool
+    req_dehumidif: bool
+    req_water: bool
+    req_free_cooling: bool
+    req_free_heating: bool
+
+    # Useful diagnostics
+    operative_season: str
+    rh_target_pct: float
+    t_ref_c: float
+    raw_req_dehumidif: bool
+
+    # Contesto radiante (True se cooling fisicamente attivo o in domanda).
+    # Calibra le soglie DP verso il profilo passivo quando il radiante è fermo.
+    radiant_cooling_active: bool = False
+
+
+@dataclass(slots=True)
 class PlantDemandSignals:
     """Aggregated demand signals for the plant planner (multi-zone + dew-point + VMC).
 

@@ -67,8 +67,8 @@ import pytest
 # ---------------------------------------------------------------------------
 from custom_components.drp_climate_master_v2.plant.decision.vmc.policy import (
     VmcPolicy,
-    VmcDemand,
 )
+from custom_components.drp_climate_master_v2.plant.decision.contracts import VmcDemand
 from custom_components.drp_climate_master_v2.plant.decision.vmc.state import VmcState
 from custom_components.drp_climate_master_v2.plant.decision.config import PlantPlannerConfig
 from custom_components.drp_climate_master_v2.domain.enums import HVACOperatingProfile
