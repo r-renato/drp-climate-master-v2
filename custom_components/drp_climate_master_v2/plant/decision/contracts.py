@@ -213,6 +213,32 @@ class PlantDemandSignals:
         },
     )
 
+    # --- Segnale globale (comfort band media indoor pesata per area) ---
+    # Segnale primario per on/off PDC: risponde allo stato termico medio della casa,
+    # non al caso peggiore di singola zona. Le elettrovalvole di zona continuano a
+    # usare heat_def_by_zone_c / cool_sur_by_zone_c per la distribuzione fine.
+    heat_def_global_c: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": "Deficit riscaldamento dalla comfort band globale (media indoor pesata per area).",
+            "unit": "°C",
+            "range": "[0..+inf) oppure None se banda globale non disponibile",
+            "formula": "max(0, global_t_op_min - global_t_op)",
+            "source": "DemandSignalsBuilder",
+            "note": "Segnale primario on/off PDC in profili non-COMFORT/BOOST.",
+        },
+    )
+    cool_sur_global_c: Optional[float] = field(
+        default=None,
+        metadata={
+            "doc": "Surplus raffrescamento dalla comfort band globale.",
+            "unit": "°C",
+            "range": "[0..+inf) oppure None se banda globale non disponibile",
+            "formula": "max(0, global_t_op - global_t_op_max)",
+            "source": "DemandSignalsBuilder",
+        },
+    )
+
     # --- Per-zone maps ---
     heat_def_by_zone_c: Dict[str, float] = field(
         default_factory=dict,
@@ -590,6 +616,8 @@ class PlantDemandSignals:
         lines += ["Demand (sensible)"]
         emit(lines, "Heat def max", "heat_def_max_c", f"{fnum(self.heat_def_max_c)} °C")
         emit(lines, "Cool sur max", "cool_sur_max_c", f"{fnum(self.cool_sur_max_c)} °C")
+        emit(lines, "Heat def global", "heat_def_global_c", f"{fnum(self.heat_def_global_c)} °C")
+        emit(lines, "Cool sur global", "cool_sur_global_c", f"{fnum(self.cool_sur_global_c)} °C")
         emit(lines, "Heat headroom min", "heat_headroom_min_c", f"{fnum(self.heat_headroom_min_c)} °C")
         emit(lines, "Cool headroom min", "cool_headroom_min_c", f"{fnum(self.cool_headroom_min_c)} °C")
 
@@ -697,6 +725,12 @@ class GatingDiagnostics:
     cool_override: Optional[bool] = None
     cool_quorum_ok: Optional[bool] = None
     cool_mean_ok: Optional[bool] = None
+
+    # -- Segnale globale PDC (Patch B) ----------------------------------------
+    heat_def_global_c: Optional[float] = None
+    """Deficit dalla comfort band globale usato per on/off PDC. None = non disponibile."""
+    heat_global_pdc_active: Optional[bool] = None
+    """True se il segnale globale ha autorizzato heat_sensible. None = non calcolato."""
 
     # -- Flag finali verso ModeResolver --------------------------------------
     any_heat: bool = False
@@ -932,6 +966,8 @@ class PlantDecision:
                 f"  Heat override      :: {fbool(g.heat_override, 'True', 'False')}",
                 f"  Heat quorum ok     :: {fbool(g.heat_quorum_ok, 'True', 'False')}",
                 f"  Heat mean ok       :: {fbool(g.heat_mean_ok, 'True', 'False')}",
+                f"  Heat def global    :: {fnum(g.heat_def_global_c)} °C",
+                f"  Heat PDC global    :: {fbool(g.heat_global_pdc_active, 'True', 'False')}",
                 f"  Cool override      :: {fbool(g.cool_override, 'True', 'False')}",
                 f"  Cool quorum ok     :: {fbool(g.cool_quorum_ok, 'True', 'False')}",
                 f"  Cool mean ok       :: {fbool(g.cool_mean_ok, 'True', 'False')}",

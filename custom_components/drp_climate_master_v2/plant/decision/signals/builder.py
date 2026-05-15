@@ -118,6 +118,28 @@ class DemandSignalsBuilder:
         dp = self._compute_dew_point_cluster(snapshot, zc)
         fv = self._compute_free_vent_cluster(snapshot, zc, dp)
 
+        # Segnale globale: deficit/surplus dalla comfort band globale (media indoor pesata).
+        # Usato da compute_gating() come segnale primario per on/off PDC (Patch B).
+        # Separato da heat_def_max_c (worst-zone) per evitare che una singola zona
+        # anomala (S3, v_draft alto, sensore rumoroso) faccia partire il generatore.
+        heat_def_global_c: Optional[float] = None
+        cool_sur_global_c: Optional[float] = None
+        if comfort_bands_by_zone is not None:
+            global_band = (comfort_bands_by_zone or {}).get("global")
+            if global_band is not None:
+                g_indoor = getattr(snapshot, "global_indoor_zone", None)
+                if g_indoor is not None:
+                    t_g = as_float(getattr(getattr(g_indoor, "t_op", None), "value", None))
+                    if t_g is None:
+                        t_g = as_float(getattr(getattr(g_indoor, "temperature", None), "value", None))
+                    if t_g is not None:
+                        t_gmin = as_float(getattr(global_band, "t_op_min", None))
+                        t_gmax = as_float(getattr(global_band, "t_op_max", None))
+                        if t_gmin is not None:
+                            heat_def_global_c = max(0.0, float(t_gmin) - float(t_g))
+                        if t_gmax is not None:
+                            cool_sur_global_c = max(0.0, float(t_g) - float(t_gmax))
+
         payload: Dict[str, Any] = dict(
             # zone comfort
             heat_def_max_c=zc.heat_def_max_c,
@@ -143,6 +165,9 @@ class DemandSignalsBuilder:
             free_cool_dp_ok=fv.free_cool_dp_ok,
             free_cool_feasible=fv.free_cool_feasible,
             free_heat_feasible=fv.free_heat_feasible,
+            # segnale globale PDC (Patch B)
+            heat_def_global_c=heat_def_global_c,
+            cool_sur_global_c=cool_sur_global_c,
         )
 
         log_debug(_LOGGER, "Computed ZoneComfortCluster: %s", zc)

@@ -169,6 +169,29 @@ class DemandGatingConfig:
     Default 1.00°C: a T_ext=22°C (fine maggio Roma) un deficit wmean < 1°C
     si recupera tipicamente in 20-40 min senza avviare la PDC."""
 
+    heat_pdc_on_thr_c: float = 0.5
+    """Soglia deficit banda globale (°C) per accensione PDC (profili non-COMFORT/BOOST).
+    La PDC parte solo quando la casa in media è almeno 0.5°C sotto il limite
+    inferiore globale. Più conservativa di heat_on_deficit_c per evitare avvii
+    su deficit di singola zona (S3 anomala, v_draft elevata, sensore rumoroso).
+    Se il segnale globale non è disponibile (banda non calcolata) il sistema
+    usa il fallback sul segnale worst-zone (comportamento precedente alla Patch B)."""
+
+    heat_pdc_off_margin_c: float = 0.3
+    """Margine isteresi (°C) sopra t_op_min globale per lo spegnimento PDC.
+    La PDC si spegne solo quando global_t_op > global_t_op_min + margin.
+    Evita lo short-cycling da oscillazioni attorno al limite di comfort:
+    con margine 0.3°C la PDC non si spegne al primo rientro in banda ma solo
+    quando c'è un recupero termico stabile."""
+
+    cool_pdc_on_thr_c: float = 0.5
+    """Soglia surplus banda globale (°C) per accensione PDC in raffrescamento.
+    Analoga a heat_pdc_on_thr_c, simmetrica sul lato caldo."""
+
+    cool_pdc_off_margin_c: float = 0.3
+    """Margine isteresi (°C) sotto t_op_max globale per lo spegnimento PDC in raffrescamento.
+    Analoga a heat_pdc_off_margin_c, simmetrica sul lato caldo."""
+
     ctrl_aggr_by_profile: dict[HVACOperatingProfile, float] = field(
         default_factory=lambda: {
             HVACOperatingProfile.COMFORT: 1.00,

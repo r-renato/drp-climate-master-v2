@@ -101,6 +101,12 @@ class ModeResolver:
         _rh_weather = getattr(getattr(snapshot, "season", None), "weather", None)
         _regime_hint: str = str(getattr(_rh_weather, "regime_hint", "mild")) if _rh_weather else "mild"
 
+        # Legge stato PDC per l'isteresi on/off (Patch B).
+        # power_on può essere None se il sensore non è disponibile: in quel caso
+        # pdc_currently_on = False (conservativo: non assume PDC accesa).
+        _pdc_snap = getattr(snapshot, "pdc", None)
+        _pdc_on = bool(getattr(_pdc_snap, "power_on", False) or False) if _pdc_snap is not None else False
+
         g = compute_gating(
             cfg=cfg,
             demand=demand,
@@ -108,6 +114,7 @@ class ModeResolver:
             zones_decision=zones_decision,
             t_ext=as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None)),
             regime_hint=_regime_hint,
+            pdc_currently_on=_pdc_on,
         )
 
         # --------------------
@@ -141,6 +148,8 @@ class ModeResolver:
             cool_override=g.cool_override,
             cool_quorum_ok=g.cool_quorum_ok,
             cool_mean_ok=g.cool_mean_ok,
+            heat_def_global_c=g.heat_def_global_c,
+            heat_global_pdc_active=g.heat_global_pdc_active,
             any_heat=g.any_heat,
             any_cool=g.any_cool,
             any_dehum=g.vmc_req_dehum,

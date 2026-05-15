@@ -244,6 +244,12 @@ class GatingResult:
     zones_on_now_pct: Optional[float] = None
     zones_first_on_step: Optional[int] = None
 
+    # Segnale globale PDC (Patch B) - diagnostica
+    heat_def_global_c: Optional[float] = None
+    """Deficit dalla comfort band globale usato per on/off PDC. None se non disponibile."""
+    heat_global_pdc_active: Optional[bool] = None
+    """True se il segnale globale ha autorizzato heat_sensible. None se non calcolato."""
+
 
 def compute_gating(
     *,
@@ -253,6 +259,7 @@ def compute_gating(
     zones_decision: Optional[ZonesDecision],
     t_ext: Optional[float] = None,
     regime_hint: str = "mild",
+    pdc_currently_on: bool = False,
 ) -> GatingResult:
     """Calcola soglie e flag di gating dipendenti dal profilo operativo.
 
@@ -437,6 +444,13 @@ def compute_gating(
     heat_def_wmean = float(demand.heat_def_wmean_c)  # media pesata deficit [C]
     cool_sur_wmean = float(demand.cool_sur_wmean_c)  # media pesata surplus [C]
 
+    # Segnale globale (Patch B): deficit/surplus dalla comfort band media indoor.
+    # None se la banda globale non è stata calcolata (fallback su worst-zone).
+    _raw_global_heat = getattr(demand, "heat_def_global_c", None)
+    _raw_global_cool = getattr(demand, "cool_sur_global_c", None)
+    heat_def_global: Optional[float] = float(_raw_global_heat) if _raw_global_heat is not None else None
+    cool_sur_global: Optional[float] = float(_raw_global_cool) if _raw_global_cool is not None else None
+
     # -- Fase 1: Aggressivita e soglie effettive ----------------------------
     # ctrl_aggr: unica fonte di verita in DemandGatingConfig.ctrl_aggr_by_profile.
     # ctrl_eff: clamp a 0.2 per evitare soglie irraggiungibili (heat_thr > 5x base).
@@ -484,14 +498,36 @@ def compute_gating(
         eff_heat_override = cfg.gating.effective_heat_override_factor(t_ext)
         eff_cool_override = cfg.gating.effective_cool_override_factor(t_ext)
 
-        # Livello 1 - Override worst-zone: una singola zona molto fuori banda
-        # autorizza l'avvio indipendentemente da quorum e mean.
-        heat_override = heat_def >= heat_thr * eff_heat_override
+        # Livello 1 - On/off PDC basato sulla comfort band globale con isteresi
+        # (Patch B). La PDC risponde allo stato medio della casa, non alla
+        # singola zona peggiore. Fallback su worst-zone se il segnale globale
+        # non è disponibile (banda non calcolata).
+        #
+        # Isteresi: soglia di accensione più alta (deficit >= on_thr) e margine
+        # di spegnimento (mantieni acceso finché deficit > -off_margin, cioè
+        # finché T_op non ha superato t_op_min di off_margin). Evita short-cycling
+        # da oscillazioni attorno al limite.
+        _heat_pdc_on_thr = float(cfg.gating.heat_pdc_on_thr_c)
+        _heat_pdc_off_margin = float(cfg.gating.heat_pdc_off_margin_c)
+        _cool_pdc_on_thr = float(cfg.gating.cool_pdc_on_thr_c)
+        _cool_pdc_off_margin = float(cfg.gating.cool_pdc_off_margin_c)
+
+        if heat_def_global is not None:
+            if pdc_currently_on:
+                # PDC accesa: mantieni accesa finché non c'è surplus stabile
+                heat_override = heat_def_global > -_heat_pdc_off_margin
+            else:
+                # PDC spenta: accendi solo con deficit globale >= soglia generosa
+                heat_override = heat_def_global >= _heat_pdc_on_thr
+        else:
+            # Fallback worst-zone (segnale globale non disponibile)
+            heat_override = heat_def >= heat_thr * eff_heat_override
+
         # Livello 2 - Quorum: abbastanza zone fuori banda (per peso o conteggio).
         heat_quorum_ok = heat_cov >= quorum
         # Livello 3 - Mean: il deficit medio pesato e significativo.
         heat_mean_ok = heat_def_wmean >= heat_thr * float(cfg.gating.demand_mean_factor)
-        # Sintesi: override O (soglia base E (quorum O mean)).
+        # Sintesi: override globale O (soglia base worst-zone E (quorum O mean)).
         heat_sensible = bool(heat_override) or (
             (heat_def >= heat_thr) and (bool(heat_quorum_ok) or bool(heat_mean_ok))
         )
@@ -501,7 +537,13 @@ def compute_gating(
         # idronico. Tipico scenario: giornata invernale soleggiata con zona
         # esposta a sud che supera la comfort band per apporti solari.
         free_cool_ok = bool(getattr(demand, "free_cool_feasible", False))
-        cool_override = (cool_sur >= cool_thr * eff_cool_override) and not free_cool_ok
+        if cool_sur_global is not None:
+            if pdc_currently_on:
+                cool_override = (cool_sur_global > -_cool_pdc_off_margin) and not free_cool_ok
+            else:
+                cool_override = (cool_sur_global >= _cool_pdc_on_thr) and not free_cool_ok
+        else:
+            cool_override = (cool_sur >= cool_thr * eff_cool_override) and not free_cool_ok
         cool_quorum_ok = cool_cov >= quorum
         cool_mean_ok = cool_sur_wmean >= cool_thr * float(cfg.gating.demand_mean_factor)
         cool_sensible = bool(cool_override) or (
@@ -647,4 +689,6 @@ def compute_gating(
         any_heat=bool(any_heat),
         any_cool=bool(any_cool),
         any_cool_or_dehum=bool(any_cool_or_dehum),
+        heat_def_global_c=heat_def_global,
+        heat_global_pdc_active=(bool(heat_override) if heat_def_global is not None else None),
     )

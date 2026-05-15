@@ -87,7 +87,11 @@ def desired_zone_valves(decision: PlantDecision) -> ZoneValvesDesired:
 
     valves_cmd = getattr(decision, "valves", None)
     by_zone_cmd = getattr(valves_cmd, "by_zone", None) if valves_cmd is not None else None
-    if by_zone_cmd:
+    if by_zone_cmd is not None:
+        # by_zone_cmd == {} (dict vuoto) significa "nessuna valvola richiesta"
+        # (es. mode=VENT_ONLY o OFF - ZoneValvesCommandBuilder produce {} dopo .clear()).
+        # NON si deve cadere nel branch zones_plan che leggerebbe valve_on=True
+        # dall'MPC e causerebbe request_on=True -> FSM stall loop in VENT_ONLY.
         for zone_key, valve_on in by_zone_cmd.items():
             desired[str(zone_key)] = bool(valve_on)
         return ZoneValvesDesired(by_zone=desired)
