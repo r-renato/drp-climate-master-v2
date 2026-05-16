@@ -249,6 +249,10 @@ class GatingResult:
     """Deficit dalla comfort band globale usato per on/off PDC. None se non disponibile."""
     heat_global_pdc_active: Optional[bool] = None
     """True se il segnale globale ha autorizzato heat_sensible. None se non calcolato."""
+    heat_pdc_on_thr_eff_c: float = 0.0
+    """Soglia effettiva di accensione PDC usata in questo tick, dopo modulazione
+    per t_smooth (RMOT). Diagnostico: permette di vedere a log quando la soglia
+    è alzata dal guard stagionale rispetto al valore base."""
 
 
 def compute_gating(
@@ -258,6 +262,7 @@ def compute_gating(
     profile: HVACOperatingProfile,
     zones_decision: Optional[ZonesDecision],
     t_ext: Optional[float] = None,
+    t_smooth: Optional[float] = None,
     regime_hint: str = "mild",
     pdc_currently_on: bool = False,
 ) -> GatingResult:
@@ -477,6 +482,10 @@ def compute_gating(
     heat_override = heat_quorum_ok = heat_mean_ok = None
     cool_override = cool_quorum_ok = cool_mean_ok = None
 
+    # Soglia PDC effettiva (usata nel ramo ECO/SLEEP/AWAY; per COMFORT/BOOST
+    # la soglia non viene usata per il gating — si espone il valore base).
+    _heat_pdc_on_thr: float = cfg.gating.effective_heat_pdc_on_thr(t_smooth)
+
     if profile in (HVACOperatingProfile.COMFORT, HVACOperatingProfile.BOOST):
         # Profili comfort pieno: basta superare la soglia con la peggio-zona.
         # Nessun quorum richiesto: l'utente vuole comfort massimo, accetta
@@ -507,7 +516,7 @@ def compute_gating(
         # di spegnimento (mantieni acceso finché deficit > -off_margin, cioè
         # finché T_op non ha superato t_op_min di off_margin). Evita short-cycling
         # da oscillazioni attorno al limite.
-        _heat_pdc_on_thr = float(cfg.gating.heat_pdc_on_thr_c)
+        # _heat_pdc_on_thr già calcolato sopra (modulato da t_smooth/RMOT).
         _heat_pdc_off_margin = float(cfg.gating.heat_pdc_off_margin_c)
         _cool_pdc_on_thr = float(cfg.gating.cool_pdc_on_thr_c)
         _cool_pdc_off_margin = float(cfg.gating.cool_pdc_off_margin_c)
@@ -691,4 +700,5 @@ def compute_gating(
         any_cool_or_dehum=bool(any_cool_or_dehum),
         heat_def_global_c=heat_def_global,
         heat_global_pdc_active=(bool(heat_override) if heat_def_global is not None else None),
+        heat_pdc_on_thr_eff_c=float(_heat_pdc_on_thr),
     )

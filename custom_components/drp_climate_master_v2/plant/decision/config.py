@@ -184,6 +184,26 @@ class DemandGatingConfig:
     con margine 0.3°C la PDC non si spegne al primo rientro in banda ma solo
     quando c'è un recupero termico stabile."""
 
+    heat_pdc_on_thr_t_smooth_lo_c: float = 15.0
+    """T_smooth (°C) sotto la quale heat_pdc_on_thr_c è usata invariata.
+    Fisica: con running mean freddo (< 15°C) il regime è invernale o primaverile
+    freddo; la soglia PDC non va alzata — ogni deficit globale è potenzialmente
+    persistente perché la dispersione verso l'esterno è elevata."""
+
+    heat_pdc_on_thr_t_smooth_hi_c: float = 22.0
+    """T_smooth (°C) sopra la quale si applica heat_pdc_on_thr_hi_c.
+    Corrisponde alla soglia regime_hint="hot" (t_smooth >= 22°C).
+    Fisica: con running mean caldo (tarda primavera/estate) deficit transitori
+    si recuperano spontaneamente per apporti solari e dispersione ridotta;
+    la PDC deve partire solo con deficit globale significativo e persistente."""
+
+    heat_pdc_on_thr_hi_c: float = 1.00
+    """Soglia deficit globale (°C) per accensione PDC a t_smooth >= t_smooth_hi.
+    Fisica: a RMOT=22°C un deficit globale < 1°C è quasi sempre transitorio
+    (apporto solare, turno di occupazione, singola zona). Calibrato su costante
+    di tempo termica τ≈55h dell'edificio: recupero spontaneo in 4-6h per
+    deficit < 0.9°C con T_ext > 15°C e apporti solari attivi."""
+
     cool_pdc_on_thr_c: float = 0.5
     """Soglia surplus banda globale (°C) per accensione PDC in raffrescamento.
     Analoga a heat_pdc_on_thr_c, simmetrica sul lato caldo."""
@@ -266,6 +286,37 @@ class DemandGatingConfig:
         alpha = self._alpha(t_ext)
         return float(self.demand_override_factor_mild) - alpha * (
             float(self.demand_override_factor_mild) - float(self.demand_override_factor_cold)
+        )
+
+    def effective_heat_pdc_on_thr(self, t_smooth: float | None) -> float:
+        """Soglia di accensione PDC in riscaldamento, modulata da t_smooth (RMOT).
+
+        Fisica: a RMOT basso (inverno/primavera fredda) la soglia coincide con
+        heat_pdc_on_thr_c: qualsiasi deficit globale è potenzialmente persistente
+        perché la dispersione verso l'esterno è alta. A RMOT alto (tarda
+        primavera, regime_hint="hot") deficit globali lievi si auto-recuperano
+        in poche ore; la soglia sale a heat_pdc_on_thr_hi_c per evitare avvii
+        su domanda transitoria.
+
+        Interpolazione lineare tra (t_smooth_lo, base) e (t_smooth_hi, hi).
+
+        Args:
+            t_smooth: running mean outdoor temperature (°C), analogo al RMOT
+                      di EN 16798-1 / ASHRAE 55. None → fallback conservativo
+                      (heat_pdc_on_thr_c, comportamento invernale).
+
+        Returns:
+            Soglia effettiva (°C) in [heat_pdc_on_thr_c, heat_pdc_on_thr_hi_c].
+        """
+        if t_smooth is None:
+            return float(self.heat_pdc_on_thr_c)
+        lo = float(self.heat_pdc_on_thr_t_smooth_lo_c)
+        hi = float(self.heat_pdc_on_thr_t_smooth_hi_c)
+        if hi <= lo:
+            return float(self.heat_pdc_on_thr_c)
+        alpha = max(0.0, min(1.0, (float(t_smooth) - lo) / (hi - lo)))
+        return float(self.heat_pdc_on_thr_c) + alpha * (
+            float(self.heat_pdc_on_thr_hi_c) - float(self.heat_pdc_on_thr_c)
         )
 
     def quorum_cov(self, profile: HVACOperatingProfile) -> float:

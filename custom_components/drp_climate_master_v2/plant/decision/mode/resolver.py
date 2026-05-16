@@ -107,12 +107,19 @@ class ModeResolver:
         _pdc_snap = getattr(snapshot, "pdc", None)
         _pdc_on = bool(getattr(_pdc_snap, "power_on", False) or False) if _pdc_snap is not None else False
 
+        # Legge t_smooth (RMOT proxy) dal modello meteo per la modulazione
+        # della soglia PDC in funzione del regime termico stagionale.
+        # Fail-safe: None se non disponibile (compute_gating usa fallback base).
+        _wds = getattr(_rh_weather, "weather_day_signals", None) if _rh_weather else None
+        _t_smooth: float | None = as_float(getattr(_wds, "t_smooth", None)) if _wds else None
+
         g = compute_gating(
             cfg=cfg,
             demand=demand,
             profile=profile,
             zones_decision=zones_decision,
             t_ext=as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None)),
+            t_smooth=_t_smooth,
             regime_hint=_regime_hint,
             pdc_currently_on=_pdc_on,
         )
@@ -149,6 +156,7 @@ class ModeResolver:
             cool_quorum_ok=g.cool_quorum_ok,
             cool_mean_ok=g.cool_mean_ok,
             heat_def_global_c=g.heat_def_global_c,
+            heat_pdc_on_thr_eff_c=g.heat_pdc_on_thr_eff_c,
             heat_global_pdc_active=g.heat_global_pdc_active,
             any_heat=g.any_heat,
             any_cool=g.any_cool,

@@ -175,21 +175,30 @@ def fsm_step(stage: StagingState, *, inp: PlantFsmInputs, cfg: PlantFsmConfig) -
         if not inp.request_on:
             transition(PlantPhase.STOPPING)
         else:
-            if st.start_deadline is not None and now > st.start_deadline:
+            # Risoluzione stall_triggered_restart: indipendente dal timeout,
+            # deve sempre resettarsi quando l'energia torna disponibile.
+            if st.stall_triggered_restart:
+                if energy_ok:
+                    # Energia tornata disponibile: rimuovi la soppressione
+                    # valvole e riprendi il normale sequenziamento di avvio.
+                    st.stall_triggered_restart = False
+                    reasons.append("stall_restart_energy_ok")
+                else:
+                    reasons.append("stall_restart_wait_energy")
+
+            # PRIORITÀ: ready_to_run viene valutato PRIMA del timeout.
+            # Motivazione: se il boiler raggiunge la readiness nello stesso tick
+            # in cui scade start_deadline, il sistema deve transitare a RUNNING,
+            # non a FAULT. Il FAULT scatta solo se la readiness non è ancora
+            # soddisfatta E il deadline è scaduto — l'avvio non può completarsi.
+            # L'ordine invertito (timeout prima) causava la perdita di avvii
+            # validi per race condition tick/deadline.
+            ready_to_run = bool(energy_ok and (not inp.needs_valves or inp.valves_ready))
+            if ready_to_run:
+                transition(PlantPhase.RUNNING)
+            elif st.start_deadline is not None and now > st.start_deadline:
                 transition(PlantPhase.FAULT)
                 reasons.append("start_timeout")
-            else:
-                if st.stall_triggered_restart:
-                    if energy_ok:
-                        # Energia tornata disponibile: rimuovi la soppressione
-                        # valvole e riprendi il normale sequenziamento di avvio.
-                        st.stall_triggered_restart = False
-                        reasons.append("stall_restart_energy_ok")
-                    else:
-                        reasons.append("stall_restart_wait_energy")
-                ready_to_run = bool(energy_ok and (not inp.needs_valves or inp.valves_ready))
-                if ready_to_run:
-                    transition(PlantPhase.RUNNING)
 
     elif st.phase == PlantPhase.RUNNING:
         # Ordine di priorità:

@@ -731,6 +731,9 @@ class GatingDiagnostics:
     """Deficit dalla comfort band globale usato per on/off PDC. None = non disponibile."""
     heat_global_pdc_active: Optional[bool] = None
     """True se il segnale globale ha autorizzato heat_sensible. None = non calcolato."""
+    heat_pdc_on_thr_eff_c: Optional[float] = None
+    """Soglia effettiva accensione PDC dopo modulazione t_smooth (RMOT).
+    None = non calcolato (profili COMFORT/BOOST o resolver non eseguito)."""
 
     # -- Flag finali verso ModeResolver --------------------------------------
     any_heat: bool = False
@@ -967,6 +970,7 @@ class PlantDecision:
                 f"  Heat quorum ok     :: {fbool(g.heat_quorum_ok, 'True', 'False')}",
                 f"  Heat mean ok       :: {fbool(g.heat_mean_ok, 'True', 'False')}",
                 f"  Heat def global    :: {fnum(g.heat_def_global_c)} °C",
+                f"  Heat PDC on thr eff:: {fnum(g.heat_pdc_on_thr_eff_c)} °C",
                 f"  Heat PDC global    :: {fbool(g.heat_global_pdc_active, 'True', 'False')}",
                 f"  Cool override      :: {fbool(g.cool_override, 'True', 'False')}",
                 f"  Cool quorum ok     :: {fbool(g.cool_quorum_ok, 'True', 'False')}",
