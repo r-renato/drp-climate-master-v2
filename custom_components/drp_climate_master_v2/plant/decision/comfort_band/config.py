@@ -175,12 +175,12 @@ come hard cap sulla banda calcolata.
 """
 
 T_OP_MIN_SLEEP_CAP_SHOULDER_C: float = 20.0
-"""Cap superiore di t_op_min per profilo SLEEP in stagione di mezza stagione (°C).
+"""Cap superiore di t_op_min per RISCALDAMENTO Sleep in stagione shoulder (°C).
 
 Radice del problema: ISO 7730 è validato per met >= 0.8. Usando met=0.70 (sonno)
 fuori dal dominio della norma, la bisection PMV produce t_op_min artificiosa
-(~23.7°C in shoulder) che porta il sistema a pianificare riscaldamento notturno
-inutile quando la stanza è a 23°C in aprile/ottobre.
+(~23.7°C in shoulder) che porta il sistema a pianificare RISCALDAMENTO notturno
+inutile quando la stanza è a 22-23°C in aprile/ottobre/maggio.
 
 Fisicamente: 20°C è il limite superiore dell'intervallo ottimale per il sonno
 (Muzet et al. 1984; ASHRAE 55). Una t_op_min > 20°C in shoulder season significa
@@ -189,21 +189,40 @@ scientifica considera già calde per dormire.
 
 Implementazione: cap applicato come post-processing in compute_many() sul
 ComfortBandResult restituito da compute_single(), preservando PMV/PPD originali
-(utili per commissioning) e ricalcolando solo il campo ok.
-Inattivo se t_out < T_OP_MIN_SLEEP_CAP_T_OUT_C (protezione autunno freddo).
-Inattivo in winter (coperto dal floor T_OP_MIN_SLEEP_FLOOR_C) e summer.
+(utili per commissioning) e ricalcolando solo t_op_min e ok.
+Attivo se t_out >= T_OP_MIN_SLEEP_CAP_T_OUT_C (8°C, include notti di maggio).
+Inattivo in winter (coperto da T_OP_MIN_SLEEP_HEATING_CAP_WINTER_C) e summer.
+
+Specifico per RISCALDAMENTO: non impatta la logica di raffrescamento perché
+il cap limita t_op_min (bound inferiore) e non t_op_max (bound superiore).
 """
 
-T_OP_MIN_SLEEP_CAP_T_OUT_C: float = 12.0
+T_OP_MIN_SLEEP_HEATING_CAP_WINTER_C: float = 21.0
+"""Cap superiore di t_op_min per RISCALDAMENTO Sleep in stagione invernale (°C).
+
+In inverno il PMV con met=0.70 (sonno, fuori dominio ISO 7730) produce t_op_min
+artificiosa (~23.5-24.0°C) che porta a riscaldamento notturno anche quando
+la stanza è a 21-22°C, temperatura già adeguata per il sonno invernale.
+
+Valore 21°C: permette il riscaldamento notturno quando la stanza scende
+realmente sotto 21°C (es. 19°C in una notte invernale fredda, deficit=2°C),
+ma non genera domanda artificiosa con stanze già a 21°C+.
+
+Attivo SOLO in winter season, a prescindere da t_out.
+Specifico per RISCALDAMENTO: non impatta t_op_max né la logica di cooling.
+"""
+
+T_OP_MIN_SLEEP_CAP_T_OUT_C: float = 8.0
 """Temperatura esterna minima per attivare il cap shoulder SLEEP (°C).
 
-Sotto 12°C la dispersione termica è abbastanza alta da giustificare un target
-notturno più conservativo. Questo guardrail esclude automaticamente le notti
-di autunno inoltrato/novembre freddo in cui la stagione operativa potrebbe
-ancora essere classificata come shoulder ma il comfort notturno richiede
-un target più alto di 20°C.
-Sopra 12°C (aprile mite, ottobre mite): il cap è attivo.
-Sotto 12°C (novembre freddo): cap inattivo, sistema usa t_op_min da PMV.
+Soglia abbassata da 12.0 a 8.0°C per includere le notti di fine primavera
+(maggio) e inizio autunno (ottobre) in cui t_ext scende normalmente a 9-11°C
+pur essendo in piena stagione shoulder con t_smooth > 20°C.
+
+Con t_out=11.6°C (notte di maggio tipica, Roma): 11.6 >= 8.0 → cap ATTIVO.
+Con t_out=7°C (notte di novembre fredda): 7 < 8.0 → cap INATTIVO,
+  il sistema usa t_op_min da PMV (comportamento conservativo corretto).
+Con t_out=2°C (notte invernale): gestita da T_OP_MIN_SLEEP_HEATING_CAP_WINTER_C.
 """
 
 DRAFT_ALPHA_LIVING: float = 0.55

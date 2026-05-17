@@ -29,6 +29,7 @@ from ....domain.models.runtime_schema import RuntimeConfig
 from .config import (
     T_OP_MIN_SLEEP_FLOOR_C,
     T_OP_MIN_SLEEP_CAP_SHOULDER_C,
+    T_OP_MIN_SLEEP_HEATING_CAP_WINTER_C,
     T_OP_MIN_SLEEP_CAP_T_OUT_C,
     V_AIR_BEST_LIVING,
     V_AIR_BEST_OTHER,
@@ -707,21 +708,24 @@ class ComfortBandCalculator:
             )
 
         def _apply_sleep_shoulder_cap(res: ComfortBandResult) -> ComfortBandResult:
-            """Cap superiore di t_op_min per Sleep in shoulder season.
+            """Cap superiore di t_op_min per RISCALDAMENTO Sleep in shoulder season.
 
             Il modello PMV con met=0.70 (sonno) è fuori dal dominio ISO 7730
             (validato per met >= 0.8). In shoulder season questo produce una
             t_op_min artificiosa (~23.7°C) che forza riscaldamento notturno
-            inutile quando la stanza è a 23°C.
+            inutile quando la stanza è a 22-23°C in aprile/maggio/ottobre.
 
             Il cap è attivo SOLO se:
             - stagione operativa = SHOULDER
             - met_used <= 0.95  (proxy profilo Sleep)
-            - outdoor_temp >= T_OP_MIN_SLEEP_CAP_T_OUT_C  (12°C, guardrail autunno)
+            - outdoor_temp >= T_OP_MIN_SLEEP_CAP_T_OUT_C  (8°C)
+              Soglia 8°C include le notti tipiche di maggio (9-12°C)
+              ed esclude le notti autunnali fredde (<8°C).
             - t_op_min calcolata > T_OP_MIN_SLEEP_CAP_SHOULDER_C  (20°C)
 
+            Specifico per RISCALDAMENTO: limita solo t_op_min (bound inferiore),
+            non t_op_max. Non impatta la logica di raffrescamento.
             PMV e PPD originali sono preservati (utili per commissioning).
-            Solo t_op_min e ok vengono aggiornati.
             """
             if not (
                 season_value == OperativeSeason.SHOULDER
@@ -743,6 +747,49 @@ class ComfortBandCalculator:
 
             return res
 
+        def _apply_sleep_winter_cap(res: ComfortBandResult) -> ComfortBandResult:
+            """Cap superiore di t_op_min per RISCALDAMENTO Sleep in stagione invernale.
+
+            In inverno il PMV con met=0.70 (sonno, fuori dominio ISO 7730)
+            produce t_op_min artificiosa (~23.5-24.0°C). Questo causa domanda
+            di riscaldamento notturno anche con stanze già a 21-22°C, temperature
+            adeguate al sonno invernale.
+
+            Il cap è attivo SOLO se:
+            - stagione operativa = WINTER
+            - met_used <= 0.95  (proxy profilo Sleep)
+            - t_op_min calcolata > T_OP_MIN_SLEEP_HEATING_CAP_WINTER_C  (21°C)
+
+            Nessun guardrail su outdoor_temp in inverno: la soglia di 21°C
+            garantisce che stanze genuinamente fredde (<21°C) generino ancora
+            deficit legittimo (es. 19°C in notte invernale → deficit=2°C corretto).
+
+            Specifico per RISCALDAMENTO: limita solo t_op_min (bound inferiore).
+            PMV e PPD originali sono preservati (utili per commissioning).
+            """
+            if not (
+                season_value == OperativeSeason.WINTER
+                and res.met_used is not None
+                and float(res.met_used) <= 0.95
+                and float(res.t_op_min) > T_OP_MIN_SLEEP_HEATING_CAP_WINTER_C
+            ):
+                return res
+
+            res.t_op_min = float(T_OP_MIN_SLEEP_HEATING_CAP_WINTER_C)
+            if res.t_op_max < res.t_op_min:
+                res.t_op_max = res.t_op_min
+
+            if res.t_op is not None:
+                res.ok = bool(res.t_op_min <= float(res.t_op) <= res.t_op_max)
+
+            return res
+
+        def _apply_sleep_caps(res: ComfortBandResult) -> ComfortBandResult:
+            """Applica in sequenza i cap Sleep per riscaldamento (shoulder poi winter)."""
+            res = _apply_sleep_shoulder_cap(res)
+            res = _apply_sleep_winter_cap(res)
+            return res
+
         out: Dict[str, ComfortBandResult] = {}
 
         # Determine rooms list
@@ -755,13 +802,13 @@ class ComfortBandCalculator:
         for room_id in rooms:
             res = _compute_one(str(room_id))
             if res is not None:
-                out[str(room_id)] = _apply_sleep_shoulder_cap(res)
+                out[str(room_id)] = _apply_sleep_caps(res)
 
         if include_global:
             # Convention used in your current code: "global" zone -> "global_indoor"
             if GLOBAL in indoor_zones:
                 res_g = _compute_one(GLOBAL)
                 if res_g is not None:
-                    out[GLOBAL] = _apply_sleep_shoulder_cap(res_g)
+                    out[GLOBAL] = _apply_sleep_caps(res_g)
 
         return out

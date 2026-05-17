@@ -13,3 +13,4 @@ backup*
 archive
 aigen
 influx
+test/logs

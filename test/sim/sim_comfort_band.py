@@ -119,6 +119,9 @@ from custom_components.drp_climate_master_v2.plant.decision.comfort_band.trm imp
 from custom_components.drp_climate_master_v2.plant.decision.comfort_band.config import (
     T_RM_NEUTRAL_BY_SEASON,
     CLO_WINTER_BY_ZONE,
+    T_OP_MIN_SLEEP_CAP_SHOULDER_C,
+    T_OP_MIN_SLEEP_HEATING_CAP_WINTER_C,
+    T_OP_MIN_SLEEP_CAP_T_OUT_C,
 )
 from custom_components.drp_climate_master_v2.domain.enums import HVACOperatingProfile
 from custom_components.drp_climate_master_v2.domain.models.season import OperativeSeason
@@ -1125,4 +1128,223 @@ def test_scenario_cold_snap_s3_combinati(sim_cfg: dict):
         )
 
 
+def test_scenario_sleep_cap_stagionale(sim_cfg: dict):
+    """Documenta l'effetto del cap t_op_min per RISCALDAMENTO Sleep (Patch 0016).
+
+    Scopo
+    -----
+    Verifica che _apply_sleep_shoulder_cap e _apply_sleep_winter_cap
+    (attivi in compute_many) riducano t_op_min rispetto al valore grezzo del
+    bisettore PMV, eliminando la domanda di riscaldamento artificiosa prodotta
+    da met=0.70 fuori dominio ISO 7730.
+
+    Chiama compute_many con ZoneSnapshot mock (SimpleNamespace con attributo
+    .value), che è il pattern minimo sufficiente per _extract_zone_inputs.
+
+    Scenari
+    -------
+    1. Shoulder + outdoor_temp >= 8°C  → cap a 20°C attivo
+       Replica la situazione del 17/05 mattina: stanze 22-23°C, notte 11.6°C.
+    2. Shoulder + outdoor_temp < 8°C   → cap inattivo (notte autunnale fredda)
+    3. Winter                           → cap a 21°C attivo
+    4. Summer                           → nessun cap (not applicable)
+    5. Riepilogo stagionale: deficit PMV grezzo vs effettivo post-cap.
+    """
+    from types import SimpleNamespace
+
+    s = _cfg(sim_cfg, "scenario_sleep_cap_stagionale")
+    rh_pct               = float(s.get("rh_pct",    51.0))
+    vmc_speed            = int(  s.get("vmc_speed",  2))
+    t_op_shoulder        = float(s.get("t_op_shoulder", 22.7))
+    t_op_winter          = float(s.get("t_op_winter",   21.0))
+    t_out_shoulder_night = float(s.get("t_out_shoulder_night", 11.6))
+    t_out_autumn_cold    = float(s.get("t_out_autumn_cold",     7.0))
+    winter_t_ops         = [float(x) for x in s.get(
+        "winter_t_op_values", [18.0, 19.0, 20.0, 21.0, 22.0, 23.0]
+    )]
+    room = _g(sim_cfg, "room_non_living", "camera_1")
+
+    _section(
+        f"SCENARIO — Sleep cap stagionale RISCALDAMENTO (Patch 0016)  "
+        f"(RH={rh_pct}%, VMC={vmc_speed})"
+    )
+
+    # ------------------------------------------------------------------
+    # Helper: ZoneSnapshot mock minimale (solo campi letti da compute_many)
+    # ------------------------------------------------------------------
+    def _mock_zone(t_op_val: float, rh_val: float) -> SimpleNamespace:
+        class _V:
+            def __init__(self, v):
+                self.value = v
+        return SimpleNamespace(
+            humidity=_V(rh_val),
+            t_op=_V(t_op_val),
+            temperature=_V(t_op_val),
+            mrt=None,
+        )
+
+    # ------------------------------------------------------------------
+    # Helper: compute_many con cap Sleep attivo
+    # ------------------------------------------------------------------
+    def _run_many(t_op_val: float, season: OperativeSeason, outdoor_temp: Optional[float]):
+        layer_obj = _layer(sim_cfg=sim_cfg)
+        calc_obj  = _calc()
+        results = calc_obj.compute_many(
+            now=datetime(2025, 5, 17, 6, 0, 0, tzinfo=timezone.utc),
+            season=season,
+            vmc_air_speed=vmc_speed,
+            indoor_zones={room: _mock_zone(t_op_val, rh_pct)},
+            outdoor_temp=outdoor_temp,
+            mode=HVACOperatingProfile.SLEEP,
+            policy_layer=layer_obj,
+            room_names=[room],
+            include_global=False,
+        )
+        return results.get(room)
+
+    # ------------------------------------------------------------------
+    # Parte 1 — Shoulder: cap attivo (t_out >= 8°C) vs inattivo (t_out < 8°C)
+    # ------------------------------------------------------------------
+    _subsection(
+        f"Parte 1 — Shoulder: effetto t_out sul cap  "
+        f"(T_op={t_op_shoulder}°C, cap={T_OP_MIN_SLEEP_CAP_SHOULDER_C}°C, "
+        f"soglia t_out={T_OP_MIN_SLEEP_CAP_T_OUT_C}°C)"
+    )
+    print(
+        f"\n  {'Caso':<38}  {'t_op_min PMV':>12}  "
+        f"{'t_op_min eff':>12}  {'deficit eff':>11}  {'cap':>8}"
+    )
+    print("  " + "─" * 90)
+
+    shoulder_cases = [
+        (f"notte maggio  t_out={t_out_shoulder_night}°C",
+         t_out_shoulder_night, OperativeSeason.SHOULDER),
+        (f"notte novembre t_out={t_out_autumn_cold}°C",
+         t_out_autumn_cold,    OperativeSeason.SHOULDER),
+        ("t_out=None (sensore KO)",
+         None,                 OperativeSeason.SHOULDER),
+    ]
+    for label, t_out, season in shoulder_cases:
+        # t_op_min raw dal bisettore PMV (compute_single senza cap)
+        ctx_raw = _ctx(
+            season=season, mode=HVACOperatingProfile.SLEEP,
+            room=room, rh_pct=rh_pct, t_op_current=t_op_shoulder,
+            vmc_speed=vmc_speed,
+        )
+        _, res_raw = _run(ctx_raw, sim_cfg=sim_cfg)
+        t_min_pmv = res_raw.t_op_min
+
+        # t_op_min effettiva dopo cap (compute_many)
+        res_cap = _run_many(t_op_shoulder, season, t_out)
+        if res_cap is None:
+            print(f"  {label:<38}  [zona non calcolata]")
+            continue
+        t_min_eff   = res_cap.t_op_min
+        cap_active  = t_min_eff < t_min_pmv - 0.05
+        deficit_eff = max(0.0, t_min_eff - t_op_shoulder)
+        print(
+            f"  {label:<38}  {t_min_pmv:>11.2f}°C  "
+            f"{t_min_eff:>11.2f}°C  "
+            f"{deficit_eff:>+10.2f}°C  "
+            f"{'✓ SÌ' if cap_active else '✗ NO':>8}"
+        )
+        deficit_pmv = max(0.0, t_min_pmv - t_op_shoulder)
+        if deficit_pmv > 0 and deficit_eff == 0.0:
+            print(f"    → deficit PMV +{deficit_pmv:.2f}°C eliminato (riscaldamento notturno soppresso)")
+        elif deficit_pmv > 0 and 0.0 < deficit_eff < deficit_pmv:
+            print(f"    → deficit ridotto: +{deficit_pmv:.2f}°C → +{deficit_eff:.2f}°C")
+
+    # ------------------------------------------------------------------
+    # Parte 2 — Winter: cap a 21°C, stanze fredde vs calde
+    # ------------------------------------------------------------------
+    _subsection(
+        f"Parte 2 — Winter: cap a {T_OP_MIN_SLEEP_HEATING_CAP_WINTER_C}°C  "
+        f"(stanze fredde → riscaldamento legittimo; stanze calde → soppresso)"
+    )
+    print(
+        f"\n  {'T_op zona':<10}  {'t_op_min PMV':>13}  "
+        f"{'t_op_min eff':>13}  {'deficit PMV':>12}  {'deficit eff':>12}  {'cap':>4}"
+    )
+    print("  " + "─" * 80)
+
+    for t_op_w in winter_t_ops:
+        ctx_raw = _ctx(
+            season=OperativeSeason.WINTER, mode=HVACOperatingProfile.SLEEP,
+            room=room, rh_pct=rh_pct, t_op_current=t_op_w, vmc_speed=vmc_speed,
+        )
+        _, res_raw = _run(ctx_raw, sim_cfg=sim_cfg)
+        t_min_pmv = res_raw.t_op_min
+
+        res_cap = _run_many(t_op_w, OperativeSeason.WINTER, outdoor_temp=None)
+        if res_cap is None:
+            continue
+        t_min_eff   = res_cap.t_op_min
+        cap_active  = t_min_eff < t_min_pmv - 0.05
+        def_pmv     = max(0.0, t_min_pmv - t_op_w)
+        def_eff     = max(0.0, t_min_eff - t_op_w)
+        note = ""
+        if def_pmv > 0 and def_eff == 0.0:
+            note = "← soppresso"
+        elif def_eff > 0:
+            note = "← legittimo"
+        print(
+            f"  T_op={t_op_w:>5.1f}°C  "
+            f"{t_min_pmv:>12.2f}°C  "
+            f"{t_min_eff:>12.2f}°C  "
+            f"{def_pmv:>+11.2f}°C  "
+            f"{def_eff:>+11.2f}°C  "
+            f"{'✓' if cap_active else '✗':>4}  {note}"
+        )
+
+    # ------------------------------------------------------------------
+    # Parte 3 — Summer: nessun cap (atteso)
+    # ------------------------------------------------------------------
+    _subsection("Parte 3 — Summer: cap non applicato (expected)")
+    ctx_raw = _ctx(
+        season=OperativeSeason.SUMMER, mode=HVACOperatingProfile.SLEEP,
+        room=room, rh_pct=rh_pct, t_op_current=25.5, vmc_speed=vmc_speed,
+    )
+    _, res_raw_s = _run(ctx_raw, sim_cfg=sim_cfg)
+    res_cap_s    = _run_many(25.5, OperativeSeason.SUMMER, outdoor_temp=28.0)
+    if res_cap_s is not None:
+        delta = res_raw_s.t_op_min - res_cap_s.t_op_min
+        ok_s  = "cap non applicato ✓" if abs(delta) < 0.05 else "CAP APPLICATO ✗ (inatteso)"
+        print(
+            f"\n  t_op_min PMV={res_raw_s.t_op_min:.2f}°C  "
+            f"t_op_min eff={res_cap_s.t_op_min:.2f}°C  "
+            f"Δ={delta:.3f}°C  {ok_s}"
+        )
+
+    # ------------------------------------------------------------------
+    # Parte 4 — Riepilogo stagionale
+    # ------------------------------------------------------------------
+    _subsection("Parte 4 — Riepilogo stagionale: t_op_min PMV vs effettivo")
+    print(
+        f"\n  {'Stagione':<10}  {'T_op':>6}  {'t_op_min PMV':>13}  "
+        f"{'t_op_min eff':>13}  {'deficit soppresso':>19}"
+    )
+    print("  " + "─" * 72)
+    summary = [
+        (OperativeSeason.SHOULDER, t_op_shoulder, t_out_shoulder_night, "notte maggio"),
+        (OperativeSeason.WINTER,   t_op_winter,   None,                 "notte invernale"),
+        (OperativeSeason.SUMMER,   25.5,          28.0,                 "notte estiva"),
+    ]
+    for season, t_op_val, t_out, note in summary:
+        ctx_raw = _ctx(
+            season=season, mode=HVACOperatingProfile.SLEEP,
+            room=room, rh_pct=rh_pct, t_op_current=t_op_val, vmc_speed=vmc_speed,
+        )
+        _, res_r = _run(ctx_raw, sim_cfg=sim_cfg)
+        res_c    = _run_many(t_op_val, season, t_out)
+        if res_c is None:
+            continue
+        def_pmv    = max(0.0, res_r.t_op_min - t_op_val)
+        def_eff    = max(0.0, res_c.t_op_min - t_op_val)
+        suppressed = max(0.0, def_pmv - def_eff)
+        print(
+            f"  {season.value:<10}  {t_op_val:>5.1f}°C  "
+            f"{res_r.t_op_min:>12.2f}°C  "
+            f"{res_c.t_op_min:>12.2f}°C  "
+            f"{suppressed:>+18.2f}°C  ({note})"
+        )
 

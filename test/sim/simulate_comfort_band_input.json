@@ -232,5 +232,16 @@
     "t_rm_values":        [null, 14.0, 16.0, 17.5, 19.0, 22.5],
     "cold_snap_values":   [false, true],
     "profiles_to_compare": ["Comfort", "Eco", "Sleep", "Away"]
+  },
+
+  "scenario_sleep_cap_stagionale": {
+    "_comment": "Patch 0016 — Sleep heating cap stagionale: verifica riduzione t_op_min Sleep via compute_many",
+    "rh_pct": 51.0,
+    "vmc_speed": 2,
+    "t_op_shoulder": 22.7,
+    "t_op_winter": 21.0,
+    "t_out_shoulder_night": 11.6,
+    "t_out_autumn_cold": 7.0,
+    "winter_t_op_values": [18.0, 19.0, 20.0, 21.0, 22.0, 23.0]
   }
 }

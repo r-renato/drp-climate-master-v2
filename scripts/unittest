@@ -1,0 +1,43 @@
+#!/bin/bash
+
+set -e
+set -o pipefail  # importante: fa fallire lo script se pytest fallisce anche usando tee
+
+clear
+
+TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
+LOG_DIR="$PWD/test/logs/test_$TIMESTAMP"
+
+mkdir -p "$LOG_DIR"
+
+clear
+echo "Avvio unit test..."
+echo "Log directory: $LOG_DIR"
+echo
+
+run_test() {
+  local name="$1"
+  shift
+
+  local log_file="$LOG_DIR/${name}.log"
+
+  echo "========================================"
+  echo "Eseguo: $name"
+  echo "Log: $log_file"
+  echo "========================================"
+
+  "$@" 2>&1 | tee "$log_file"
+
+  echo
+}
+
+run_test "test_comfort_band" \
+  python3 -m pytest "$PWD/test/unit/test_comfort_band.py" -v
+
+run_test "test_vmc_policy" \
+  python3 -m pytest "$PWD/test/unit/test_vmc_policy.py" -v
+
+run_test "sim_comfort_band" \
+  python3 -m pytest "$PWD/test/sim/sim_comfort_band.py" -s -v
+
+echo "Tutti i test sono passati!"

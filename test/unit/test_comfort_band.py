@@ -464,13 +464,23 @@ class TestPolicyLayerS3:
         assert dec_cold.clo > dec_base.clo, "T_rm fredda deve aumentare CLO"
 
     def test_s3_warm_week_decreases_clo(self):
-        """Settimana mite (T_rm > neutro): CLO deve scendere."""
+        """Settimana mite (T_rm > neutro): CLO deve scendere.
+
+        t_op_current deve essere coerente con la running mean (casa
+        effettivamente calda da una settimana). Con t_op_current=20°C e
+        t_rm=25.5°C la deviazione è 5.5°C > T_RM_MAX_DEVIATION_SUPPRESS_C
+        (4°C): S3 verrebbe soppressa come "rientro da assenza", non come
+        adattamento comportamentale. Il scenario corretto è: casa calda,
+        running mean alta, t_op_current vicina alla t_rm.
+        """
         layer = _layer(ClimateZoneIT.D)
         dec_base = layer.decide(_ctx(season=OperativeSeason.WINTER, t_op_running_mean=None))
         t_rm_neutral = T_RM_NEUTRAL_BY_SEASON["winter"]
+        t_rm_warm = t_rm_neutral + 4.0  # 25.5°C
         dec_warm = layer.decide(_ctx(
             season=OperativeSeason.WINTER,
-            t_op_running_mean=t_rm_neutral + 4.0,  # 4°C sopra il neutro
+            t_op_running_mean=t_rm_warm,
+            t_op_current=t_rm_warm - 0.5,  # 25.0°C: coerente con settimana calda
         ))
         assert dec_warm.clo < dec_base.clo, "T_rm mite deve ridurre CLO"
 
@@ -579,6 +589,32 @@ class TestPolicyLayerS3:
         reasons_str = " ".join(dec.reasons)
         assert "clo:trm" in reasons_str, (
             f"Correzione S3 assente nei reasons: {dec.reasons}"
+        )
+
+    def test_s3_suppressed_on_reentry(self):
+        """Grande deviazione |t_op_current - t_rm| → S3 soppressa (rientro da assenza).
+
+        Se la running mean è lontana dalla temperatura attuale, il sistema
+        è in uno scenario di rientro (casa lasciata fredda/calda), non in
+        un adattamento comportamentale graduale. S3 deve essere soppressa
+        per evitare una correzione CLO anomala.
+
+        Con t_op_current=20°C e t_rm=5°C: deviazione=15°C >> threshold=4°C.
+        CLO deve rimanere uguale al baseline (nessuna correzione).
+        """
+        layer = _layer(ClimateZoneIT.D)
+        dec_base = layer.decide(_ctx(season=OperativeSeason.WINTER, t_op_running_mean=None))
+        # t_rm molto bassa (casa lasciata fredda), t_op_current = 20°C (default)
+        # deviazione = |20.0 - 5.0| = 15°C >> T_RM_MAX_DEVIATION_SUPPRESS_C
+        dec_reentry = layer.decide(_ctx(
+            season=OperativeSeason.WINTER,
+            t_op_running_mean=5.0,
+        ))
+        assert any("suppressed" in r for r in dec_reentry.reasons), (
+            f"Rientro da casa fredda deve sopprimere S3; reasons={dec_reentry.reasons}"
+        )
+        assert dec_reentry.clo == pytest.approx(dec_base.clo, abs=0.001), (
+            "Con S3 soppressa il CLO non deve cambiare rispetto al baseline"
         )
 
 
@@ -917,22 +953,35 @@ class TestS3Integration:
         )
 
     def test_warm_week_shifts_band_up(self):
-        """Settimana mite → CLO scende → banda si sposta verso T più alte."""
+        """Settimana mite → CLO scende → banda si sposta verso T più alte.
+
+        Usa t_rm_neutral + 2.0 anziché +4.0: con t_op_current=21.0°C (hardcoded
+        in _band_for_trm) e t_rm=25.5°C la deviazione sarebbe 4.5°C >
+        T_RM_MAX_DEVIATION_SUPPRESS_C (4°C) → S3 soppressa. Con +2.0 la
+        deviazione è 2.5°C → S3 attiva e la banda si sposta correttamente.
+        """
         t_rm_neutral = T_RM_NEUTRAL_BY_SEASON["winter"]
         min_base, max_base = self._band_for_trm(None)
-        min_warm, max_warm = self._band_for_trm(t_rm_neutral + 4.0)
+        min_warm, max_warm = self._band_for_trm(t_rm_neutral + 2.0)
         assert min_warm > min_base, (
             f"t_op_min mite ({min_warm:.2f}) non è salita vs base ({min_base:.2f})"
         )
 
     def test_shift_magnitude_bounded(self):
-        """Lo shift della banda deve essere entro i limiti fisici del cap."""
+        """Lo shift della banda deve essere entro i limiti fisici del cap.
+
+        Usa t_rm_neutral - 3.5 (=18°C) anziché 5°C: con t_op_current=21.0°C
+        hardcoded in _band_for_trm, t_rm=5°C produce deviazione=16°C >>
+        T_RM_MAX_DEVIATION_SUPPRESS_C (4°C) → S3 soppressa, shift=0.
+        Con t_rm=18°C la deviazione è 3°C → S3 attiva, delta_clo=+0.175
+        (entro il cap di 0.25), shift misurabile e < 3°C.
+        """
         t_rm_neutral = T_RM_NEUTRAL_BY_SEASON["winter"]
         min_base, _ = self._band_for_trm(None)
-        # Caso estremo: T_rm a 5°C (saturo il cap)
-        min_cold, _ = self._band_for_trm(5.0)
+        # t_rm 3.5°C sotto il neutro: deviazione da t_op_current=21°C è 3.0°C < 4°C
+        min_cold, _ = self._band_for_trm(t_rm_neutral - 3.5)
         shift = min_base - min_cold
-        # Il cap è 0.25 clo; l'effetto sulla T_op è circa 1-1.5°C
+        # Il cap è 0.25 clo; l'effetto sulla T_op è circa 0.5-1.5°C
         assert 0.0 < shift < 3.0, (
             f"Shift banda fuori range atteso: {shift:.2f}°C"
         )
