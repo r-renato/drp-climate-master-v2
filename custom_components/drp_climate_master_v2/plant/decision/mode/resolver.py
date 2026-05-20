@@ -101,11 +101,20 @@ class ModeResolver:
         _rh_weather = getattr(getattr(snapshot, "season", None), "weather", None)
         _regime_hint: str = str(getattr(_rh_weather, "regime_hint", "mild")) if _rh_weather else "mild"
 
-        # Legge stato PDC per l'isteresi on/off (Patch B).
+        # Legge stato PDC per l'isteresi on/off (Patch B + Patch 0016).
         # power_on può essere None se il sensore non è disponibile: in quel caso
         # pdc_currently_on = False (conservativo: non assume PDC accesa).
+        # device_mode: int letto dal registro Modbus Aermec (1=heating, altro=cooling).
+        # Fail-safe: None se il sensore non è disponibile → compute_gating usa solo
+        # il ramo "start" (no isteresi keep-running) per entrambe le direzioni.
         _pdc_snap = getattr(snapshot, "pdc", None)
         _pdc_on = bool(getattr(_pdc_snap, "power_on", False) or False) if _pdc_snap is not None else False
+        _pdc_device_mode: int | None = getattr(_pdc_snap, "device_mode", None) if _pdc_snap is not None else None
+        _pdc_mode_str: str | None = (
+            "heating" if _pdc_device_mode == 1
+            else "cooling" if _pdc_device_mode is not None
+            else None
+        )
 
         # Legge t_smooth (RMOT proxy) dal modello meteo per la modulazione
         # della soglia PDC in funzione del regime termico stagionale.
@@ -122,6 +131,7 @@ class ModeResolver:
             t_smooth=_t_smooth,
             regime_hint=_regime_hint,
             pdc_currently_on=_pdc_on,
+            pdc_current_mode=_pdc_mode_str,
         )
 
         # --------------------

@@ -265,6 +265,7 @@ def compute_gating(
     t_smooth: Optional[float] = None,
     regime_hint: str = "mild",
     pdc_currently_on: bool = False,
+    pdc_current_mode: Optional[str] = None,
 ) -> GatingResult:
     """Calcola soglie e flag di gating dipendenti dal profilo operativo.
 
@@ -456,6 +457,15 @@ def compute_gating(
     heat_def_global: Optional[float] = float(_raw_global_heat) if _raw_global_heat is not None else None
     cool_sur_global: Optional[float] = float(_raw_global_cool) if _raw_global_cool is not None else None
 
+    # -- Flag isteresi PDC mode-aware (Patch 0016) ----------------------------
+    # pdc_currently_on è True se la PDC è alimentata, indipendentemente dal
+    # modo. I flag distinti per modo evitano che l'isteresi "keep cooling running"
+    # scatti quando la PDC è ON in heating (e viceversa).
+    # Fail-safe: se pdc_current_mode è None (sensore non disponibile) entrambi
+    # i flag sono False: si usa solo il ramo "start", mai "keep running".
+    pdc_heat_on: bool = pdc_currently_on and (pdc_current_mode == "heating")
+    pdc_cool_on: bool = pdc_currently_on and (pdc_current_mode == "cooling")
+
     # -- Fase 1: Aggressivita e soglie effettive ----------------------------
     # ctrl_aggr: unica fonte di verita in DemandGatingConfig.ctrl_aggr_by_profile.
     # ctrl_eff: clamp a 0.2 per evitare soglie irraggiungibili (heat_thr > 5x base).
@@ -522,11 +532,11 @@ def compute_gating(
         _cool_pdc_off_margin = float(cfg.gating.cool_pdc_off_margin_c)
 
         if heat_def_global is not None:
-            if pdc_currently_on:
-                # PDC accesa: mantieni accesa finché non c'è surplus stabile
+            if pdc_heat_on:
+                # PDC accesa in heating: mantieni accesa finché non c'è surplus stabile
                 heat_override = heat_def_global > -_heat_pdc_off_margin
             else:
-                # PDC spenta: accendi solo con deficit globale >= soglia generosa
+                # PDC spenta o in cooling: accendi solo con deficit globale >= soglia
                 heat_override = heat_def_global >= _heat_pdc_on_thr
         else:
             # Fallback worst-zone (segnale globale non disponibile)
@@ -546,10 +556,29 @@ def compute_gating(
         # idronico. Tipico scenario: giornata invernale soleggiata con zona
         # esposta a sud che supera la comfort band per apporti solari.
         free_cool_ok = bool(getattr(demand, "free_cool_feasible", False))
+        # cool_headroom_min_c: min_z(T_max(z) - T_op(z)) — positivo quando la casa è
+        # sotto l'upper bound, negativo quando sopra. NON è clamped a 0, quindi
+        # può segnalare "casa lontana dall'upper bound" anche quando cool_sur_global=0.
+        _cool_headroom: Optional[float] = (
+            float(demand.cool_headroom_min_c)
+            if getattr(demand, "cool_headroom_min_c", None) is not None
+            else None
+        )
         if cool_sur_global is not None:
-            if pdc_currently_on:
-                cool_override = (cool_sur_global > -_cool_pdc_off_margin) and not free_cool_ok
+            if pdc_cool_on:
+                # PDC accesa in cooling: mantieni accesa solo se la casa è ancora vicina
+                # all'upper bound (headroom ≤ off_margin). (Patch 0017)
+                # NON usare cool_sur_global (clamped a 0): 0.0 > -0.3 è sempre True
+                # → cooling permanente anche con casa 2°C sotto l'upper bound.
+                # cool_headroom_min_c = 1.7°C → 1.7 <= 0.3 = False → STOP ✓
+                # cool_headroom_min_c = 0.1°C → 0.1 <= 0.3 = True  → run  ✓
+                if _cool_headroom is not None:
+                    cool_override = (_cool_headroom <= _cool_pdc_off_margin) and not free_cool_ok
+                else:
+                    # Fail-safe: headroom non disponibile, usa surplus (comportamento pre-patch)
+                    cool_override = (cool_sur_global > -_cool_pdc_off_margin) and not free_cool_ok
             else:
+                # PDC spenta o in heating: accendi solo con surplus globale >= soglia
                 cool_override = (cool_sur_global >= _cool_pdc_on_thr) and not free_cool_ok
         else:
             cool_override = (cool_sur >= cool_thr * eff_cool_override) and not free_cool_ok

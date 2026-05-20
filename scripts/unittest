@@ -34,6 +34,9 @@ run_test() {
 run_test "test_comfort_band" \
   python3 -m pytest "$PWD/test/unit/test_comfort_band.py" -v
 
+run_test "test_demand_signals" \
+  python3 -m pytest "$PWD/test/unit/test_demand_signals.py" -v
+
 run_test "test_vmc_policy" \
   python3 -m pytest "$PWD/test/unit/test_vmc_policy.py" -v
 

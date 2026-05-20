@@ -209,8 +209,12 @@ class DemandGatingConfig:
     Analoga a heat_pdc_on_thr_c, simmetrica sul lato caldo."""
 
     cool_pdc_off_margin_c: float = 0.3
-    """Margine isteresi (°C) sotto t_op_max globale per lo spegnimento PDC in raffrescamento.
-    Analoga a heat_pdc_off_margin_c, simmetrica sul lato caldo."""
+    """Margine isteresi (°C) per lo spegnimento PDC in raffrescamento. (Patch 0017)
+    Semantica: mantieni il cooling attivo finché cool_headroom_min_c <= off_margin,
+    cioè finché almeno una zona è entro off_margin dall'upper bound della comfort band.
+    Esempio: off_margin=0.3°C → cooling si spegne quando tutte le zone sono > 0.3°C
+    sotto l'upper bound. Nota: NON usa cool_sur_global (clamped a 0 in banda) per
+    evitare il loop infinito 0.0 > -0.3 = True."""
 
     ctrl_aggr_by_profile: dict[HVACOperatingProfile, float] = field(
         default_factory=lambda: {
