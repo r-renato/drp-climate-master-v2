@@ -19,10 +19,12 @@ from ..config import DemandGatingConfig
 from ..comfort_band.mpc.rc_model import RcZoneModel
 from ..comfort_band.model import ComfortBandResult
 
+
 def _binary_sequences(n: int) -> Iterable[list[int]]:
     """Generate all binary sequences of length n (as lists of 0/1)."""
     for bits in itertools.product((0, 1), repeat=n):
         yield list(bits)
+
 
 def _violates_min_hold(seq: list[int], *, u_prev: int, hold_steps: int) -> bool:
     if hold_steps <= 1:
@@ -41,6 +43,7 @@ def _violates_min_hold(seq: list[int], *, u_prev: int, hold_steps: int) -> bool:
             last = u
     return False
 
+
 def _band_with_slack(*, t_min: float, t_max: float, slack_c: float) -> tuple[float, float]:
     s = max(0.0, float(slack_c or 0.0))
     return float(t_min) - s, float(t_max) + s
@@ -48,12 +51,12 @@ def _band_with_slack(*, t_min: float, t_max: float, slack_c: float) -> tuple[flo
 
 @dataclass(slots=True)
 class ZoneDecisionPlanner:
-    """Per-zone MPC-lite over binary valve commands.
+    """Pianificatore MPC-lite per valvole di zona binarie (heating e cooling).
 
-    Scope (v1):
-      - Heating only
-      - Per-zone optimization (no coupling constraints)
-      - Uses comfort band (t_op_min/max) if available
+    Scope v2:
+      - Heating e cooling per zona, con modello RC direzionale.
+      - Ottimizzazione per zona indipendente, senza vincoli di accoppiamento.
+      - Usa la comfort band (t_op_min/max) se disponibile.
     """
 
     cfg: ControlConfig = field(default_factory=ControlConfig)
@@ -150,10 +153,42 @@ class ZoneDecisionPlanner:
         )
         return mpc_eff, ctrl_aggr
 
-    def plan(self, *, snapshot: PlantSnapshot, reason: str, comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None) -> ZonesDecision:
+    def plan(
+        self,
+        *,
+        snapshot: PlantSnapshot,
+        reason: str,
+        comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None,
+        cooling: bool = False,
+        free_cool_feasible: bool = False,
+    ) -> ZonesDecision:
+        """Produce il piano MPC-lite per tutte le zone.
+
+        ``cooling=False`` mantiene il comportamento heating preesistente.
+        ``cooling=True`` usa il guadagno RC cooling e penalizza il surplus
+        oltre ``t_max`` con la stessa funzione obiettivo quadratica.
+        """
         mpc_base = self.cfg.mpc
         mpc_eff, ctrl_aggr = self._profile_scaled_mpc(snapshot, mpc_base)
-        plan = self._plan_once(snapshot=snapshot, reason=reason, mpc=mpc_eff, comfort_bands_by_zone=comfort_bands_by_zone, meta_extra={"mpc_retry": False, "mpc_ctrl_aggr": float(ctrl_aggr)})
+        if cooling and not free_cool_feasible:
+            try:
+                cache = vars(snapshot).get("_demand_signals_cache")
+            except TypeError:
+                cache = None
+            free_cool_feasible = bool(getattr(cache, "free_cool_feasible", False))
+        plan = self._plan_once(
+            snapshot=snapshot,
+            reason=reason,
+            mpc=mpc_eff,
+            comfort_bands_by_zone=comfort_bands_by_zone,
+            cooling=cooling,
+            free_cool_feasible=free_cool_feasible,
+            meta_extra={
+                "mpc_retry": False,
+                "mpc_ctrl_aggr": float(ctrl_aggr),
+                "mpc_cooling": cooling,
+            },
+        )
 
         n = len(plan.zones)
         if n == 0:
@@ -185,6 +220,10 @@ class ZoneDecisionPlanner:
         plan.meta["mpc_full_on_pct"] = round(full_on_pct, 1)
         plan.meta["mpc_full_off_pct"] = round(full_off_pct, 1)
 
+        # Il retry degenerativo si applica solo al piano heating.
+        if cooling:
+            return plan
+
         all_in_band = True
         for zn in plan.zones.keys():
             z = (snapshot.indoor_zones or {}).get(zn)
@@ -211,10 +250,12 @@ class ZoneDecisionPlanner:
                 reason=reason,
                 mpc=mpc_retry,
                 comfort_bands_by_zone=comfort_bands_by_zone,
+                cooling=False,
                 meta_extra={
                     "mpc_retry": True,
                     "mpc_retry_reason": "degenerate_full_on",
                     "mpc_full_on_pct_prev": round(full_on_pct, 1),
+                    "mpc_cooling": False,
                 },
             )
             plan2.warnings.append("mpc_retry_degenerate_full_on")
@@ -222,7 +263,17 @@ class ZoneDecisionPlanner:
 
         return plan
 
-    def _plan_once(self, *, snapshot: PlantSnapshot, reason: str, mpc: MpcConfig, comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None, meta_extra: dict[str, Any] | None = None) -> ZonesDecision:
+    def _plan_once(
+        self,
+        *,
+        snapshot: PlantSnapshot,
+        reason: str,
+        mpc: MpcConfig,
+        comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None,
+        cooling: bool = False,
+        free_cool_feasible: bool = False,
+        meta_extra: dict[str, Any] | None = None,
+    ) -> ZonesDecision:
         ts = snapshot.timestamp if isinstance(snapshot.timestamp, datetime) else dt_util.utcnow()
         # Enforce timezone-aware timestamp (best effort)
         if isinstance(ts, datetime) and ts.tzinfo is None:
@@ -235,6 +286,7 @@ class ZoneDecisionPlanner:
             ),
             "windows_closed": snapshot.windows_close_state,
             "vacation": snapshot.presence_vacation,
+            "cooling": cooling,
             "mpc": {
                 "dt_minutes": int(mpc.dt_minutes),
                 "horizon_steps": int(mpc.horizon_steps),
@@ -289,9 +341,11 @@ class ZoneDecisionPlanner:
                 zone_key=zone_name,
                 t_out_series=t_out_series,
                 windows_closed=snapshot.windows_close_state,
+                free_cool_feasible=free_cool_feasible,
                 reason=reason,
                 mpc=mpc,
                 comfort_bands_by_zone=comfort_bands_by_zone,
+                cooling=cooling,
             )
             if zd is not None:
                 plan.zones[zone_name] = zd
@@ -308,10 +362,13 @@ class ZoneDecisionPlanner:
         zone_key: str,
         t_out_series: list[float],
         windows_closed: Optional[bool],
+        free_cool_feasible: bool = False,
         reason: str,
         mpc: MpcConfig,
         comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None,
+        cooling: bool = False,
     ) -> ZoneCommand | None:
+        """Pianifica la valvola per una singola zona in heating o cooling."""
         # We need a controlled variable: prefer operative temperature.
         t_meas = as_float(getattr(zone.t_op, "value", None))
         if t_meas is None:
@@ -324,7 +381,7 @@ class ZoneDecisionPlanner:
         t_min = as_float(getattr(band, "t_op_min", None))
         t_max = as_float(getattr(band, "t_op_max", None))
         if t_min is None or t_max is None:
-            # No band -> skip MPC (or fall back to a simple deadband later)
+            # No band -> skip MPC
             return ZoneCommand(
                 zone=zone_key,
                 valve_on=False,
@@ -333,13 +390,19 @@ class ZoneDecisionPlanner:
                 debug={"skip": "missing_comfort_band"},
             )
 
-        # Window policy (v1):
-        # - windows_closed == True  -> allow MPC to decide freely
-        # - windows_closed != True  -> only allow heating if clearly below band
-        if windows_closed is True:
-            allow_heat = True
+        # Policy apertura valvola in funzione della direzione e delle finestre.
+        if not cooling:
+            if windows_closed is True:
+                allow_actuation = True
+            else:
+                allow_actuation = (t_meas < (t_min - 1.0))
         else:
-            allow_heat = (t_meas < (t_min - 1.0))
+            if windows_closed is True:
+                allow_actuation = True
+            elif free_cool_feasible:
+                allow_actuation = False
+            else:
+                allow_actuation = True
 
         # Previous actuation (to penalize switching)
         u_prev = 0
@@ -355,14 +418,27 @@ class ZoneDecisionPlanner:
         best_cost = float("inf")
         best_debug: dict[str, Any] = {}
 
-        # Fast-path: heating disallowed by policy -> return OFF schedule
-        if not allow_heat:
+        # Fast-path: azionamento bloccato da policy -> return OFF schedule.
+        if not allow_actuation:
+            skip_reason = (
+                "free_cool_feasible_windows_open"
+                if (cooling and free_cool_feasible)
+                else "windows_or_policy"
+            )
             return ZoneCommand(
                 zone=zone_key,
                 valve_on=False,
                 seq=[0] * mpc.horizon_steps,
                 cost=0.0,
-                debug={"skip": "windows_or_policy", "windows_closed": windows_closed, "t_meas": t_meas, "t_min": t_min},
+                debug={
+                    "skip": skip_reason,
+                    "cooling": cooling,
+                    "windows_closed": windows_closed,
+                    "free_cool_feasible": free_cool_feasible,
+                    "t_meas": t_meas,
+                    "t_min": t_min,
+                    "t_max": t_max,
+                },
             )
 
         # Brute-force enumeration is fine at horizon<=12 (4096 combos).
@@ -370,7 +446,13 @@ class ZoneDecisionPlanner:
         for seq in _binary_sequences(mpc.horizon_steps):
             if _violates_min_hold(seq, u_prev=u_prev, hold_steps=min_hold_steps):
                 continue
-            temps = model.simulate(t0_c=t_meas, t_out_c=t_out_series, u=seq, dt_minutes=mpc.dt_minutes)
+            temps = model.simulate(
+                t0_c=t_meas,
+                t_out_c=t_out_series,
+                u=seq,
+                dt_minutes=mpc.dt_minutes,
+                cooling=cooling,
+            )
 
             # cost terms
             c_comfort = 0.0
@@ -409,7 +491,11 @@ class ZoneDecisionPlanner:
                     "t_min_eff": t_min_eff,
                     "t_max_eff": t_max_eff,
                     "u_prev": u_prev,
-                    "rc": {"tau_h": p.tau_h, "k_c_per_h": p.k_c_per_h},
+                    "cooling": cooling,
+                    "rc": {
+                        "tau_h": p.tau_h,
+                        "k_active": p.k_cool_c_per_h if cooling else p.k_c_per_h,
+                    },
                     "min_switch": {"minutes": int(mpc.min_switch_minutes), "hold_steps": int(min_hold_steps)},
                     "terms": {
                         "comfort": c_comfort,
@@ -420,10 +506,9 @@ class ZoneDecisionPlanner:
                 }
 
         if best_seq is None:
-            # Only possible when allow_heat=False and we filtered everything out.
             best_seq = [0] * mpc.horizon_steps
             best_cost = 0.0
-            best_debug = {"skip": "windows_or_policy"}
+            best_debug = {"skip": "no_feasible_sequence", "cooling": cooling}
 
         return ZoneCommand(
             zone=zone_key,

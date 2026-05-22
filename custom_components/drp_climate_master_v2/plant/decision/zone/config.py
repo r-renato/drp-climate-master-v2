@@ -6,19 +6,86 @@ from typing import Mapping, Optional
 
 @dataclass(slots=True)
 class RcZoneParams:
-    """First-order RC parameters for a single zone.
+    """Parametri RC del primo ordine per una singola zona.
 
-    Model (continuous time):
-        dT/dt = (T_out - T)/tau + k*u
+    Modello a tempo continuo::
 
-    where:
-      - tau_h: time constant (hours)
-      - k_c_per_h: effective heating gain (°C/hour) when the zone valve is ON
-        (it implicitly absorbs supply water temperature + emitter effectiveness).
+        dT/dt = (T_out - T) / tau_h + k * u
+
+    dove ``u in {0, 1}`` è lo stato della valvola di zona (0 = chiusa, 1 = aperta)
+    e ``k`` assume segno opposto a seconda della modalità operativa:
+
+    * **Riscaldamento** (``k = k_c_per_h > 0``): la valvola aperta eroga calore,
+      la temperatura della zona sale.
+    * **Raffrescamento** (``k = k_cool_c_per_h < 0``): la valvola aperta assorbe
+      calore, la temperatura della zona scende.
+
+    I due guadagni sono fisicamente distinti perché i pannelli Eurotherm Leonardo 3.5
+    hanno potenze specifiche diverse nelle due direzioni:
+
+    * Riscaldamento: 69 W/m² a T_man=35°C, ΔT=4°C.
+    * Raffrescamento: 52 W/m² a T_man=14°C, ΔT=4°C.
+
+    Il rapporto 52/69 ~= 0.754 determina il default di ``k_cool_c_per_h`` rispetto
+    a ``k_c_per_h``.
+
+    La costante di tempo ``tau_h`` è indipendente dalla direzione: dipende
+    dall'inerzia termica dell'edificio (massa muraria + aria), non dal pannello.
+
+    Attributi
+    ---------
+    tau_h : float  [h]
+        Costante di tempo termica della zona. Default 6.0 h (tipico per
+        edificio in muratura, zona 50 m³). Determina la velocità con cui
+        la zona si avvicina a T_out in assenza di azionamento.
+
+    k_c_per_h : float  [°C/h]  (positivo)
+        Guadagno effettivo di riscaldamento con valvola aperta. Assorbe
+        implicitamente temperatura di mandata, efficienza emettitore e
+        distribuzione termica. Deve essere > 0.
+        Default 0.8 °C/h calibrato su pannello radiante soffitto.
+
+    k_cool_c_per_h : float  [°C/h]  (negativo)
+        Guadagno effettivo di raffrescamento con valvola aperta (segno negativo:
+        la zona si raffredda). Default -0.603 °C/h = -0.8 x (52/69).
+        Deve essere < 0.
+
+    Invarianti
+    ----------
+    * ``tau_h > 0``
+    * ``k_c_per_h > 0``
+    * ``k_cool_c_per_h < 0``
+
+    Violazioni sollevate in ``__post_init__`` con ``ValueError``.
     """
 
     tau_h: float = 6.0
     k_c_per_h: float = 0.8
+    k_cool_c_per_h: float = -0.603
+    """Guadagno raffrescamento (°C/h, negativo).
+
+    Default -0.603 = -0.8 x (52 W/m² / 69 W/m²), derivato dal rapporto
+    delle potenze specifiche del pannello Eurotherm Leonardo 3.5 nelle due
+    direzioni. Può essere sovrascritto per zona tramite ``rc_by_zone`` in
+    ``ControlConfig``.
+    """
+
+    def __post_init__(self) -> None:
+        """Valida gli invarianti fisici dei parametri RC."""
+        if self.tau_h <= 0.0:
+            raise ValueError(
+                f"RcZoneParams.tau_h deve essere > 0, ottenuto {self.tau_h}"
+            )
+        if self.k_c_per_h <= 0.0:
+            raise ValueError(
+                f"RcZoneParams.k_c_per_h (guadagno heating) deve essere > 0, "
+                f"ottenuto {self.k_c_per_h}"
+            )
+        if self.k_cool_c_per_h >= 0.0:
+            raise ValueError(
+                f"RcZoneParams.k_cool_c_per_h (guadagno cooling) deve essere < 0, "
+                f"ottenuto {self.k_cool_c_per_h}"
+            )
 
 
 @dataclass(slots=True)

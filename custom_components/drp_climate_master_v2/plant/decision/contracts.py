@@ -750,6 +750,14 @@ class GatingDiagnostics:
     zones_on_now_pct: Optional[float] = None
     zones_first_on_step: Optional[int] = None
 
+    # -- KPI MPC cooling -----------------------------------------------------
+    zones_any_cool_demand: bool = False
+    zones_cool_duty_avg_pct: Optional[float] = None
+    zones_cool_on_now_pct: Optional[float] = None
+    zones_cool_first_on_step: Optional[int] = None
+    zones_mpc_cool_preheat_ok: Optional[bool] = None
+    zones_mpc_cool_preheat_skipped_reason: Optional[str] = None
+
     # -- Campi VMC propagati da VmcDemand (evita risalita a VmcPolicy in F7) -
     vmc_t_ref_c: float = 22.0
     vmc_rh_target_pct: float = 50.0
@@ -986,6 +994,11 @@ class PlantDecision:
                 f"  Zones MPC on-now   :: {fnum(g.zones_on_now_pct, 1)} %",
                 f"  Zones MPC first ON :: {g.zones_first_on_step if g.zones_first_on_step is not None else '-'}",
                 f"  Zones MPC preheat  :: {fbool(g.zones_mpc_heat_preheat_ok, 'True', 'False')}",
+                f"  Zones MPC cool     :: {fbool(g.zones_any_cool_demand, 'True', 'False')}",
+                f"  Zones MPC cool duty:: {fnum(g.zones_cool_duty_avg_pct, 1)} %",
+                f"  Zones MPC cool now :: {fnum(g.zones_cool_on_now_pct, 1)} %",
+                f"  Zones MPC cool 1st :: {g.zones_cool_first_on_step if g.zones_cool_first_on_step is not None else '-'}",
+                f"  Zones MPC cool pre :: {fbool(g.zones_mpc_cool_preheat_ok, 'True', 'False')}",
                 f"  VMC T ref          :: {fnum(g.vmc_t_ref_c)} °C",
                 f"  VMC RH target      :: {fnum(g.vmc_rh_target_pct, 0)} %",
             ]

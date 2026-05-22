@@ -136,9 +136,10 @@ class PlantActuator:
         invocare il servizio.
         """
 
+        debug = f"hwot={pdc_command.heat_wot_c} hdt={pdc_command.heat_dt_c} cwot={pdc_command.cool_wot_c} cdt={pdc_command.cool_dt_c}"
         # --- Spegnimento: prima interrompi la PDC, poi aggiorna parametri ---
         if pdc_command.power is False:
-            log_debug(_LOGGER, "PDC power → OFF")
+            log_debug(_LOGGER, "PDC power → OFF (mode=%s %s)", pdc_command.mode, debug )
             await self._heatpump.async_set_power(
                 fm_power=pdc_command.fm_power, power=False
             )
@@ -150,7 +151,7 @@ class PlantActuator:
 
         # --- Accensione: prima scrivi parametri (sopra), poi avvia la PDC ---
         if pdc_command.power is True:
-            log_debug(_LOGGER, "PDC power → ON (mode=%s wot=%s)", pdc_command.mode, pdc_command.heat_wot_c)
+            log_debug(_LOGGER, "PDC power → ON (mode=%s %s)", pdc_command.mode, debug)
             await self._heatpump.async_set_power(
                 fm_power=pdc_command.fm_power, power=True
             )

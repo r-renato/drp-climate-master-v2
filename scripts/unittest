@@ -40,6 +40,9 @@ run_test "test_demand_signals" \
 run_test "test_vmc_policy" \
   python3 -m pytest "$PWD/test/unit/test_vmc_policy.py" -v
 
+run_test "test_rc_model" \
+  python3 -m pytest "$PWD/test/unit/test_rc_model.py" -v
+
 run_test "sim_comfort_band" \
   python3 -m pytest "$PWD/test/sim/sim_comfort_band.py" -s -v
 

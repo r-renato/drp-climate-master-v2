@@ -54,7 +54,7 @@ del solaio e dell'aria accumula e rilascia calore su scale temporali di
 Il gating bilancia questi due requisiti: il quorum multi-zona previene
 gli avvii per micro-deficit, il preheat MPC consente l'anticipo controllato.
 
-Nota sull'impianto specifico (Via Camillo Negro, Roma)
+Nota sull'impianto specifico (Roma)
 ------------------------------------------------------
 Prestazioni radiante soffitto (Eurotherm Leonardo 3.5):
 
@@ -239,10 +239,19 @@ class GatingResult:
     # True se il guard shoulder ha soppresso heat_sensible (diagnostica/log).
     shoulder_heat_suppressed: bool = False
 
-    # MPC-lite KPIs (copiati da ZonesDecision.meta quando disponibili)
+    # MPC-lite KPIs heating (copiati da ZonesDecision.meta quando disponibili)
     zones_duty_avg_pct: Optional[float] = None
     zones_on_now_pct: Optional[float] = None
     zones_first_on_step: Optional[int] = None
+
+    # KPI MPC cooling
+    zones_any_cool: bool = False
+    """True se il piano MPC cooling prevede almeno una valvola aperta."""
+    zones_cool_duty_avg_pct: Optional[float] = None
+    zones_cool_on_now_pct: Optional[float] = None
+    zones_cool_first_on_step: Optional[int] = None
+    zones_cool_preheat_ok: bool = False
+    zones_cool_preheat_skipped_reason: Optional[str] = None
 
     # Segnale globale PDC (Patch B) - diagnostica
     heat_def_global_c: Optional[float] = None
@@ -261,6 +270,7 @@ def compute_gating(
     demand: PlantDemandSignals,
     profile: HVACOperatingProfile,
     zones_decision: Optional[ZonesDecision],
+    zones_decision_cool: Optional[ZonesDecision] = None,
     t_ext: Optional[float] = None,
     t_smooth: Optional[float] = None,
     regime_hint: str = "mild",
@@ -561,7 +571,7 @@ def compute_gating(
         # può segnalare "casa lontana dall'upper bound" anche quando cool_sur_global=0.
         _cool_headroom: Optional[float] = (
             float(demand.cool_headroom_min_c)
-            if getattr(demand, "cool_headroom_min_c", None) is not None
+            if demand.cool_headroom_min_c is not None
             else None
         )
         if cool_sur_global is not None:
@@ -637,13 +647,21 @@ def compute_gating(
                 shoulder_heat_suppressed = True
 
     # -- Fase 3: KPI MPC zona (lettura passiva) -----------------------------
-    # Propagati nel GatingResult per diagnostica e per PdcCommandBuilder
-    # (activity_scale sul feedback WOT). Nessuna logica decisionale qui.
+    # Heating KPI: diagnostica e PdcCommandBuilder. Cooling KPI: preheat cooling.
     zones_any_heat = bool(zones_decision.any_heat_demand) if zones_decision else False
     zones_full_on_pct = zones_decision.meta.get("mpc_full_on_pct") if zones_decision else None
     zones_duty_avg_pct = zones_decision.meta.get("mpc_duty_avg_pct") if zones_decision else None
     zones_on_now_pct = zones_decision.meta.get("mpc_on_now_pct") if zones_decision else None
     zones_first_on_step = zones_decision.meta.get("mpc_first_on_step") if zones_decision else None
+
+    zones_any_cool = (
+        any(z.valve_on for z in zones_decision_cool.zones.values())
+        if zones_decision_cool and zones_decision_cool.zones
+        else False
+    )
+    zones_cool_duty_avg_pct = zones_decision_cool.meta.get("mpc_duty_avg_pct") if zones_decision_cool else None
+    zones_cool_on_now_pct = zones_decision_cool.meta.get("mpc_on_now_pct") if zones_decision_cool else None
+    zones_cool_first_on_step = zones_decision_cool.meta.get("mpc_first_on_step") if zones_decision_cool else None
 
     # -- Fase 4: Preheat MPC -------------------------------------------------
     # Il preheat compensa l'inerzia termica del soffitto radiante (tau ~= 6h):
@@ -693,11 +711,42 @@ def compute_gating(
             zones_preheat_skipped_reason = "profile_away_vacation"
         zones_preheat_ok = False
 
+    # -- Fase 4b: Preheat cooling MPC ----------------------------------------
+    zones_cool_preheat_ok = False
+    zones_cool_preheat_skipped_reason: Optional[str] = None
+
+    _cool_headroom: Optional[float] = (
+        float(demand.cool_headroom_min_c)
+        if getattr(demand, "cool_headroom_min_c", None) is not None
+        else None
+    )
+
+    if zones_any_cool and _cool_headroom is not None:
+        cool_headroom_ok = _cool_headroom <= float(
+            getattr(cfg.zones_mpc, "preheat_headroom_c", 0.4)
+        )
+        demand_nonzero_cool = (cool_cov > 0.0) or (cool_sur_wmean > 0.0)
+        regime_allows_cool_preheat = (regime_hint != "cold")
+
+        if not cool_headroom_ok:
+            zones_cool_preheat_skipped_reason = "cool_headroom_too_large"
+        elif not demand_nonzero_cool:
+            zones_cool_preheat_skipped_reason = "cool_demand_zero"
+        elif not regime_allows_cool_preheat:
+            zones_cool_preheat_skipped_reason = "regime_cold"
+        else:
+            zones_cool_preheat_ok = True
+
+    if profile in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
+        if zones_cool_preheat_ok:
+            zones_cool_preheat_skipped_reason = "profile_away_vacation"
+        zones_cool_preheat_ok = False
+
     # -- Fase 5: Flag finali (contratto verso ModeResolver) -----------------
     # Il ModeResolver non vede le condizioni intermedie: usa solo questi tre
     # flag insieme al contesto stagionale, finestre e vacanza.
     any_heat = bool(heat_sensible) or vmc_req_heat or (zones_any_heat and zones_preheat_ok)
-    any_cool = bool(cool_sensible) or vmc_req_cool
+    any_cool = bool(cool_sensible) or vmc_req_cool or (zones_any_cool and zones_cool_preheat_ok)
     any_cool_or_dehum = any_cool or vmc_req_dehum
 
     return GatingResult(
@@ -730,4 +779,10 @@ def compute_gating(
         heat_def_global_c=heat_def_global,
         heat_global_pdc_active=(bool(heat_override) if heat_def_global is not None else None),
         heat_pdc_on_thr_eff_c=float(_heat_pdc_on_thr),
+        zones_any_cool=zones_any_cool,
+        zones_cool_duty_avg_pct=float(zones_cool_duty_avg_pct) if zones_cool_duty_avg_pct is not None else None,
+        zones_cool_on_now_pct=float(zones_cool_on_now_pct) if zones_cool_on_now_pct is not None else None,
+        zones_cool_first_on_step=int(zones_cool_first_on_step) if zones_cool_first_on_step is not None else None,
+        zones_cool_preheat_ok=bool(zones_cool_preheat_ok),
+        zones_cool_preheat_skipped_reason=zones_cool_preheat_skipped_reason,
     )

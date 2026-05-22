@@ -667,13 +667,22 @@ class ZonesMpcConfig:
     run_in_winter: bool = True
     run_in_shoulder: bool = True
     run_in_summer: bool = False
-    """Season gating for the MPC provider.
+    """Season gating per il piano MPC heating.
 
     Notes
     -----
     - v1 MPC-lite is heating-only, therefore default disables summer.
     - Operative season is derived as winter/summer/shoulder.
     """
+
+    run_cooling_in_winter: bool = False
+    """Abilita il piano MPC cooling in inverno."""
+
+    run_cooling_in_shoulder: bool = True
+    """Abilita il piano MPC cooling in mezza stagione."""
+
+    run_cooling_in_summer: bool = True
+    """Abilita il piano MPC cooling in estate."""
 
     skip_if_user_off: bool = True
     """If True, do not compute a plan when the user HVAC mode is OFF."""

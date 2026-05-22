@@ -62,6 +62,7 @@ class ModeResolver:
         snapshot: PlantSnapshot,
         demand: PlantDemandSignals,
         zones_decision: Optional[ZonesDecision] = None,
+        zones_decision_cool: Optional[ZonesDecision] = None,
     ) -> tuple[PlantMode, GatingDiagnostics]:
         cfg = self.cfg
 
@@ -127,6 +128,7 @@ class ModeResolver:
             demand=demand,
             profile=profile,
             zones_decision=zones_decision,
+            zones_decision_cool=zones_decision_cool,
             t_ext=as_float(getattr(getattr(snapshot, "global_outdoor_temperature", None), "value", None)),
             t_smooth=_t_smooth,
             regime_hint=_regime_hint,
@@ -179,6 +181,12 @@ class ModeResolver:
             zones_duty_avg_pct=g.zones_duty_avg_pct,
             zones_on_now_pct=g.zones_on_now_pct,
             zones_first_on_step=g.zones_first_on_step,
+            zones_any_cool_demand=g.zones_any_cool,
+            zones_cool_duty_avg_pct=g.zones_cool_duty_avg_pct,
+            zones_cool_on_now_pct=g.zones_cool_on_now_pct,
+            zones_cool_first_on_step=g.zones_cool_first_on_step,
+            zones_mpc_cool_preheat_ok=g.zones_cool_preheat_ok,
+            zones_mpc_cool_preheat_skipped_reason=g.zones_cool_preheat_skipped_reason,
             vmc_t_ref_c=float(getattr(demand, "vmc_t_ref_c", 22.0)),
             vmc_rh_target_pct=float(getattr(demand, "vmc_rh_target_pct", 50.0)),
         )

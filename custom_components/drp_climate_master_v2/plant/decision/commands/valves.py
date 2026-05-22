@@ -38,6 +38,7 @@ class ZoneValvesCommandBuilder:
         zones_decision: Optional[ZonesDecision],
         *,
         dew_guard: DewGuardResult,
+        zones_decision_cool: Optional[ZonesDecision] = None,
     ) -> None:
         v = dec.valves
         v.by_zone.clear()
@@ -67,8 +68,14 @@ class ZoneValvesCommandBuilder:
                 return False
             return getattr(z, "radiant_valve", None) is not None
 
-        if zones_decision is not None and getattr(zones_decision, "zones", None):
-            byz = zones_decision.zones or {}
+        _active_plan = (
+            zones_decision_cool
+            if dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST)
+            else zones_decision
+        )
+
+        if _active_plan is not None and getattr(_active_plan, "zones", None):
+            byz = _active_plan.zones or {}
             for zone_key, cmd in byz.items():
                 zk = str(zone_key)
                 if not is_actuable(zk):
@@ -77,7 +84,11 @@ class ZoneValvesCommandBuilder:
 
             v.debug.update(
                 {
-                    "source": "zones_mpc",
+                    "source": (
+                        "zones_mpc_cool"
+                        if dec.mode in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST)
+                        else "zones_mpc"
+                    ),
                     "zones": len(v.by_zone),
                     "on": sum(1 for x in v.by_zone.values() if x),
                 }

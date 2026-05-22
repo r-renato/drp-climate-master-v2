@@ -202,11 +202,21 @@ class PlantDecisionPlanner:
         )
 
         # ── FASE 5 ─ Piano zone MPC-lite e risoluzione modo impianto ──────────
-        # ZonesMpcProvider produce il piano zone (opzionale, può restituire None).
-        # ModeResolver sceglie PlantMode combinando snapshot + demand + zones_decision.
-        zones_decision = self._zones_mpc.maybe_plan(snapshot=snapshot, reason=f"{reason}/zones", comfort_bands_by_zone=comfort_bands_by_zone)
+        # ZonesMpcProvider produce due piani: heating (invariato) e cooling.
+        zones_decision = self._zones_mpc.maybe_plan(
+            snapshot=snapshot,
+            reason=f"{reason}/zones",
+            comfort_bands_by_zone=comfort_bands_by_zone,
+        )
+        _free_cool_feasible = bool(getattr(demand, "free_cool_feasible", False))
+        zones_decision_cool = self._zones_mpc.maybe_plan_cooling(
+            snapshot=snapshot,
+            reason=f"{reason}/zones_cool",
+            comfort_bands_by_zone=comfort_bands_by_zone,
+            free_cool_feasible=_free_cool_feasible,
+        )
 
-        # Expose zones plan in the decision object (single output artifact)
+        # Expose il piano heating nel decision object per backward compatibility.
         dec.zones = zones_decision
 
         # Surface zones MPC warnings without losing plant-level robustness.
@@ -216,9 +226,20 @@ class PlantDecisionPlanner:
             and bool(getattr(self.cfg.zones_mpc, "propagate_warnings_to_plant", True))
         ):
             dec.warnings.extend([f"zones_mpc_{w}" for w in zones_decision.warnings])
+        if (
+            zones_decision_cool
+            and getattr(zones_decision_cool, "warnings", None)
+            and bool(getattr(self.cfg.zones_mpc, "propagate_warnings_to_plant", True))
+        ):
+            dec.warnings.extend([f"zones_mpc_cool_{w}" for w in zones_decision_cool.warnings])
 
         # --- Determine regime
-        mode, gating = self._mode_resolver.decide(snapshot=snapshot, demand=demand, zones_decision=zones_decision)
+        mode, gating = self._mode_resolver.decide(
+            snapshot=snapshot,
+            demand=demand,
+            zones_decision=zones_decision,
+            zones_decision_cool=zones_decision_cool,
+        )
         dec.mode = mode
         dec.gating = gating
 
@@ -271,7 +292,14 @@ class PlantDecisionPlanner:
         # NOTA TERMOTECNICA (P2): arbitraggio setpoint PDC tra circuito VMC
         # e radiante non è esplicito — rischio PDC fuori punto di lavoro.
         self._pdc_cmd.fill(dec, snapshot, t_out, demand)
-        self._valves_cmd.fill(dec, snapshot, demand, zones_decision, dew_guard=dew_guard)
+        self._valves_cmd.fill(
+            dec,
+            snapshot,
+            demand,
+            zones_decision,
+            dew_guard=dew_guard,
+            zones_decision_cool=zones_decision_cool,
+        )
         self._supply_cmd.fill(dec, snapshot, demand, zones_decision, dew_guard=dew_guard)
         self._vmc_cmd.fill(dec, snapshot, demand)
 

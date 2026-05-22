@@ -4,8 +4,6 @@ import logging
 from dataclasses import dataclass, field
 from typing import Mapping, Optional
 
-from homeassistant.components.climate.const import HVACMode
-
 from ....monitor.plant import PlantSnapshot
 
 from ...config import ZonesMpcConfig
@@ -18,53 +16,38 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class ZonesMpcProvider:
-    """Provide (optionally) a zones MPC-lite plan to the plant-level planner.
-
-    Design intent
-    ------------
-    The plant planner needs an optional `ZonesDecision` to:
-      - avoid starting the plant when all valves are planned OFF,
-      - compute pump intents (adjacent/mixing loop),
-      - enable controlled *preheat* without short-cycling,
-      - expose MPC KPIs for commissioning and tuning.
-
-    This provider keeps the zones MPC logic **isolated** from `plant/decision/planner.py`.
-    It encapsulates:
-      - lightweight eligibility checks (season/user OFF),
-      - the actual `ZoneDecisionPlanner` invocation.
-
-    Notes
-    -----
-    v1 uses a *heating-only* MPC-lite. We therefore skip computation in summer
-    to save CPU and avoid misleading signals.
-    """
+    """Produce piani MPC-lite di zona (heating e cooling) per il plant planner."""
 
     cfg: ZonesMpcConfig = field(default_factory=ZonesMpcConfig)
     planner: ZoneDecisionPlanner = field(default_factory=ZoneDecisionPlanner)
 
-    def maybe_plan(self, *, snapshot: PlantSnapshot, reason: str, comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None) -> Optional[ZonesDecision]:
-        """Return a `ZonesDecision` when eligible, otherwise None."""
+    def _operative_season(self, snapshot: PlantSnapshot) -> str:
+        """Restituisce 'winter', 'summer' o 'shoulder'."""
+        season = getattr(getattr(snapshot, "season", None), "season", None)
+        season_val = getattr(season, "value", season)
+        season_s = str(season_val).strip().lower() if season_val is not None else "unknown"
+        if season_s == "winter":
+            return "winter"
+        if season_s == "summer":
+            return "summer"
+        return "shoulder"
+
+    def maybe_plan(
+        self,
+        *,
+        snapshot: PlantSnapshot,
+        reason: str,
+        comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None,
+    ) -> Optional[ZonesDecision]:
+        """Restituisce il piano MPC heating quando eligibile, altrimenti None."""
 
         if not bool(getattr(self.cfg, "enabled", True)):
             return None
 
-        # No zones -> no plan
         if not getattr(snapshot, "indoor_zones", None):
             return None
 
-        # User OFF -> do not spend CPU computing a plan that cannot be applied.
-        # ATTENZIONE! Il piano deve sempre essere calcolato
-        # hvac_mode_raw = getattr(snapshot, "climate_hvac_mode", None)
-        # hvac_mode_val = getattr(hvac_mode_raw, "value", hvac_mode_raw)
-        # hvac_mode_s = str(hvac_mode_val).strip().lower() if hvac_mode_val is not None else "auto"
-        # if bool(getattr(self.cfg, "skip_if_user_off", True)) and hvac_mode_s == HVACMode.OFF.value:
-        #     return None
-
-        # Season gating (operative bucket): winter/summer/shoulder
-        season = getattr(getattr(snapshot, "season", None), "season", None)
-        season_val = getattr(season, "value", season)
-        season_s = str(season_val).strip().lower() if season_val is not None else "unknown"
-        operative = "winter" if season_s == "winter" else ("summer" if season_s == "summer" else "shoulder")
+        operative = self._operative_season(snapshot)
 
         if operative == "winter" and not bool(getattr(self.cfg, "run_in_winter", True)):
             return None
@@ -74,10 +57,52 @@ class ZonesMpcProvider:
             return None
 
         try:
-            return self.planner.plan(snapshot=snapshot, reason=reason, comfort_bands_by_zone=comfort_bands_by_zone)
+            return self.planner.plan(
+                snapshot=snapshot,
+                reason=reason,
+                comfort_bands_by_zone=comfort_bands_by_zone,
+                cooling=False,
+            )
         except Exception:
-            # Keep plant planner robust: a failure in zone MPC must not kill the whole tick.
-            _LOGGER.exception("Zones MPC planning failed")
+            _LOGGER.exception("Zones MPC heating planning failed")
+            if bool(getattr(self.cfg, "swallow_exceptions", True)):
+                return None
+            raise
+
+    def maybe_plan_cooling(
+        self,
+        *,
+        snapshot: PlantSnapshot,
+        reason: str,
+        comfort_bands_by_zone: Optional[Mapping[str, ComfortBandResult]] = None,
+        free_cool_feasible: bool = False,
+    ) -> Optional[ZonesDecision]:
+        """Restituisce il piano MPC cooling quando eligibile, altrimenti None."""
+        if not bool(getattr(self.cfg, "enabled", True)):
+            return None
+
+        if not getattr(snapshot, "indoor_zones", None):
+            return None
+
+        operative = self._operative_season(snapshot)
+
+        if operative == "winter" and not bool(getattr(self.cfg, "run_cooling_in_winter", False)):
+            return None
+        if operative == "shoulder" and not bool(getattr(self.cfg, "run_cooling_in_shoulder", True)):
+            return None
+        if operative == "summer" and not bool(getattr(self.cfg, "run_cooling_in_summer", True)):
+            return None
+
+        try:
+            return self.planner.plan(
+                snapshot=snapshot,
+                reason=reason,
+                comfort_bands_by_zone=comfort_bands_by_zone,
+                cooling=True,
+                free_cool_feasible=free_cool_feasible,
+            )
+        except Exception:
+            _LOGGER.exception("Zones MPC cooling planning failed")
             if bool(getattr(self.cfg, "swallow_exceptions", True)):
                 return None
             raise
