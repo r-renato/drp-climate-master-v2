@@ -6,6 +6,8 @@ from typing import Optional
 
 from ...domain.enums import HVACOperatingProfile
 from .comfort_band.policy_layer import ClimateZoneIT, ComplianceMode, ConfortPolicyConfig
+from .comfort_band.parameters.config import CloMetConfig
+from .comfort_band.parameters.model import RoomType
 
 # -----------------------------------------------------------------------------
 # Option A: nested, domain-oriented config blocks
@@ -1077,3 +1079,29 @@ class PlantPlannerConfig:
             cooling_allowed_to=time(22, 30),
         )
     )
+
+    # Mappa zone_id -> RoomType per il CloMetProvider.
+    # Usata per determinare il MET base (ISO 8996) per tipo di stanza.
+    # Chiavi non presenti -> RoomType.OTHER (fallback neutro, MET=1.10).
+    # Euristiche automatiche sui nomi: bathroom->BATHROOM, kitchen->KITCHEN,
+    # bedroom->BEDROOM, living->LIVING. Le zone con nomi non standard vanno
+    # mappate esplicitamente. I nomi devono corrispondere agli slug HA delle
+    # zone (es. 'master_bathroom', non 'Master Bathroom').
+    zone_room_type_map: dict[str, RoomType] = field(
+        default_factory=lambda: {
+            # Appartamento Roma - impianto di riferimento (zona D)
+            "living": RoomType.LIVING,
+            "kitchen": RoomType.KITCHEN,
+            "master_bedroom": RoomType.BEDROOM,
+            "guest_bedroom": RoomType.BEDROOM,
+            "master_bathroom": RoomType.BATHROOM,
+            "main_bathroom": RoomType.BATHROOM,
+        }
+    )
+
+    # Configurazione del CloMetProvider (CLO/MET adattativi).
+    # Sostituisce i seed fissi in ConfortPolicyConfig con un modello
+    # a piu livelli: S4 ramp stagionale + S3 EWMA adattivo + profilo +
+    # time-of-day + MET per tipo stanza (ISO 8996).
+    # Default calibrato per zona climatica D (Roma).
+    clo_met: CloMetConfig = field(default_factory=lambda: CloMetConfig(climate_zone="D"))

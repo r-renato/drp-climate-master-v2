@@ -78,6 +78,10 @@ from .config import (
     T_RM_MAX_DEVIATION_SUPPRESS_C,
 )
 from .model import PolicyContext, PolicyDecision, HumiditySolveMode, is_living, ClimateZoneIT, ComplianceMode
+from .parameters.clo_provider import CloProvider
+from .parameters.config import CloMetConfig
+from .parameters.met_provider import MetProvider
+from .parameters.model import RoomType, TimeOfDay
 
 
 # -----------------------------
@@ -161,6 +165,15 @@ class ConfortPolicyConfig:
     def compliance_enabled(self) -> bool:
         return self.compliance_mode in (ComplianceMode.WARN, ComplianceMode.ENFORCE)
 
+    # CloMetProvider: delegato esterno per CLO/MET adattativi.
+    # Se None, la policy usa il calcolo legacy interno (_clo_for / met base).
+    # Impostato dal planner tramite PlantPlannerConfig.clo_met.
+    clo_met_cfg: Optional[CloMetConfig] = None
+
+    # Mappa zone_id -> RoomType per il MetProvider (MET per tipo stanza).
+    # Impostata dal planner tramite PlantPlannerConfig.zone_room_type_map.
+    zone_room_type_map: Optional[dict[str, RoomType]] = None
+
     def validate(self) -> None:
         if self.base_met <= 0:
             raise ValueError("base_met must be > 0")
@@ -207,17 +220,47 @@ class ComfortPolicyLayer:
             reasons.append(f"vmc_speed:clamped_from={vmc_speed}")
             vmc_speed = max(0, min(5, vmc_speed))
 
-        # 1) met (mode-aware)
-        met = float(self._cfg.base_met)
-        if ctx.mode == HVACOperatingProfile.SLEEP:
-            met = MET_SLEEP
-            reasons.append(f"met:sleep={MET_SLEEP:.2f}")
-        elif ctx.mode in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
-            met = MET_AWAY_VACATION
-            reasons.append(f"met:away/vacation={MET_AWAY_VACATION:.2f}")
-
-        # 2) clo (season + climate zone + mode)
-        clo = self._clo_for(ctx, reasons)
+        # 1+2) CLO e MET: delegati al CloMetProvider se configurato,
+        # altrimenti calcolo legacy (backward compatibility).
+        if self._cfg.clo_met_cfg is not None:
+            _tod = TimeOfDay.from_hour(
+                dt_util.as_local(ctx.now).hour
+                if dt_util is not None
+                else ctx.now.hour
+            )
+            _room_map = self._cfg.zone_room_type_map or {}
+            _room_type = _room_map.get(ctx.room, RoomType.OTHER)
+            _clo_prov = CloProvider(self._cfg.clo_met_cfg)
+            _met_prov = MetProvider(self._cfg.clo_met_cfg)
+            _clo_est = _clo_prov.compute(
+                operative_season=ctx.season,
+                season_progress=ctx.season_progress,
+                shoulder_direction=ctx.shoulder_direction,
+                profile=ctx.mode,
+                time_of_day=_tod,
+                cold_snap=bool(ctx.cold_snap),
+                t_op_running_mean=ctx.t_op_running_mean,
+                t_op_current=ctx.t_op_current,
+            )
+            _met_est = _met_prov.compute(
+                room_type=_room_type,
+                profile=ctx.mode,
+                time_of_day=_tod,
+            )
+            clo = _clo_est.value
+            met = _met_est.value
+            reasons.append(f"clo:provider={clo:.3f}|{_clo_est.source}")
+            reasons.append(f"met:provider={met:.3f}|{_met_est.source}")
+        else:
+            # Legacy path: backward compatibility
+            met = float(self._cfg.base_met)
+            if ctx.mode == HVACOperatingProfile.SLEEP:
+                met = MET_SLEEP
+                reasons.append(f"met:sleep={MET_SLEEP:.2f}")
+            elif ctx.mode in (HVACOperatingProfile.AWAY, HVACOperatingProfile.VACATION):
+                met = MET_AWAY_VACATION
+                reasons.append(f"met:away/vacation={MET_AWAY_VACATION:.2f}")
+            clo = self._clo_for(ctx, reasons)
 
         # 3) PMV targets from mode
         pmv_center, pmv_band = self._pmv_targets(ctx, reasons)

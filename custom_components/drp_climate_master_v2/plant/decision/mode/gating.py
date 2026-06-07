@@ -728,12 +728,36 @@ def compute_gating(
         demand_nonzero_cool = (cool_cov > 0.0) or (cool_sur_wmean > 0.0)
         regime_allows_cool_preheat = (regime_hint != "cold")
 
+        # (d) Gate globale: il pre-cooling MPC ha senso solo se la comfort band
+        # media indoor segnala un surplus >= soglia PDC (cool_pdc_on_thr_c).
+        # Evita che una singola zona eccitata avvii il plant bypassando il quorum
+        # multi-zona: con profili ECO/SLEEP/AWAY/VACATION, il plant si avvia in
+        # preheat solo quando la casa *in media* è vicina o oltre il limite superiore.
+        #
+        # Simmetria con il riscaldamento: heat_override usa heat_def_global come
+        # gate globale (Patch B); qui si applica lo stesso principio per il cooling.
+        #
+        # COMFORT/BOOST: gate non applicato (quorum=0 per design, l'utente accetta
+        # avvii frequenti per garantire comfort massimo in ogni zona).
+        # Fallback: se cool_sur_global non è disponibile (banda globale non
+        # calcolata), gate superato per fail-safe pro-comfort.
+        if profile in (HVACOperatingProfile.COMFORT, HVACOperatingProfile.BOOST):
+            cool_global_gate = True
+        else:
+            _cool_pdc_thr_4b = float(cfg.gating.cool_pdc_on_thr_c)
+            cool_global_gate = (
+                cool_sur_global is None
+                or cool_sur_global >= _cool_pdc_thr_4b
+            )
+
         if not cool_headroom_ok:
             zones_cool_preheat_skipped_reason = "cool_headroom_too_large"
         elif not demand_nonzero_cool:
             zones_cool_preheat_skipped_reason = "cool_demand_zero"
         elif not regime_allows_cool_preheat:
             zones_cool_preheat_skipped_reason = "regime_cold"
+        elif not cool_global_gate:
+            zones_cool_preheat_skipped_reason = "cool_global_not_ready"
         else:
             zones_cool_preheat_ok = True
 

@@ -111,6 +111,12 @@ class PlantDecisionPlanner:
         # Legge la configurazione comfort dal PlantPlannerConfig (unica fonte di verità).
         # Non usare build_comfort_engine() che ha valori hardcoded.
         self.cpcfg = self.cfg.comfort_policy
+        # Propaga CloMetConfig e zone_room_type_map dalla config radice
+        # alla ConfortPolicyConfig, che le passa al provider CLO/MET.
+        # Usa object.__setattr__ perché ConfortPolicyConfig è un dataclass
+        # con slots=True (non frozen: campi mutabili post-init).
+        object.__setattr__(self.cpcfg, "clo_met_cfg", self.cfg.clo_met)
+        object.__setattr__(self.cpcfg, "zone_room_type_map", self.cfg.zone_room_type_map)
         self.cpl = ComfortPolicyLayer(self.cpcfg)
         self.cpcfg.validate()
 

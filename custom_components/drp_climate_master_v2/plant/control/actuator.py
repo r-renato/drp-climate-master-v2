@@ -223,13 +223,27 @@ class PlantActuator:
 
             # 3) Boiler readiness (isteresi)
             prev_ready = self._stage.boiler_ready
+            # Margini cooling-specifici: isteresi asimmetrica rispetto al target
+            # (on_margin piccolo per avvio rapido, off_margin grande per evitare
+            # energy_stall spurio con carico parziale). Per heating si usano i
+            # margini condivisi (on=0.5, off=1.5) invariati.
+            _on_margin = (
+                self._cfg.boiler_ready_cool_on_margin_c
+                if ctx.mode in ("cooling", "dehum_assist")
+                else self._cfg.boiler_ready_on_margin_c
+            )
+            _off_margin = (
+                self._cfg.boiler_ready_cool_off_margin_c
+                if ctx.mode in ("cooling", "dehum_assist")
+                else self._cfg.boiler_ready_off_margin_c
+            )
             boiler_update = update_boiler_ready(
                 self._stage,
                 mode=ctx.mode,
                 t_boiler_supply=ctx.boiler.t_supply_c,
                 t_target=ctx.boiler.t_ready_ref_c,
-                on_margin_c=self._cfg.boiler_ready_on_margin_c,
-                off_margin_c=self._cfg.boiler_ready_off_margin_c,
+                on_margin_c=_on_margin,
+                off_margin_c=_off_margin,
             )
             boiler_ready = boiler_update.ready
             boiler_dbg = boiler_update.debug
