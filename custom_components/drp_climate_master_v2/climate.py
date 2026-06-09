@@ -10,6 +10,8 @@ from homeassistant.components.climate.const import HVACMode, HVACAction, Climate
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.components.climate.const import ATTR_PRESET_MODE
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.const import (
     CONF_NAME,
@@ -118,7 +120,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
     log_info(_LOGGER, "%s: setup entry '%s' completato.", DOMAIN, entry.entry_id)
 
-class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
+class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity, RestoreEntity):
     """..."""
     # _attr_name = "Home Climate Master"
     # _attr_unique_id = "home_climate_master"
@@ -164,6 +166,56 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
             entry.entry_id,
             entry.source,
         )
+
+    async def async_added_to_hass(self) -> None:
+        """Ripristina hvac_mode e preset_mode dall'ultimo stato noto prima del riavvio di HA.
+
+        Sequenza:
+        1. super(): CoordinatorEntity registra il listener al coordinator.
+        2. async_get_last_state(): legge l'ultimo stato da core.restore_state.
+        3. Se disponibile, ripristina hvac_mode e preset_mode su coordinator e supervisor.
+
+        Il restore avviene prima del primo tick: i cicli di decisione usano
+        subito i valori corretti anziché i default di __init__.
+        """
+        await super().async_added_to_hass()
+
+        last_state = await self.async_get_last_state()
+        if last_state is None:
+            # Prima installazione o state perso: restano i default da __init__.
+            log_info(_LOGGER, "async_added_to_hass: nessuno stato precedente, uso default.")
+            return
+
+        # Ripristina HVAC mode (coincide con entity.state in ClimateEntity).
+        valid_hvac = {m.value for m in [HVACMode.OFF, HVACMode.AUTO]}
+        if last_state.state in valid_hvac:
+            hvac_mode = HVACMode(last_state.state)
+            self._attr_hvac_mode = hvac_mode
+            self.map_on_hvac_mode = hvac_mode
+            self._coordinator.set_hvac_mode(hvac_mode)
+            self._supervisor.set_hvac_mode(hvac_mode)
+            log_info(_LOGGER, "async_added_to_hass: ripristinato hvac_mode=%s", hvac_mode)
+
+        # Ripristina preset mode (salvato in attributes["preset_mode"]).
+        preset_raw = last_state.attributes.get(ATTR_PRESET_MODE)
+        if preset_raw is not None:
+            profile = HVACOperatingProfile.from_value(preset_raw)
+            if profile is not None:
+                self._attr_preset_mode = profile.value
+                self._preset_mode = profile.value
+                self._coordinator.set_preset_mode(profile)
+                self._supervisor.set_preset_mode(profile)
+                log_info(
+                    _LOGGER,
+                    "async_added_to_hass: ripristinato preset_mode=%s",
+                    profile.value,
+                )
+            else:
+                log_warning(
+                    _LOGGER,
+                    "async_added_to_hass: preset '%s' non riconosciuto, uso default.",
+                    preset_raw,
+                )
 
     # @property
     # def hvac_mode(self) -> HVACMode:
@@ -270,6 +322,9 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity):
                 if human_perception is not None:
                     data["Human Perception"] = human_perception.description
                     data["Human Perception Icon"] = human_perception.icon
+
+                data["Windows Closed"] = plant_snapshot.windows_close_state
+                data["Windows Close Minutes Off"] = plant_snapshot.windows_close_minutes_off
 
         return data
 

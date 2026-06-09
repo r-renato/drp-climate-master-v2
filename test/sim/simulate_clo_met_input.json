@@ -1,0 +1,144 @@
+{
+  "global": {
+    "climate_zone": "D",
+    "room_type_map": {
+      "living":          "living",
+      "kitchen":         "kitchen",
+      "master_bedroom":  "bedroom",
+      "guest_bedroom":   "bedroom",
+      "master_bathroom": "bathroom",
+      "main_bathroom":   "bathroom"
+    },
+    "zone_weights": {
+      "living":          28.0,
+      "kitchen":         12.0,
+      "master_bedroom":  20.0,
+      "guest_bedroom":   14.0,
+      "master_bathroom":  9.0,
+      "main_bathroom":    9.0
+    },
+    "default_profile":   "Eco",
+    "default_season":    "shoulder",
+    "default_tod":       "daytime"
+  },
+
+  "sim_01_stagioni_per_profilo": {
+    "seasons":           ["winter", "shoulder", "summer"],
+    "profiles":          ["Comfort", "Eco", "Boost", "Sleep", "Away", "Vacation"],
+    "shoulder_progress": 50.0,
+    "shoulder_direction":"spring",
+    "cold_snap":         false,
+    "t_rm":              null
+  },
+
+  "sim_02_s4_ramp_shoulder": {
+    "shoulder_direction": "spring",
+    "progress_values":    [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+    "profiles":           ["Eco", "Sleep"],
+    "cold_snap_at_progress": [70, 80, 90]
+  },
+
+  "sim_03_s3_adaptive": {
+    "seasons":        ["winter", "shoulder", "summer"],
+    "t_rm_values_by_season": {
+      "winter":   [10.0, 14.0, 17.5, null, 23.0, 25.0, 27.0],
+      "shoulder": [14.0, 17.0, 19.0, null, 25.0, 27.0, 29.0],
+      "summer":   [19.0, 22.0, 24.0, null, 27.0, 29.0, 32.0]
+    },
+    "profiles_to_compare": ["Eco", "Sleep", "Away"],
+    "t_rm_cold_for_profile_comparison": 17.0,
+    "t_op_by_season": {"winter": 21.5, "shoulder": 23.0, "summer": 26.0}
+  },
+
+  "sim_04_cold_snap": {
+    "progress_values":    [0, 25, 50, 75, 90, 100],
+    "shoulder_direction": "spring",
+    "profiles":           ["Eco", "Comfort"],
+    "cold_snap_values":   [false, true]
+  },
+
+  "sim_05_time_of_day": {
+    "seasons":    ["winter", "shoulder", "summer"],
+    "profiles":   ["Eco", "Sleep"],
+    "time_of_day_values": ["morning", "daytime", "evening", "night"]
+  },
+
+  "sim_06_met_room_type": {
+    "room_types":   ["bedroom", "bathroom", "kitchen", "living", "hallway", "global", "other"],
+    "profiles":     ["Eco", "Sleep", "Away"],
+    "time_of_day_values": ["morning", "daytime", "evening", "night"]
+  },
+
+  "sim_07_old_vs_new_clo": {
+    "shoulder_progress_values": [0, 25, 50, 75, 90, 100],
+    "shoulder_direction": "spring",
+    "t_rm_by_progress": {
+      "0":   null,
+      "25":  22.0,
+      "50":  23.5,
+      "75":  24.5,
+      "90":  25.5,
+      "100": 26.0
+    },
+    "clo_old_shoulder": 0.82,
+    "clo_old_summer":   0.50,
+    "clo_old_winter":   1.05
+  },
+
+  "sim_08_matrice_commissioning": {
+    "shoulder_progress": 90.1,
+    "shoulder_direction": "spring",
+    "t_rm_by_zone": {
+      "living":          25.5,
+      "kitchen":         25.1,
+      "master_bedroom":  24.9,
+      "guest_bedroom":   24.8,
+      "master_bathroom": 24.4,
+      "main_bathroom":   25.0
+    },
+    "t_op_by_zone": {
+      "living":          26.5,
+      "kitchen":         25.1,
+      "master_bedroom":  24.9,
+      "guest_bedroom":   24.8,
+      "master_bathroom": 24.4,
+      "main_bathroom":   25.0
+    },
+    "profiles": ["Eco", "Comfort", "Sleep"]
+  },
+
+  "scenario_fine_maggio_roma": {
+    "season":    "shoulder",
+    "direction": "spring",
+    "progress":  90.1,
+    "profile":   "Eco",
+    "hour":      9,
+    "cold_snap": false,
+    "t_rm_by_zone": {
+      "living":          25.5,
+      "kitchen":         25.1,
+      "master_bedroom":  24.9,
+      "guest_bedroom":   24.8,
+      "master_bathroom": 24.4,
+      "main_bathroom":   25.0
+    },
+    "t_op_by_zone": {
+      "living":          26.5,
+      "kitchen":         25.1,
+      "master_bedroom":  24.9,
+      "guest_bedroom":   24.8,
+      "master_bathroom": 24.4,
+      "main_bathroom":   25.0
+    }
+  },
+
+  "scenario_transizione_shoulder_estate": {
+    "direction": "spring",
+    "progress_steps": [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+    "profile": "Eco",
+    "tod": "daytime",
+    "t_rm_base": 22.5,
+    "t_rm_hot_offset": 3.0,
+    "cold_snap_at": [30, 40]
+  }
+}

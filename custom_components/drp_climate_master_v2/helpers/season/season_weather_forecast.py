@@ -93,22 +93,39 @@ class MeteoSeasonConfig:
     # anomalie: distanza robusta dal regime del segmento (storico) o dal prototipo (live)
     anomaly_z: float = 2.8
 
-    # cold_snap: deviazione intra-stagionale firmata di t_smooth rispetto al prototipo.
+    # cold_snap: deviazione firmata di t_smooth rispetto al valore atteso per il DOY.
     #
-    # Formula: (μ_season[t] - z_t) / σ_season[t]
-    #   Positivo = t_smooth è SOTTO il prototipo stagionale → giorno freddo per la stagione.
-    #   Negativo = t_smooth è SOPRA il prototipo → giorno caldo per la stagione.
+    # Formula primaria (regressione armonica DOY, Patch 0025):
+    #   score = (T_clim(DOY) - t_smooth) / σ_MAD
+    #   T_clim(DOY) = A₀ + Σₖ [Aₖ·cos(2πk·DOY/365) + Bₖ·sin(2πk·DOY/365)]
+    #   Positivo = t_smooth SOTTO il valore atteso per quel giorno → giorno freddo.
+    #   Negativo = t_smooth SOPRA il valore atteso → giorno caldo.
     #
-    # Soglia 0.0  → metà fredda della distribuzione stagionale (50° percentile dal lato freddo).
-    # Soglia 0.5  → top ~25% giorni freddi della stagione (evento moderato).
-    # Soglia 1.0  → top ~5–10% (cold snap chiaro, come una settimana di Marzo con T<10°C a Roma).
-    # Soglia 1.5  → solo eventi severi (~2% dei giorni stagionali).
+    # Formula fallback (prototipo stagionale piatto, attiva se dati < min_days_harmonic):
+    #   score = (μ_season[z_t] - z_t) / σ_season[z_t]
     #
-    # NOTA: cold_snap_z è molto più bassa di anomaly_z (2.8) perché misura
-    # un concetto diverso: non "siamo in una stagione sbagliata" ma
-    # "siamo nel lato freddo della stagione corretta".
-    # Calibrazione consigliata su dati storici reali con calibrate_cold_snap.py.
+    # Soglia 0.0  → qualsiasi deviazione negativa (troppo permissiva, default conservativo).
+    # Soglia 1.0  → ~16% dei giorni più freddi del normale (evento moderato).
+    # Soglia 1.5  → ~7% dei giorni più freddi (cold snap chiaro).
+    # Soglia 2.0  → ~2% (evento severo, es. ondata di freddo prolungata).
+    #
+    # Con la regressione armonica, soglia 0.0 è ancora usabile ma si consiglia
+    # di alzarla a 1.0 per evitare false positive di inizio stagione.
     cold_snap_z: float = 0.0
+
+    # armoniche di Fourier per la regressione stagionale DOY (Patch 0025)
+    cold_snap_n_harmonics: int = 2
+    """Numero di armoniche di Fourier per T_clim(DOY).
+    2 armoniche (4 parametri + offset = 5 totali) catturano >92%% della varianza
+    del ciclo annuale di t_smooth per climi temperati (incl. Roma zona D).
+    """
+
+    cold_snap_min_days_harmonic: int = 180
+    """Giorni minimi con t_smooth valido per attivare la regressione armonica.
+    Sotto questa soglia la funzione _fit_doy_harmonic() non produce coefficienti
+    e _cold_snap_score() cade automaticamente sul prototipo stagionale piatto.
+    180 giorni ≈ 6 mesi: sufficiente a campionare almeno due stagioni.
+    """
 
     # se anno troppo incompleto, viene ignorato dalla segmentazione (stabilità)
     min_days_per_year: int = 300
@@ -168,6 +185,11 @@ class MeteoContiguousSeasonModel:
         self._infer_mu: Dict[Seasons, List[float]] = {}
         self._infer_sig: Dict[Seasons, List[float]] = {}
 
+        # regressione armonica DOY per cold_snap_score (Patch 0025)
+        # None finché fit() non è stato chiamato o dati insufficienti.
+        self._harmonic_coeffs: Optional[List[float]] = None
+        self._harmonic_sigma: float = 1.0  # σ MAD dei residui
+
     # -------------------------- public API -----------------------------------
 
     def fit(self, history: dict[str, Historical]) -> "MeteoContiguousSeasonModel":
@@ -177,6 +199,7 @@ class MeteoContiguousSeasonModel:
 
         self._signals = self._compute_signals(daily)
         self._fit_global_scale()
+        self._fit_doy_harmonic()  # Patch 0025: regressione armonica DOY
         self._out = self._segment_all_years()
 
         # prototipi per inferenza live (usa i giorni già etichettati)
@@ -281,7 +304,7 @@ class MeteoContiguousSeasonModel:
 
         # cold_snap: deviazione intra-stagionale rispetto al prototipo della stagione scelta.
         # Calcolato dopo aver scelto best_season, non prima (per coerenza).
-        cs_score = self._cold_snap_score(best_season, sig)
+        cs_score = self._cold_snap_score(best_season, sig, dd)
         cold_snap = cs_score >= self._cfg.cold_snap_z
 
         cand_str = ", ".join(
@@ -706,36 +729,190 @@ class MeteoContiguousSeasonModel:
             cost += w[i] * abs((x - mu[i]) / sd[i])
         return cost
 
-    def _cold_snap_score(self, season: Seasons, sig: WeatherDaySignals) -> float:
-        """Deviazione firmata di t_smooth rispetto al prototipo stagionale.
+    def _cold_snap_score(
+        self,
+        season: Seasons,
+        sig: WeatherDaySignals,
+        doy_date: Optional[date] = None,
+    ) -> float:
+        """Deviazione firmata di t_smooth rispetto al valore atteso per il giorno dell'anno.
 
-        Ritorna:
-          Positivo  → t_smooth è SOTTO il prototipo → cold snap.
-          Negativo  → t_smooth è SOPRA il prototipo → giorno caldo per la stagione.
-          0.0       → prototipi non disponibili (fail-safe conservativo).
+        Percorso principale (Patch 0025 — regressione armonica DOY):
+          Ritorna: (T_clim(DOY) - t_smooth) / σ_MAD
+          T_clim(DOY) = valore atteso della media mobile 28gg per quel DOY storico.
+          Positivo → t_smooth < T_clim → più freddo del normale per quel giorno.
+          Negativo → t_smooth > T_clim → più caldo del normale.
+          Attivo quando _harmonic_coeffs è disponibile e doy_date è fornita.
 
-        Formula: (μ_season[t] - z_t) / σ_season[t]
-          μ_season[t]: mediana z-space di t_smooth per la stagione (in z-space globale).
-          z_t:         z-score globale di t_smooth del giorno in esame.
-          σ_season[t]: scala robusta intra-stagionale di t_smooth.
+        Percorso fallback (dati insufficienti o primo avvio):
+          Formula originale: (μ_season[z_t] - z_t) / σ_season[z_t]
+          Confronta contro la mediana stagionale piatta (invariato rispetto a pre-Patch 0025).
 
-        IMPORTANTE: richiede che _fit_infer_prototypes() sia già stato eseguito.
-        Non chiamare durante _segment_all_years() (prototipi non ancora disponibili).
+        0.0 → dati non disponibili (fail-safe conservativo).
         """
+        if sig.t_smooth is None or math.isnan(sig.t_smooth):
+            return 0.0
+
+        # --- Percorso principale: regressione armonica DOY ---
+        if self._harmonic_coeffs is not None and doy_date is not None:
+            doy = float((doy_date - date(doy_date.year, 1, 1)).days + 1)
+            t_clim = self._eval_harmonic(self._harmonic_coeffs, doy)
+            return float((t_clim - sig.t_smooth) / self._harmonic_sigma)
+
+        # --- Fallback: prototipo stagionale piatto (pre-Patch 0025) ---
         v = self._vec(sig)
         if v is None:
             return 0.0
         vz = self._z(v)
-        z_t = vz[0]  # dimensione 0 = t_smooth
+        z_t = vz[0]
         if math.isnan(z_t):
             return 0.0
         mu = self._infer_mu.get(season)
         sd = self._infer_sig.get(season)
         if not mu or not sd:
             return 0.0
-        sig_t = max(sd[0], 0.1)  # clamp: evita divisione per valori degeneri
-        # positivo → z_t < μ_season → t_smooth sotto il prototipo → più freddo del tipico
+        sig_t = max(sd[0], 0.1)
         return float((mu[0] - z_t) / sig_t)
+
+    # -------------- regressione armonica DOY (Patch 0025) --------------------
+
+    @staticmethod
+    def _gaussian_elimination(
+        A: List[List[float]], b: List[float]
+    ) -> Optional[List[float]]:
+        """Risolve Ax = b con eliminazione gaussiana e pivoting parziale.
+
+        Implementazione puro Python senza dipendenze esterne.
+        Ritorna None se la matrice è (quasi) singolare.
+        """
+        n = len(b)
+        M = [A[i][:] + [b[i]] for i in range(n)]
+
+        for col in range(n):
+            max_row = max(range(col, n), key=lambda r: abs(M[r][col]))
+            M[col], M[max_row] = M[max_row], M[col]
+            pivot = M[col][col]
+            if abs(pivot) < 1e-12:
+                return None
+            for row in range(col + 1, n):
+                factor = M[row][col] / pivot
+                for j in range(col, n + 1):
+                    M[row][j] -= factor * M[col][j]
+
+        x = [0.0] * n
+        for i in range(n - 1, -1, -1):
+            x[i] = M[i][n]
+            for j in range(i + 1, n):
+                x[i] -= M[i][j] * x[j]
+            if abs(M[i][i]) < 1e-12:
+                return None
+            x[i] /= M[i][i]
+        return x
+
+    def _eval_harmonic(self, coeffs: List[float], doy: float) -> float:
+        """Valuta T_clim(DOY) dati i coefficienti della regressione armonica.
+
+        Layout coefficienti: [A₀, A₁, B₁, A₂, B₂, ...] con n_harmonics armoniche.
+        """
+        two_pi_365 = 2.0 * math.pi / 365.0
+        val = coeffs[0]
+        for k in range(1, self._cfg.cold_snap_n_harmonics + 1):
+            val += coeffs[2 * k - 1] * math.cos(k * two_pi_365 * doy)
+            val += coeffs[2 * k] * math.sin(k * two_pi_365 * doy)
+        return val
+
+    def _fit_doy_harmonic(self) -> None:
+        """Fitta la regressione armonica T_clim(DOY) sui dati storici di t_smooth.
+
+        Modello:
+          T_clim(DOY) = A₀ + Σₖ [Aₖ·cos(2πk·DOY/365) + Bₖ·sin(2πk·DOY/365)]
+
+        con k = 1..cold_snap_n_harmonics (default 2 → 5 parametri totali).
+
+        Il residuo normalizzato (T_clim − t_smooth) / σ_MAD è il cold_snap_score
+        DOY-adjusted: cattura deviazioni rispetto al ciclo stagionale atteso,
+        non rispetto alla mediana piatta della stagione.
+
+        Vantaggi rispetto al prototipo stagionale piatto:
+          - Nessun boundary artifact tra stagioni: la curva è continua su 365 gg.
+          - Inizio estate (giugno) confrontato contro norma di giugno, non di agosto.
+          - Shoulder correttamente separato da winter e summer.
+          - Valido in tutte le stagioni con la stessa formula.
+
+        Fallback automatico: se len(pairs) < cold_snap_min_days_harmonic o il sistema
+        lineare è degenere, _harmonic_coeffs rimane None e _cold_snap_score()
+        usa il prototipo stagionale piatto invariato (pre-Patch 0025).
+        """
+        n_harm = self._cfg.cold_snap_n_harmonics
+        min_days = self._cfg.cold_snap_min_days_harmonic
+        n_params = 1 + 2 * n_harm
+        two_pi_365 = 2.0 * math.pi / 365.0
+
+        # Raccoglie coppie (doy, t_smooth) con valori validi
+        pairs: List[Tuple[float, float]] = []
+        for dd, signal in self._signals.items():
+            if signal.t_smooth is None or math.isnan(signal.t_smooth):
+                continue
+            doy = float((dd - date(dd.year, 1, 1)).days + 1)
+            pairs.append((doy, signal.t_smooth))
+
+        if len(pairs) < min_days:
+            self._harmonic_coeffs = None
+            log_warning(
+                _LOGGER,
+                "_fit_doy_harmonic: dati insufficienti (%d < %d), fallback al prototipo.",
+                len(pairs),
+                min_days,
+            )
+            return
+
+        # Costruisce le equazioni normali XᵀX · β = Xᵀy
+        XtX: List[List[float]] = [[0.0] * n_params for _ in range(n_params)]
+        Xty: List[float] = [0.0] * n_params
+
+        for doy, y in pairs:
+            row = [1.0]
+            for k in range(1, n_harm + 1):
+                row.append(math.cos(k * two_pi_365 * doy))
+                row.append(math.sin(k * two_pi_365 * doy))
+            for i in range(n_params):
+                Xty[i] += row[i] * y
+                for j in range(n_params):
+                    XtX[i][j] += row[i] * row[j]
+
+        coeffs = self._gaussian_elimination(XtX, Xty)
+        if coeffs is None:
+            self._harmonic_coeffs = None
+            log_warning(_LOGGER, "_fit_doy_harmonic: sistema lineare degenere, fallback.")
+            return
+
+        # σ_MAD dei residui (robusta agli outlier)
+        residuals = sorted(y - self._eval_harmonic(coeffs, doy) for doy, y in pairs)
+        n = len(residuals)
+        med_idx = n // 2
+        median_r = (
+            residuals[med_idx]
+            if n % 2 == 1
+            else (residuals[med_idx - 1] + residuals[med_idx]) / 2.0
+        )
+        abs_devs = sorted(abs(r - median_r) for r in residuals)
+        mad = (
+            abs_devs[med_idx]
+            if n % 2 == 1
+            else (abs_devs[med_idx - 1] + abs_devs[med_idx]) / 2.0
+        )
+        sigma = max(mad * 1.4826, 0.3)  # clamp: σ minima 0.3 °C
+
+        self._harmonic_coeffs = coeffs
+        self._harmonic_sigma = sigma
+
+        log_warning(
+            _LOGGER,
+            "_fit_doy_harmonic: fittati %d giorni | coeffs=%s | σ_MAD=%.3f °C",
+            len(pairs),
+            [round(c, 4) for c in coeffs],
+            sigma,
+        )
 
     def _apply_cold_snap(
         self,
@@ -760,7 +937,7 @@ class MeteoContiguousSeasonModel:
 
         result: Dict[date, WeatherSeason] = {}
         for dd, ws in out.items():
-            cs = self._cold_snap_score(ws.season, ws.weather_day_signals)
+            cs = self._cold_snap_score(ws.season, ws.weather_day_signals, dd)
             cold_snap = cs >= self._cfg.cold_snap_z
             # Aggiorna reason solo se cold_snap è True (evita verbosità inutile)
             reason = ws.reason

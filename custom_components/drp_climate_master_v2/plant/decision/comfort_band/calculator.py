@@ -442,6 +442,12 @@ class ComfortBandCalculator:
         met_used = float(met_override) if met_override is not None else float(policy.met) if policy else float(self._met)
         clo_used = float(clo_override) if clo_override is not None else float(policy.clo) if policy else float(self._clo_for_season(season_value))
 
+        # Warmside cap: MET usato per t_op_max (bound caldo).
+        # met_used (pieno) rimane per t_op_min e PMV/PPD display.
+        # policy.met_for_band_max è None quando il cap è inattivo (met <= MET_WARMSIDE_CAP).
+        _pol_cap = getattr(policy, "met_for_band_max", None) if policy else None
+        met_for_max = float(_pol_cap) if _pol_cap is not None else float(met_used)
+
         pmv_center_used = float(pmv_center) if pmv_center is not None else float(policy.pmv_center) if policy else 0.0
         pmv_band_used = float(pmv_band) if pmv_band is not None else float(policy.pmv_band) if policy else 0.5
         pmv_band_used = max(0.0, float(pmv_band_used))
@@ -528,7 +534,7 @@ class ComfortBandCalculator:
             rh_pct=float(rh_pct),
             v_air=float(v_for_max),
             season=season_value,
-            met_override=met_used,
+            met_override=met_for_max,
             clo_override=clo_used,
             pa_ref=pa_ref,
         )
@@ -569,6 +575,7 @@ class ComfortBandCalculator:
             pmv_band=float(pmv_band_used),
             met_used=float(met_used),
             clo_used=float(clo_used),
+            met_warmside_used=float(met_for_max),
         )
 
         t_op_eval, ta_eval, tr_eval = self._resolve_eval_temperatures(

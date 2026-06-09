@@ -67,6 +67,8 @@ from .config import (
     VMC_SPEED_THR_LIVING_HI_SCALE,
     # v_air scaling SLEEP/WINTER
     V_AIR_HI_SLEEP_WINTER_MAX,
+    # Cap MET lato-caldo (warmside strategy)
+    MET_WARMSIDE_CAP,
     # Scaling v_hi per portata alta VMC
     V_AIR_HI_SCALE_NON_LIVING_HIGH_SPEED,
     V_AIR_HI_SCALE_LIVING_HIGH_SPEED,
@@ -262,6 +264,19 @@ class ComfortPolicyLayer:
                 reasons.append(f"met:away/vacation={MET_AWAY_VACATION:.2f}")
             clo = self._clo_for(ctx, reasons)
 
+        # 2b) MET warmside cap - limita il bound caldo (t_op_max) per zone ad alta
+        # attività senza alterare t_op_min né PMV/PPD display (vedi config.MET_WARMSIDE_CAP).
+        # Attivo solo quando met > MET_WARMSIDE_CAP; inerte per SLEEP/AWAY/VACATION
+        # (il loro MET è già < MET_WARMSIDE_CAP) e quando il CloMetProvider non è configurato.
+        if float(met) > MET_WARMSIDE_CAP:
+            met_for_band_max: Optional[float] = float(MET_WARMSIDE_CAP)
+            reasons.append(
+                f"met:warmside_cap:full={met:.3f}>cap={MET_WARMSIDE_CAP:.2f}"
+                f"->t_op_max_met={MET_WARMSIDE_CAP:.2f}"
+            )
+        else:
+            met_for_band_max = None  # cap inattivo: met pieno per entrambi i bound
+
         # 3) PMV targets from mode
         pmv_center, pmv_band = self._pmv_targets(ctx, reasons)
 
@@ -316,6 +331,7 @@ class ComfortPolicyLayer:
             humidity_solve_mode=h_mode,
             heating_allowed=heating_allowed,
             cooling_allowed=cooling_allowed,
+            met_for_band_max=met_for_band_max,
             reasons=tuple(reasons),
         )
 

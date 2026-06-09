@@ -499,6 +499,63 @@ controllo di protezione (evitare temperature estreme dell'impianto).
 """
 
 
+# --- Cap lato-caldo per bande comfort (Strategia warmside) ---
+
+MET_WARMSIDE_CAP: float = 1.07
+"""Cap MET usato esclusivamente per la bisection di ``t_op_max`` (bound caldo).
+
+Valore: 1.07 met (leggermente sotto MET_BASE=1.10, attività sedentaria lieve).
+
+Razionale termotecnico (ISO 7730 + ASHRAE 55 + EN 16798-1)
+-----------------------------------------------------------
+Il modello PMV di Fanger abbassa ``t_op_max`` simmetricamente con il MET:
+a MET=1.90 (bagno) o MET=1.80 (cucina) la bisection produce t_op_max di
+17-22 °C — irraggiungibile in estate con impianto radiante a soffitto
+(vincolo dew-point guard: T_mandata >= DP_indoor + 2 °C).
+
+Tre basi normative giustificano il cap appena sotto il valore base (1.07 met):
+
+1. **ASHRAE 55-2023 §6.1.4 — averaging temporale 1 ora**:
+   cucina: cottura attiva (MET~1.8) dura 20-30 min/h, il resto è
+   preparazione leggera/seduto (MET~1.0) → MET_1h ≈ 1.1-1.3.
+   Bagno residenziale: doccia mattutina (MET~1.9) dura 10-15 min/h,
+   il resto è transito/igiene veloce (MET~1.0) → MET_1h ≈ 1.0-1.2.
+
+2. **EN 16798-1:2019 Annex B — limiti empirici attività moderata**:
+   T_op_max Cat. II estate = 27 °C per MET 2.0-3.0. Con MET_cap=1.07
+   la bisection produce t_op_max ≈ 26.5 °C: sotto il limite
+   normativo di 27 °C, con un margine operativo conservativo.
+
+3. **Separazione cooling/heating per zone ad alta attività**:
+   il MET pieno (dal CloMetProvider) abbassa correttamente ``t_op_min``
+   (soppressione riscaldamento in cucina/bagni = fisicamente corretta).
+   Usarlo anche per ``t_op_max`` crea una soglia di cooling
+   irraggiungibile. Il cap appena sotto MET_BASE elimina l'asimmetria.
+
+Significato operativo
+---------------------
+Cap appena sotto MET_BASE equivale a: "per la soglia di attivazione del cooling,
+tutte le zone sono trattate come attività sedentaria standard".
+Il MET reale (da CloMetProvider) rimane in gioco per:
+  - t_op_min: soppressione heating in zone attive (cucina/bagni)
+  - PMV/PPD display: diagnosi fedele del discomfort reale
+
+Effetto per stagione
+--------------------
+- Estate:   tutte le zone t_op_max ≈ 26.5 °C → cooling demand
+            solo quando T_op supera effettivamente 26.5 °C.
+- Inverno:  zone attive t_op_max ≈ 23.8-24.0 °C (vs 21.6 con cap 1.40)
+            → meno cooling demand spurio in cucina calda invernale.
+- Shoulder: stesso beneficio dell'inverno.
+
+Profili SLEEP/AWAY/VACATION
+---------------------------
+MET di questi profili è già <= 1.00 < 1.07: il cap è inerte.
+La condizione ``met > MET_WARMSIDE_CAP`` nel policy_layer è falsa →
+met_for_band_max = None → calculator usa met_used per entrambi i bound.
+"""
+
+
 # =============================================================================
 # SEZIONE E — Target PMV e aggressività controllo per profilo operativo
 # =============================================================================

@@ -198,6 +198,11 @@ class PolicyDecision:
     heating_allowed: Optional[bool] = None
     cooling_allowed: Optional[bool] = None
 
+    # Cap MET lato-caldo per t_op_max (Strategia warmside - vedi config.MET_WARMSIDE_CAP).
+    # None = nessun cap attivo (MET pieno usato per entrambi i bound).
+    # Impostato dalla policy solo quando met > MET_WARMSIDE_CAP.
+    met_for_band_max: Optional[float] = None
+
     # Human-readable reasons
     reasons: Tuple[str, ...] = ()
 
@@ -232,6 +237,9 @@ class ComfortBandResult:
 
     met_used: Optional[float] = None
     clo_used: Optional[float] = None
+    # MET effettivamente usato per t_op_max (warmside cap se attivo, else = met_used).
+    # Esposto per commissioning: consente di verificare quando il cap è attivo.
+    met_warmside_used: Optional[float] = None
 
     def __str__(self) -> str:
         # --- helper di formattazione compatti e robusti (coerenti con PlantDecision.__str__) ---
@@ -315,6 +323,7 @@ class ComfortBandResult:
         emit(lines, "Humidity solve", fstr(self.humidity_solve_mode))
         emit(lines, "PMV target", f"{fnum(self.pmv_center, 2)} ± {fnum(self.pmv_band, 2)}")
         emit(lines, "met used", fnum(self.met_used, 2))
+        emit(lines, "met warmside", fnum(self.met_warmside_used, 2))
         emit(lines, "clo used", fnum(self.clo_used, 2))
 
         return "\n".join(lines)

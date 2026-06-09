@@ -64,6 +64,7 @@ from custom_components.drp_climate_master_v2.plant.decision.comfort_band.config 
     MET_BASE,
     MET_SLEEP,
     MET_AWAY_VACATION,
+    MET_WARMSIDE_CAP,
     # PMV
     MODE_PMV_CENTER,
     MODE_PMV_BAND,
@@ -80,6 +81,7 @@ from custom_components.drp_climate_master_v2.plant.decision.comfort_band.config 
 from custom_components.drp_climate_master_v2.plant.decision.comfort_band.model import (
     PolicyContext,
     PolicyDecision,
+    HumiditySolveMode,
     ClimateZoneIT,
     ComplianceMode,
     is_living,
@@ -1018,3 +1020,269 @@ class TestS3Integration:
         assert max_cold == pytest.approx(max_base, abs=0.1), (
             "SLEEP: S3 non deve modificare t_op_max"
         )
+
+
+# ===========================================================================
+# H. MET warmside cap
+# ===========================================================================
+
+class TestMetWarmsideCap:
+    """Verifica la strategia warmside: met_for_band_max limita solo t_op_max."""
+
+    def _make_policy(self, met: float, clo: float = 0.50) -> PolicyDecision:
+        met_for_band_max = float(MET_WARMSIDE_CAP) if met > MET_WARMSIDE_CAP else None
+        return PolicyDecision(
+            met=float(met),
+            clo=float(clo),
+            pmv_center=0.00,
+            pmv_band=0.35,
+            humidity_solve_mode=HumiditySolveMode.RH_CONST,
+            met_for_band_max=met_for_band_max,
+        )
+
+    def test_met_for_band_max_set_when_over_cap(self):
+        """met_for_band_max è impostato quando met > MET_WARMSIDE_CAP."""
+        from custom_components.drp_climate_master_v2.plant.decision.comfort_band.parameters.config import (
+            CloMetConfig,
+            MetRoomSeeds,
+        )
+        from custom_components.drp_climate_master_v2.plant.decision.comfort_band.parameters.model import (
+            RoomType,
+        )
+
+        seeds = MetRoomSeeds(kitchen=1.70)
+        cfg = CloMetConfig(met_seeds=seeds, climate_zone="D")
+        policy_cfg = ConfortPolicyConfig(
+            climate_zone=None,
+            clo_met_cfg=cfg,
+            zone_room_type_map={"kitchen": RoomType.KITCHEN},
+        )
+        layer = ComfortPolicyLayer(policy_cfg)
+        ctx = _ctx(
+            season=OperativeSeason.SUMMER,
+            room="kitchen",
+            t_op_current=24.8,
+            rh_pct=53.0,
+        )
+
+        dec = layer.decide(ctx)
+
+        assert dec.met > MET_WARMSIDE_CAP
+        assert dec.met_for_band_max == pytest.approx(MET_WARMSIDE_CAP, abs=0.001)
+        assert any("met:warmside_cap" in reason for reason in dec.reasons)
+
+    def test_met_for_band_max_none_when_below_cap(self):
+        """met_for_band_max è None quando met <= MET_WARMSIDE_CAP."""
+        layer = _layer()
+        ctx = _ctx(
+            season=OperativeSeason.SUMMER,
+            room="camera_1",
+            mode=HVACOperatingProfile.AWAY,
+        )
+
+        dec = layer.decide(ctx)
+
+        assert dec.met <= MET_WARMSIDE_CAP
+        assert dec.met_for_band_max is None
+
+    def test_cap_raises_t_op_max_not_t_op_min(self):
+        """Il cap alza t_op_max senza toccare t_op_min."""
+        calc = _calc()
+        met_high = 1.90
+        policy_capped = self._make_policy(met_high)
+        policy_uncapped = PolicyDecision(
+            met=met_high,
+            clo=0.50,
+            pmv_center=0.00,
+            pmv_band=0.35,
+            humidity_solve_mode=HumiditySolveMode.RH_CONST,
+            met_for_band_max=None,
+        )
+
+        res_cap = calc.compute_single(
+            vmc_air_speed=3,
+            room="bagno",
+            season=OperativeSeason.SUMMER,
+            rh_pct=53.0,
+            t_op_current=25.8,
+            policy=policy_capped,
+        )
+        res_nocap = calc.compute_single(
+            vmc_air_speed=3,
+            room="bagno",
+            season=OperativeSeason.SUMMER,
+            rh_pct=53.0,
+            t_op_current=25.8,
+            policy=policy_uncapped,
+        )
+
+        assert res_cap.t_op_max > res_nocap.t_op_max
+        assert res_cap.t_op_min == pytest.approx(res_nocap.t_op_min, abs=0.05)
+
+    def test_cap_t_op_max_ge_26c_summer(self):
+        """Con MET=1.90 e cap 1.07, t_op_max estate deve essere >= 26 °C.
+
+        Con MET_WARMSIDE_CAP=1.07 la bisection produce t_op_max ≈ 26.5 °C,
+        coerente con EN 16798-1 Cat. II (T_op_max=27 °C).
+        Obiettivo operativo: tutte le zone non generano cooling demand sotto 26.5 °C.
+        """
+        calc = _calc()
+        policy = self._make_policy(1.90)
+
+        res = calc.compute_single(
+            vmc_air_speed=3,
+            room="bagno",
+            season=OperativeSeason.SUMMER,
+            rh_pct=53.0,
+            t_op_current=25.8,
+            policy=policy,
+        )
+
+        assert res.t_op_max >= 26.0
+
+    def test_cap_inert_below_threshold(self):
+        """Con MET <= MET_WARMSIDE_CAP il risultato è identico al baseline."""
+        calc = _calc()
+        policy_base = PolicyDecision(
+            met=1.00,
+            clo=0.50,
+            pmv_center=0.00,
+            pmv_band=0.35,
+            humidity_solve_mode=HumiditySolveMode.RH_CONST,
+            met_for_band_max=None,
+        )
+        policy_cap_equal_met = PolicyDecision(
+            met=1.00,
+            clo=0.50,
+            pmv_center=0.00,
+            pmv_band=0.35,
+            humidity_solve_mode=HumiditySolveMode.RH_CONST,
+            met_for_band_max=1.00,
+        )
+
+        res_base = calc.compute_single(
+            vmc_air_speed=3,
+            room="camera_1",
+            season=OperativeSeason.SUMMER,
+            rh_pct=52.0,
+            t_op_current=26.0,
+            policy=policy_base,
+        )
+        res_cap = calc.compute_single(
+            vmc_air_speed=3,
+            room="camera_1",
+            season=OperativeSeason.SUMMER,
+            rh_pct=52.0,
+            t_op_current=26.0,
+            policy=policy_cap_equal_met,
+        )
+
+        assert res_base.t_op_max == pytest.approx(res_cap.t_op_max, abs=0.01)
+        assert res_base.t_op_min == pytest.approx(res_cap.t_op_min, abs=0.01)
+
+    def test_pmv_display_uses_full_met(self):
+        """Il PMV/PPD display usa il MET pieno, non il cap."""
+        calc = _calc()
+        policy_capped = self._make_policy(1.90)
+        policy_base = PolicyDecision(
+            met=1.10,
+            clo=0.50,
+            pmv_center=0.00,
+            pmv_band=0.35,
+            humidity_solve_mode=HumiditySolveMode.RH_CONST,
+        )
+
+        res_high = calc.compute_single(
+            vmc_air_speed=3,
+            room="bagno",
+            season=OperativeSeason.SUMMER,
+            rh_pct=53.0,
+            t_op_current=25.8,
+            policy=policy_capped,
+        )
+        res_base = calc.compute_single(
+            vmc_air_speed=3,
+            room="bagno",
+            season=OperativeSeason.SUMMER,
+            rh_pct=53.0,
+            t_op_current=25.8,
+            policy=policy_base,
+        )
+
+        assert res_high.met_used == pytest.approx(1.90, abs=0.001)
+        assert res_high.pmv > res_base.pmv
+
+    def test_met_warmside_used_equals_cap_when_active(self):
+        """met_warmside_used deve essere MET_WARMSIDE_CAP quando il cap è attivo."""
+        calc = _calc()
+        policy = self._make_policy(1.90)
+
+        res = calc.compute_single(
+            vmc_air_speed=3,
+            room="bagno",
+            season=OperativeSeason.SUMMER,
+            rh_pct=53.0,
+            t_op_current=25.8,
+            policy=policy,
+        )
+
+        assert res.met_warmside_used == pytest.approx(MET_WARMSIDE_CAP, abs=0.001)
+
+    def test_met_warmside_used_equals_met_when_inactive(self):
+        """met_warmside_used = met_used quando il cap è inattivo."""
+        calc = _calc()
+        policy = self._make_policy(1.00)
+
+        res = calc.compute_single(
+            vmc_air_speed=3,
+            room="camera_1",
+            season=OperativeSeason.SUMMER,
+            rh_pct=52.0,
+            t_op_current=26.0,
+            policy=policy,
+        )
+
+        assert policy.met_for_band_max is None
+        assert res.met_warmside_used == pytest.approx(res.met_used, abs=0.001)
+
+    def test_cap_no_spurious_cooling_winter_kitchen(self):
+        """In inverno, il cap deve evitare un bound caldo artificialmente basso."""
+        calc = _calc()
+        t_cucina_inverno = 21.5
+        policy_capped = PolicyDecision(
+            met=1.80,
+            clo=1.05,
+            pmv_center=-0.05,
+            pmv_band=0.30,
+            humidity_solve_mode=HumiditySolveMode.RH_CONST,
+            met_for_band_max=float(MET_WARMSIDE_CAP),
+        )
+        policy_uncapped = PolicyDecision(
+            met=1.80,
+            clo=1.05,
+            pmv_center=-0.05,
+            pmv_band=0.30,
+            humidity_solve_mode=HumiditySolveMode.RH_CONST,
+            met_for_band_max=None,
+        )
+
+        res = calc.compute_single(
+            vmc_air_speed=2,
+            room="kitchen",
+            season=OperativeSeason.WINTER,
+            rh_pct=45.0,
+            t_op_current=t_cucina_inverno,
+            policy=policy_capped,
+        )
+        res_uncapped = calc.compute_single(
+            vmc_air_speed=2,
+            room="kitchen",
+            season=OperativeSeason.WINTER,
+            rh_pct=45.0,
+            t_op_current=t_cucina_inverno,
+            policy=policy_uncapped,
+        )
+
+        assert res.t_op_max >= 20.8
+        assert res.t_op_max > res_uncapped.t_op_max + 1.0
+        assert res.ok is True or (res.t_op_max - t_cucina_inverno) >= -0.7
