@@ -580,7 +580,7 @@ class CoolingConfig:
     wot_min_c: float = 7.0
     wot_max_c: float = 18.0
     wot_default_c: float = 12.0
-    dt_c: float = 7.0
+    dt_c: float = 2.0
 
     def offset(self, profile: HVACOperatingProfile) -> float:
         """Return profile-specific cooling WOT offset (°C)."""

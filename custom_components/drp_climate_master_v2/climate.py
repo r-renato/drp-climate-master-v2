@@ -124,7 +124,7 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity, 
     """..."""
     # _attr_name = "Home Climate Master"
     # _attr_unique_id = "home_climate_master"
-    _attr_hvac_modes = [HVACMode.OFF, HVACMode.AUTO]
+    _attr_hvac_modes = [HVACMode.OFF, HVACMode.AUTO, HVACMode.FAN_ONLY]
     _attr_supported_features = ClimateEntityFeature.PRESET_MODE
     _attr_preset_modes = HVACOperatingProfile.values()
 
