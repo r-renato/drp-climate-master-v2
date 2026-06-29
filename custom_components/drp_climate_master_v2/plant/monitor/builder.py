@@ -348,31 +348,44 @@ async def async_build_plant_states_snapshot(
         vmc = await _async_build_vmc_snapshot(runtime_config, timestamp)
         supply_unit: SupplyUnitSnapshot | None = _build_supply_unit_snapshot(runtime_config, timestamp)
 
-        runtime_windows=runtime_config.climate.windows
-        windows_close_state=False
-        windows_close_minutes_off: Optional[float] = None
+        runtime_windows = runtime_config.climate.windows
+
+        # P2: default True (chiuse) quando il sensore non è configurato.
+        # Assumere "aperte" senza sensore bloccherebbe boost VMC e free cooling
+        # per impianti non dotati di rilevamento finestre.
+        if runtime_windows is None:
+            log_warning(
+                _LOGGER,
+                "Sensore finestre non configurato: windows_closed=True (assume chiuse). "
+                "Configurare runtime_windows.closed_state per rilevamento reale.",
+            )
+
+        # P4: rinominato windows_close_state → windows_closed
+        #     (True = chiuse, False = aperte — nessuna ambiguità)
+        windows_closed: bool = True
+        # P4: rinominato windows_close_minutes_off → windows_open_minutes
+        #     (minuti da quando le finestre sono aperte)
+        windows_open_minutes: Optional[float] = None
         if runtime_windows:
-            windows_close_state=as_bool(get_entity_value(entities_state, runtime_windows.closed_state)) or False
+            windows_closed = bool(
+                as_bool(get_entity_value(entities_state, runtime_windows.closed_state), default=True)
+            )
 
-            if not windows_close_state:
-
-                def _key_bool(st: State) -> Optional[bool]:
-                    if st.state in ("unknown", "unavailable", None):
-                        return None
-                    try:
-                        v = bool(st.state)
-                    except (TypeError, ValueError):
-                        return None
-                    return v
-                windows_close_in_state_times = await async_time_in_states(
-                    hass,
-                    runtime_windows.closed_state,
-                    timestamp,                 # UTC aware
-                    window="last_24h",
-                    key_fn=_key_bool,
-                    include_unknown=False,
-                )
-                windows_close_minutes_off = windows_close_in_state_times.current_key_age_min
+            if not windows_closed:
+                # P3: calcolo età stato corrente da last_changed (in-memory),
+                # senza query al Recorder DB.
+                # _key_bool precedente era rotto: bool("off") == True sempre.
+                # Le durations_s di async_time_in_states non venivano usate
+                # da nessun consumer: la query al DB era gratuita e inutile.
+                cur_win = hass.states.get(runtime_windows.closed_state)
+                if cur_win is not None:
+                    t_changed = (
+                        getattr(cur_win, "last_changed", None)
+                        or getattr(cur_win, "last_updated", None)
+                    )
+                    if t_changed is not None:
+                        age_s = (timestamp - t_changed).total_seconds()
+                        windows_open_minutes = max(0.0, age_s) / 60.0
 
         presence_vacation=as_bool(get_entity_value(entities_state, runtime_config.climate.scenarios.vacation)) or False
         presence_nobodysin=as_bool(get_entity_value(entities_state, runtime_config.climate.scenarios.nobodysin)) or False
@@ -406,8 +419,8 @@ async def async_build_plant_states_snapshot(
             vmc=vmc,
             supply_unit=supply_unit,
 
-            windows_close_state=windows_close_state,
-            windows_close_minutes_off=windows_close_minutes_off,
+            windows_closed=windows_closed,
+            windows_open_minutes=windows_open_minutes,
             presence_vacation=presence_vacation,
             presence_nobodysin=presence_nobodysin,
 

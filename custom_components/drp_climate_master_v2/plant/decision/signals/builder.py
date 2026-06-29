@@ -487,7 +487,7 @@ class DemandSignalsBuilder:
             )
 
         # --- finestre chiuse ---
-        windows_closed = bool(getattr(snapshot, "windows_close_state", True))
+        windows_closed = bool(getattr(snapshot, "windows_closed", True))
 
         # --- stagione (summer blocca free heating) ---
         season_val = getattr(getattr(getattr(snapshot, "season", None), "season", None), "value", None)

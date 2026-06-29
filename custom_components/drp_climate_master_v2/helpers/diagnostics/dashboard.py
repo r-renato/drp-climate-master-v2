@@ -43,7 +43,7 @@ def build_dashboard(
         "season": getattr(getattr(getattr(snapshot, "season", None), "season", None), "value", None),
         "hvac_mode": str(getattr(snapshot, "climate_hvac_mode", None) or "-"),
         "profile": getattr(getattr(snapshot, "climate_preset_mode", None), "value", None),
-        "windows_closed": getattr(snapshot, "windows_close_state", None),
+        "windows_closed": getattr(snapshot, "windows_closed", None),
         "vacation": getattr(snapshot, "presence_vacation", None),
         "nobodysin": getattr(snapshot, "presence_nobodysin", None),
     }

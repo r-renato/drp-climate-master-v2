@@ -48,7 +48,7 @@ class ModeResolver:
             return (PlantMode.OFF, gating)
 
         windows_open_min = as_float(
-            getattr(snapshot, "windows_close_minutes_off", None)
+            getattr(snapshot, "windows_open_minutes", None)
         )
         threshold = float(self.cfg.windows_open_off_minutes)
         if windows_open_min is not None and float(windows_open_min) >= threshold:
@@ -93,6 +93,34 @@ class ModeResolver:
         #         vmc_rh_target_pct=float(getattr(demand, "vmc_rh_target_pct", 50.0)),
         #     )
         #     return (PlantMode.OFF, gating)
+
+        # --------------------
+        # 0.b) fan_only: override esplicito → VENT_ONLY
+        # --------------------
+        # L'utente ha scelto esplicitamente "solo ventilazione": bypass completo
+        # del gating termico. PDC, pompe e valvole rimangono spenti.
+        # La VMC riceve i propri comandi senza deumidifica (gestita in VmcCommandBuilder).
+        # La stagione operativa è letta direttamente dallo snapshot per permettere
+        # al VmcCommandBuilder di selezionare la modalità dispositivo corretta.
+        if hvac_mode_s == HVACMode.FAN_ONLY.value:
+            _season_raw = getattr(getattr(snapshot, "season", None), "season", None)
+            _season_val_fo = getattr(_season_raw, "value", None)
+            if _season_val_fo == "winter":
+                _fo_season = "winter"
+            elif _season_val_fo == "summer":
+                _fo_season = "summer"
+            else:
+                _fo_season = "shoulder"
+            _gating_fo = GatingDiagnostics(
+                user_hvac_mode=hvac_mode_s,
+                user_profile=profile.value,
+                user_forced_off=False,
+                runtime_season=_season_val_fo or "unknown",
+                operative_season=_fo_season,
+                vmc_t_ref_c=float(getattr(demand, "vmc_t_ref_c", 22.0)),
+                vmc_rh_target_pct=float(getattr(demand, "vmc_rh_target_pct", 50.0)),
+            )
+            return (PlantMode.VENT_ONLY, _gating_fo)
 
         # --------------------
         # 1) Profile-aware gating (thresholds + booleans)

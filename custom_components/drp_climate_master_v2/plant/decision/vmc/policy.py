@@ -468,7 +468,7 @@ class VmcPolicy:
             True se le precondizioni locali sono soddisfatte.
         """
         # Guardie identiche ai boost esistenti
-        if not bool(getattr(snapshot, "windows_close_state", True)):
+        if not bool(getattr(snapshot, "windows_closed", True)):
             return False
         if bool(snapshot.presence_vacation):
             return False
@@ -505,7 +505,7 @@ class VmcPolicy:
         Returns:
             True se le precondizioni locali sono soddisfatte.
         """
-        if not bool(getattr(snapshot, "windows_close_state", True)):
+        if not bool(getattr(snapshot, "windows_closed", True)):
             return False
         if bool(snapshot.presence_vacation):
             return False
@@ -536,7 +536,7 @@ class VmcPolicy:
         """
         if not bool(self.cfg.boost.enabled):
             return False
-        if not bool(snapshot.windows_close_state):
+        if not bool(snapshot.windows_closed):
             return False
         if bool(snapshot.presence_vacation):
             return False
@@ -569,7 +569,7 @@ class VmcPolicy:
         """
         if not bool(self.cfg.boost.enabled):
             return False
-        if not bool(snapshot.windows_close_state):
+        if not bool(snapshot.windows_closed):
             return False
         if bool(snapshot.presence_vacation):
             return False

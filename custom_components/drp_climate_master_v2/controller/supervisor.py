@@ -357,10 +357,13 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                         )
                         log_debug(_LOGGER, "PlantDecision %s", self._last_plant_decision)
 
-                        if self.current_hvac_mode == HVACMode.AUTO:
+                        # fan_only: solo VMC attuata (bypass staging idraulico gestito in
+                        # PlantActuator.async_apply tramite PlantPhase.VMC_ONLY).
+                        # L'attuatore viene chiamato anche per fan_only oltre che per auto.
+                        if self.current_hvac_mode in (HVACMode.AUTO, HVACMode.FAN_ONLY):
                             await self._plant_actuator.async_apply(snapshot=snap, decision=self._last_plant_decision)
 
-                            if self._last_plant_decision.mode == PlantMode.IAQ_ONLY or self._last_plant_decision.mode == PlantMode.VENT_ONLY:
+                            if self._last_plant_decision.mode in (PlantMode.IAQ_ONLY, PlantMode.VENT_ONLY):
                                 self._state.hvac_action = HVACAction.FAN
                             elif self._last_plant_decision.mode == PlantMode.HEATING:
                                 self._state.hvac_action = HVACAction.HEATING
@@ -370,6 +373,8 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                                 self._state.hvac_action = HVACAction.DRYING
                             elif self._last_plant_decision.mode == PlantMode.OFF:
                                 self._state.hvac_action = HVACAction.OFF
+                            else:
+                                self._state.hvac_action = HVACAction.IDLE
                         else:
                             self._state.hvac_action = HVACAction.OFF
 

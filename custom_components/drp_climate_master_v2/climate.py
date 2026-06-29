@@ -323,8 +323,8 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity, 
                     data["Human Perception"] = human_perception.description
                     data["Human Perception Icon"] = human_perception.icon
 
-                data["Windows Closed"] = plant_snapshot.windows_close_state
-                data["Windows Close Minutes Off"] = plant_snapshot.windows_close_minutes_off
+                data["Windows Closed"] = plant_snapshot.windows_closed
+                data["Windows Close Minutes Off"] = plant_snapshot.windows_open_minutes
 
         return data
 

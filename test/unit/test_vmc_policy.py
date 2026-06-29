@@ -122,7 +122,7 @@ class _Snap:
     indoor_zones: dict = field(default_factory=dict)
     vmc: Optional[_VmcDevice] = None
     season: _Season = field(default_factory=_Season)
-    windows_close_state: bool = True
+    windows_closed: bool = True
     presence_vacation: bool = False
     presence_nobodysin: bool = False
 
@@ -153,7 +153,7 @@ def _snap(
         indoor_zones=indoor_zones,
         vmc=_VmcDevice(request_dehumidification=vmc_req_dehum),
         season=_Season(season=_SeasonVal(value=season)),
-        windows_close_state=windows_closed,
+        windows_closed=windows_closed,
         presence_vacation=vacation,
         presence_nobodysin=nobody,
     )

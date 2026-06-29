@@ -107,7 +107,13 @@ class SupplyActuationResult:
 
 
 class PlantPhase(str, Enum):
-    """Fase logica della plant (FSM sopra lo staging idraulico)."""
+    """Fase logica della plant (FSM sopra lo staging idraulico).
+
+    I valori OFF..FAULT guidano la FSM (fsm_step).
+    VMC_ONLY è esclusivamente diagnostico: indica che il ciclo di staging
+    idraulico è stato bypassato (impianto fermo, solo VMC attiva).
+    Non è mai prodotto da fsm_step, ma compare nei log dell'attuatore.
+    """
 
     UNDEFINED = "undefined"
     OFF = "off"
@@ -115,6 +121,7 @@ class PlantPhase(str, Enum):
     RUNNING = "running"
     STOPPING = "stopping"
     FAULT = "fault"
+    VMC_ONLY = "vmc_only"  # Diagnostico: bypass staging, solo VMC attuata
 
 
 @dataclass(slots=True)

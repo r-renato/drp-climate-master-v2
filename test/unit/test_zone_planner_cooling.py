@@ -26,7 +26,7 @@ def _make_snapshot(t_op: float, t_out: float, windows_closed: bool = True) -> Ma
     """PlantSnapshot minimale con una zona 'living'."""
     snap = MagicMock()
     snap.timestamp = datetime(2026, 5, 20, 18, 0, 0, tzinfo=timezone.utc)
-    snap.windows_close_state = windows_closed
+    snap.windows_closed = windows_closed
     snap.presence_vacation = False
     snap.climate_preset_mode = None
 

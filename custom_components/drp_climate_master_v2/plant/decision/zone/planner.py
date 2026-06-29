@@ -284,7 +284,7 @@ class ZoneDecisionPlanner:
                 getattr(getattr(snapshot.season, "season", None), "value", None)
                 if snapshot.season else None
             ),
-            "windows_closed": snapshot.windows_close_state,
+            "windows_closed": snapshot.windows_closed,
             "vacation": snapshot.presence_vacation,
             "cooling": cooling,
             "mpc": {
@@ -340,7 +340,7 @@ class ZoneDecisionPlanner:
                 zone=z,
                 zone_key=zone_name,
                 t_out_series=t_out_series,
-                windows_closed=snapshot.windows_close_state,
+                windows_closed=snapshot.windows_closed,
                 free_cool_feasible=free_cool_feasible,
                 reason=reason,
                 mpc=mpc,

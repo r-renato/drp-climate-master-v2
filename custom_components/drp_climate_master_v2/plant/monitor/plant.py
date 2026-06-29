@@ -367,8 +367,10 @@ class PlantSnapshot:
     pdc: Optional[PDCSnapshot] = None
     supply_unit: Optional[SupplyUnitSnapshot] = None
 
-    windows_close_state: Optional[bool] = None
-    windows_close_minutes_off: Optional[float] = None
+    # P4: windows_closed=True → chiuse, False → almeno una aperta
+    windows_closed: Optional[bool] = None
+    # P4: minuti da quando le finestre sono aperte (None se chiuse o non rilevato)
+    windows_open_minutes: Optional[float] = None
 
     presence_vacation: Optional[bool] = None
     presence_nobodysin: Optional[bool] = None
@@ -600,8 +602,8 @@ class PlantSnapshot:
             # --- presence / safety / faults ---
             lines += [
                 f"------------------------------------------------------------------",
-                f"Home windows state   :: {fbool(self.windows_close_state, 'All Closed', 'Some Open')}",
-                f"Home windows open time :: {fnum(self.windows_close_minutes_off,0)} min",
+                f"Home windows state   :: {fbool(self.windows_closed, 'All Closed', 'Some Open')}",
+                f"Home windows open time :: {fnum(self.windows_open_minutes,0)} min",
                 f"Vacation state       :: {fbool(self.presence_vacation, 'True', 'False')}",
                 f"Nobody's in state    :: {fbool(self.presence_nobodysin, 'True', 'False')}",
                 # f"Dew guard active     :: {fbool(self.dew_guard_active, 'Yes', 'No')}",
@@ -715,6 +717,5 @@ class PlantSnapshot:
         except Exception as e:  # noqa: BLE001
             log_exception(_LOGGER, f"Error in PlantSnapshot.__str__: {e}")
             return f"[PlantSnapshot.__str__ error: {e}]"
-
 
 

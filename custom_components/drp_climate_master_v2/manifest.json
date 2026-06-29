@@ -3,6 +3,7 @@
   "name": "Climate Master (DRP)",
   "manufacturer": "Domotic Residential Platform",
   "version": "2.0",
+  "build": "325",
   "documentation": "https://github.com/r-renato/home-climate-control",
   "issue_tracker": "https://github.com/r-renato/home-climate-control/issues",
   "iot_class": "cloud_polling",
