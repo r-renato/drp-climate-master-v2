@@ -317,8 +317,21 @@ class ClimateMasterEntity(CoordinatorEntity[ClimateCoordinator], ClimateEntity, 
 
         plant_snapshot = self._coordinator.plant_snapshot
         if plant_snapshot is not None and plant_snapshot.global_indoor_zone is not None:
-            if plant_snapshot.global_indoor_zone.dew_point is not None:
-                human_perception = self._human_perception(plant_snapshot.global_indoor_zone.dew_point.value)
+            # Human Perception è un'etichetta percettiva ("come si sente"
+            # l'appartamento): usa il dew point "medio" — psicrometricamente
+            # coerente con T/RH "Home" — e NON il worst-case di zona
+            # (global_indoor_zone.dew_point), riservato al gating di sicurezza
+            # anti-condensa. Letto direttamente dal sensor_aggregator perché
+            # non è un campo di ZoneSnapshot (solo display, vedi
+            # config_aggregate_sensors.py::FieldSuffix.INDOOR_DEW_POINT_MEAN).
+            dp_mean: float | None = None
+            if self._coordinator.sensor_aggregator is not None:
+                dp_mean = self._coordinator.sensor_aggregator.get(
+                    "global.indoor_dew_point_mean"
+                ).value
+
+            if dp_mean is not None:
+                human_perception = self._human_perception(dp_mean)
                 if human_perception is not None:
                     data["Human Perception"] = human_perception.description
                     data["Human Perception Icon"] = human_perception.icon

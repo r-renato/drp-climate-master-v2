@@ -397,7 +397,11 @@ async def async_build_plant_states_snapshot(
             temperature=sensor_aggr.get("global.indoor_temperature"),
             humidity=sensor_aggr.get("global.indoor_humidity"),
             heat_index=sensor_aggr.get("global.indoor_heat_index"),
-            dew_point=sensor_aggr.get("global.indoor_dew_point"),
+            # Worst-case (MAX per-zona): preserva il comportamento storico di
+            # questo campo, usato solo per il log diagnostico testuale in
+            # plant/monitor/plant.py. Il display "Home" usa invece il nuovo
+            # global.indoor_dew_point_mean (vedi sensor.py / climate.py).
+            dew_point=sensor_aggr.get("global.indoor_dew_point_worst_zone"),
 
             t_op=sensor_aggr.get("global.t_op"),
             mrt=sensor_aggr.get("global.mrt"),
@@ -426,7 +430,7 @@ async def async_build_plant_states_snapshot(
 
             global_indoor_zone=global_indoor_zone_snapshot,
 
-            # global_indoor_dew_point=sensor_aggr.get("global.indoor_dew_point"),
+            # global_indoor_dew_point=sensor_aggr.get("global.indoor_dew_point_worst_zone"),
             # global_indoor_heat_index=sensor_aggr.get("global.indoor_heat_index"),
             # global_indoor_humidity=sensor_aggr.get("global.indoor_humidity"),
             # global_indoor_temperature=sensor_aggr.get("global.indoor_temperature"),

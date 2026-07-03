@@ -29,6 +29,6 @@ from .signals import (  # noqa: F401
 )
 
 from .readiness import update_boiler_ready  # noqa: F401
-from .fsm import PlantFsmConfig, PlantFsmInputs, fsm_step, fsm_valve_gate, fsm_pump_gate  # noqa: F401
+from .fsm import PlantFsmConfig, PlantFsmInputs, fsm_step, fsm_pump_gate  # noqa: F401
 from .plans import compute_supply_plan, compute_zone_valves_plan  # noqa: F401
 from .observed_phase import ObservedPlantPhase, estimate_observed_phase  # noqa: F401

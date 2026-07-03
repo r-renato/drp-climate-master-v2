@@ -353,6 +353,36 @@ class DemandGatingConfig:
         return float(self.ctrl_aggr_by_profile.get(profile, 1.0))
 
 
+@dataclass(slots=True, frozen=True)
+class ZoneDpLockoutConfig:
+    """Isteresi e timer anti-chatter per il lockout DP per-zona.
+
+    Usato da `plant/decision/safety/zone_dp_lockout.py` per decidere se una
+    singola zona può restare ammessa al circuito cooling (Step 1), prima del
+    dimensionamento della mandata whole-plant (Step 2, `DewPointGuardConfig`
+    + `DewGuardPolicy`). Vedi la docstring di modulo di `zone_dp_lockout.py`
+    per il razionale termotecnico completo (es. doccia in un bagno che non
+    deve forzare il derating dell'intera mandata radiante).
+
+    Attributes
+    ----------
+    hysteresis_c:
+        Margine aggiuntivo richiesto in USCITA dal lockout, oltre al
+        margine di sicurezza già applicato da `DewGuardPolicy`
+        (`dp_margin_c` + `delta_surface_water_c`). Evita rientri/uscite
+        ripetuti quando il DP oscilla intorno alla soglia (es. umidità
+        residua post-doccia che scende lentamente).
+    min_lockout_minutes:
+        Tempo minimo di permanenza in LOCKOUT prima che la riammissione
+        possa essere valutata, indipendentemente dal DP corrente. Analogo
+        a MIN_OFF_TIME_MINUTES per il compressore (§5.2): previene
+        aperture e chiusure ripetute dell'elettrovalvola di zona.
+    """
+
+    hysteresis_c: float = 1.0
+    min_lockout_minutes: float = 10.0
+
+
 @dataclass(slots=True)
 class DewPointGuardConfig:
     """Cooling condensation guard parameters (°C).
@@ -378,10 +408,15 @@ class DewPointGuardConfig:
 
     delta_surface_water_c:
         Conservative Δ(surface↔water) (°C).
+
+    zone_lockout:
+        Isteresi e timer del lockout DP per-zona (Step 1, ammissione zona
+        al circuito cooling). Vedi `ZoneDpLockoutConfig`.
     """
 
     dp_margin_c: float = 2.0
     delta_surface_water_c: float = 1.0
+    zone_lockout: ZoneDpLockoutConfig = field(default_factory=ZoneDpLockoutConfig)
 
 
 # -----------------------------------------------------------------------------

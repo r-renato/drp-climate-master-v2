@@ -52,4 +52,7 @@ run_test "sim_clo_met_provider" \
 run_test "sim_comfort_band" \
   python3 -m pytest "$PWD/test/sim/sim_comfort_band.py" -s -v
 
+run_test "sim_fsm_simulation" \
+  python3 -m pytest "$PWD/test/sim/test_fsm_simulation.py" -s -v
+
 echo "Tutti i test sono passati!"

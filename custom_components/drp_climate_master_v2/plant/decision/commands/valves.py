@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Mapping, Optional
 
 from ....plant.monitor.plant import PlantSnapshot
 from ....helpers.utils import as_float, slugify
@@ -39,10 +39,30 @@ class ZoneValvesCommandBuilder:
         *,
         dew_guard: DewGuardResult,
         zones_decision_cool: Optional[ZonesDecision] = None,
+        zone_dp_admitted: Optional[Mapping[str, bool]] = None,
     ) -> None:
         v = dec.valves
         v.by_zone.clear()
         v.debug.clear()
+
+        def _apply_zone_dp_lockout() -> None:
+            """Esclude (forza OFF) le zone in lockout DP (Step 1, FASE 5b planner).
+
+            Indipendente dalla sorgente del comando (piano MPC o fallback
+            per-metrica): è un AND-gate finale, applicato dopo qualunque
+            altra logica di apertura — incluso il fallback "almeno una zona
+            aperta" — e SOLO in modalità COOLING/DEHUM_ASSIST (stesso scope
+            del dew-point guard whole-plant). Non tocca le zone già a False.
+            """
+            if not zone_dp_admitted:
+                return
+            if dec.mode not in (PlantMode.COOLING, PlantMode.DEHUM_ASSIST):
+                return
+            for zk, admitted in zone_dp_admitted.items():
+                key = slugify(str(zk))
+                if not admitted and v.by_zone.get(key):
+                    v.by_zone[key] = False
+                    v.debug.setdefault("dp_lockout_excluded", []).append(key)
 
         if dec.mode in (PlantMode.OFF, PlantMode.VENT_ONLY):
             v.debug.update({"source": "mode_off_or_vent_only"})
@@ -81,6 +101,8 @@ class ZoneValvesCommandBuilder:
                 if not is_actuable(zk):
                     continue
                 v.by_zone[zk] = bool(getattr(cmd, "valve_on", False))
+
+            _apply_zone_dp_lockout()
 
             v.debug.update(
                 {
@@ -126,6 +148,8 @@ class ZoneValvesCommandBuilder:
                     v.by_zone[wk] = True
             except Exception:
                 pass
+
+        _apply_zone_dp_lockout()
 
         v.debug.update(
             {

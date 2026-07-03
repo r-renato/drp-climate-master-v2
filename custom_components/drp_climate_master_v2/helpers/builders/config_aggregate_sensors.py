@@ -36,6 +36,24 @@ class FieldSuffix(StrEnum):
     INDOOR_DEW_POINT = "indoor_dew_point"
     INDOOR_HEAT_INDEX = "indoor_heat_index"
 
+    # Global-only: separazione metrica safety vs display (vedi _build_global_derived).
+    # Il dew point PER-ZONA resta INDOOR_DEW_POINT; queste due varianti esistono
+    # solo a livello "global" e non vanno usate per le zone.
+    #   - WORST_ZONE: MAX tra i DP di zona (invariato rispetto al precedente
+    #     "global.indoor_dew_point") — unica fonte di verità per la sicurezza
+    #     anti-condensa (DewGuardPolicy, VmcPolicy, zone_dp_lockout). Non esposto
+    #     come entity HA dedicata: resta interno, visibile nei log diagnostici
+    #     (plant/monitor/plant.py) e già rispecchiato nell'attributo "dp indoor
+    #     max" delle entità diagnostiche VMC/Radiant (pipeline DemandSignalsBuilder,
+    #     stessi DP di zona, stessa operazione MAX).
+    #   - MEAN: dew_point_c(global.indoor_temperature, global.indoor_humidity).
+    #     Psicrometricamente coerente con i due valori "Home" mostrati in
+    #     dashboard. Usato per il sensore HA "Home Dew Point" e per l'attributo
+    #     "Human Perception" del climate entity — solo display, mai per il
+    #     gating di sicurezza.
+    INDOOR_DEW_POINT_WORST_ZONE = "indoor_dew_point_worst_zone"
+    INDOOR_DEW_POINT_MEAN = "indoor_dew_point_mean"
+
     RADIANT_VALVE_OPEN = "radiant_valve_open"
 
     OUTDOOR_TEMPERATURE = "outdoor_temperature"
@@ -588,7 +606,7 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
         name = slugify(area.name)
         if is_active_radiant_zone(area):
             indoor_temp_inputs.append((FieldSuffix.INDOOR_TEMPERATURE(name), area.ceiling))
-            indoor_rh_inputs.append((FieldSuffix.INDOOR_HUMIDITY(name), 1.0))
+            indoor_rh_inputs.append((FieldSuffix.INDOOR_HUMIDITY(name), area.ceiling))
             indoor_dp_inputs.append((FieldSuffix.INDOOR_DEW_POINT(name), 1.0))
             indoor_hi_inputs.append((FieldSuffix.INDOOR_HEAT_INDEX(name), 1.0))
             indoor_cm_inputs.append((FieldSuffix.CONDENSATION_MARGIN(name), 1.0))
@@ -610,19 +628,47 @@ def _build_global_derived(areas: List[AreaConfig]) -> tuple[DerivedSpec, ...]:
             name=FieldSuffix.INDOOR_HUMIDITY(GLOBAL),
             kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_rh_inputs),
-            method=AggregationMethod.MEDIAN,
+            # Opzione A: stesso schema di pesi spaziali di T (ceiling-weighted),
+            # per coerenza psicrometrica con global.indoor_dew_point_mean.
+            # Trade-off: rispetto alla MEDIAN precedente, un picco RH transitorio
+            # in una zona (es. doccia in bagno) ora influenza linearmente la UR
+            # "Home", proporzionalmente al peso soffitto di quella zona — atteso
+            # e accettato, coerente con l'uso comfort/MRT del peso ceiling.
+            method=AggregationMethod.WEIGHTED_MEAN,
             min_sources=2,
             clamp_min=1.0,
             clamp_max=100.0,
             max_age=timedelta(minutes=10),
             hold_last_good=timedelta(minutes=5),
         ),
-        # Conservative: max dew point among representative zones (exclude foyer duplication)
+        # Safety: MAX dew point tra le zone rappresentative (esclude duplicazione foyer).
+        # Unica fonte di verità per il gating anti-condensa (DewGuardPolicy, VmcPolicy,
+        # zone_dp_lockout) — NON va usato per display (vedi INDOOR_DEW_POINT_MEAN sotto).
         DerivedSpec(
-            name=FieldSuffix.INDOOR_DEW_POINT(GLOBAL),
+            name=FieldSuffix.INDOOR_DEW_POINT_WORST_ZONE(GLOBAL),
             kind=DerivedKind.AGGREGATE,
             inputs=tuple(indoor_dp_inputs),
             method=AggregationMethod.MAX,
+            min_sources=2,
+            clamp_min=-20.0,
+            clamp_max=30.0,
+            max_age=timedelta(minutes=10),
+            hold_last_good=timedelta(minutes=5),
+        ),
+        # Display: dew point calcolato dalla coppia (T_global, RH_global) — coerente
+        # per costruzione con i due valori "Home" mostrati in dashboard, a differenza
+        # del worst_zone sopra che proviene da una pipeline di aggregazione diversa
+        # (MAX per-zona) e non è psicrometricamente confrontabile con T/RH globali.
+        # Usato dal sensore HA "Home Dew Point" e dall'attributo "Human Perception"
+        # del climate entity. MAI usato per il gating di sicurezza anti-condensa.
+        DerivedSpec(
+            name=FieldSuffix.INDOOR_DEW_POINT_MEAN(GLOBAL),
+            kind=DerivedKind.COMPUTE,
+            compute=ComputeFn.DEW_POINT_C,
+            inputs=(
+                (FieldSuffix.INDOOR_TEMPERATURE(GLOBAL), 1.0),
+                (FieldSuffix.INDOOR_HUMIDITY(GLOBAL), 1.0),
+            ),
             min_sources=2,
             clamp_min=-20.0,
             clamp_max=30.0,

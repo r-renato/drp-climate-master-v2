@@ -40,6 +40,7 @@ from .commands.vmc import VmcCommandBuilder
 from .mode.resolver import ModeResolver
 from .validation import validate_decision
 from .safety.dew_guard import DewGuardPolicy, DewGuardResult
+from .safety.zone_dp_lockout import ZoneDpLockoutState, zone_dp_lockout_step
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -99,6 +100,13 @@ class PlantDecisionPlanner:
     _vmc_cmd: VmcCommandBuilder = field(init=False, repr=False)
 
     _dew_guard: DewGuardPolicy = field(init=False, repr=False)
+
+    # Lockout DP per-zona (Step 1, ammissione zona al circuito cooling).
+    # Persiste tra i tick (lifecycle del planner), non tra riavvii HA —
+    # vedi docstring di modulo in safety/zone_dp_lockout.py.
+    _zone_dp_lockout: dict[str, ZoneDpLockoutState] = field(
+        default_factory=dict, init=False, repr=False
+    )
 
     # Zones MPC-lite integration (kept isolated in `zone/provider.py`)
     _zones_mpc: ZonesMpcProvider = field(init=False, repr=False)
@@ -267,15 +275,52 @@ class PlantDecisionPlanner:
         log_debug(_LOGGER, "Computed plant regime: %s", mode)
         dec.signals = demand
 
+        # ── FASE 5b ─ Lockout DP per-zona (Step 1) ─────────────────────────────
+        # Determina, per ciascuna zona indoor, se è ammissibile al circuito
+        # cooling condiviso (riusa DewGuardPolicy.evaluate() sul DP della
+        # singola zona — vedi safety/zone_dp_lockout.py). Una zona esclusa
+        # (es. bagno post-doccia) non forza il derating dell'intero impianto:
+        # il MAX-DP usato in FASE 6 per dimensionare la mandata viene
+        # ricalcolato sulle sole zone ammesse.
+        # NOTA: ha effetto operativo solo in COOLING/DEHUM_ASSIST (applicato
+        # da ZoneValvesCommandBuilder); viene comunque valutato ad ogni tick
+        # per mantenere coerente il timer di permanenza nello stato.
+        zone_dp_admitted: dict[str, bool] = {}
+        admitted_dp_values: list[float] = []
+        for zone_key, z in (getattr(snapshot, "indoor_zones", None) or {}).items():
+            zone_dp = as_float(getattr(getattr(z, "dew_point", None), "value", None))
+            lockout_state = self._zone_dp_lockout.setdefault(zone_key, ZoneDpLockoutState())
+            admitted, zone_reasons = zone_dp_lockout_step(
+                lockout_state,
+                now=ts,
+                zone_dp_c=zone_dp,
+                dew_guard=self._dew_guard,
+                lockout_cfg=self.cfg.dp_guard.zone_lockout,
+            )
+            zone_dp_admitted[zone_key] = admitted
+            if zone_reasons:
+                dec.warnings.extend([f"zone_dp_lockout:{zone_key}:{r}" for r in zone_reasons])
+            if admitted and zone_dp is not None:
+                admitted_dp_values.append(zone_dp)
+
+        # Fallback esplicito: se nessuna zona ammessa ha un DP valido (nessuna
+        # zona ammissibile, o nessuna zona indoor disponibile), si ricade sul
+        # MAX-DP globale invariato — comportamento identico a prima di questa
+        # patch (nessuna regressione nel caso limite "tutte le zone escluse").
+        dp_max_for_guard = (
+            max(admitted_dp_values) if admitted_dp_values else getattr(demand, "dp_max_c", None)
+        )
+
         # ── FASE 6 ─ Dew-point guard ──────────────────────────────────────────
-        # Unica fonte di verità per la sicurezza anti-condensa.
+        # Unica fonte di verità per la sicurezza anti-condensa whole-plant.
         # Applicata DOPO la risoluzione del modo: se COOLING è unsafe,
         # il modo viene degradato qui e solo qui.
-        # NOTA TERMOTECNICA (P0): opera su dp_max_c aggregato (stima),
-        # non su T_mandata_radiante misurata. Secondo layer di verifica mancante.
+        # NOTA TERMOTECNICA (P0): opera su dp_max_for_guard (stima, ora
+        # filtrato sulle zone ammesse in FASE 5b), non su T_mandata_radiante
+        # misurata. Secondo layer di verifica mancante.
         dew_guard: DewGuardResult = self._dew_guard.evaluate(
             mode=dec.mode,
-            dp_max_c=getattr(demand, "dp_max_c", None),
+            dp_max_c=dp_max_for_guard,
             allow_dehum_assist=bool(getattr(demand, "vmc_req_dehumidif", False)),
         )
 
@@ -305,6 +350,7 @@ class PlantDecisionPlanner:
             zones_decision,
             dew_guard=dew_guard,
             zones_decision_cool=zones_decision_cool,
+            zone_dp_admitted=zone_dp_admitted,
         )
         self._supply_cmd.fill(dec, snapshot, demand, zones_decision, dew_guard=dew_guard)
         self._vmc_cmd.fill(dec, snapshot, demand)

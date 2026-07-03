@@ -14,13 +14,23 @@ from ..decision.contracts import PlantDecision
 from .config import PlantActuatorConfig
 from .signals import build_control_context
 from .readiness import update_boiler_ready
-from .fsm import PlantFsmConfig, PlantFsmInputs, fsm_step, fsm_valve_gate, fsm_pump_gate
+from .fsm import PlantFsmConfig, PlantFsmInputs, fsm_step
 from .plans import compute_supply_plan, compute_zone_valves_plan
 from .observed_phase import estimate_observed_phase
 from .model import PlantActuatorStatus, PlantPhase, StagingState
 from .device_io import PlantDeviceIO
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _valves_ready_for_fsm(stage: StagingState, *, now: Any, needs_valves: bool, valve_open_delay_s: float) -> bool:
+    """Best-effort readiness prima del piano valvole del tick corrente."""
+    if not needs_valves:
+        return True
+    ts = stage.valves_open_request_ts
+    if ts is None:
+        return False
+    return (now - ts).total_seconds() >= float(valve_open_delay_s)
 
 
 async def run_staging_cycle(
@@ -42,10 +52,10 @@ async def run_staging_cycle(
        VMC e ritorna (nessun comando a PDC/pompe/valvole).
     3) Comandi immediati PDC + VMC (non dipendono da staging).
     4) Aggiornamento boiler readiness (isteresi).
-    5) Query pura fsm_valve_gate → gating valvole (no mutazione stato).
+    5) FSM step (unica chiamata) → avanza stato + gating forte.
     6) Piano valvole + attuazione.
-    7) FSM step (unica chiamata, valves_ready reale) → avanza stato + gating pompe.
-    8) Piano pompe/miscelatrice + attuazione + log strutturato.
+    7) Piano pompe/miscelatrice + attuazione.
+    8) Log strutturato.
 
     Separazione da PlantActuator
     ----------------------------
@@ -121,11 +131,27 @@ async def run_staging_cycle(
         energy_stall_timeout_s=cfg.fsm_energy_stall_timeout_s,
     )
 
-    # 5) Gating valvole (query pura, no mutazione)
-    allow_valves, force_close_valves = fsm_valve_gate(
-        stage.fsm,
-        pdc_effective_on=bool(ctx.pdc.effective_on) if ctx.pdc.effective_known else None,
+    # 5) FSM step (unica chiamata): produce gating forte per valvole e pompe.
+    valves_ready_for_fsm = _valves_ready_for_fsm(
+        stage,
+        now=now,
+        needs_valves=ctx.needs_valves,
+        valve_open_delay_s=cfg.valve_open_delay_s,
     )
+    fsm_inp = PlantFsmInputs(
+        now=now,
+        request_on=ctx.request_on,
+        pdc_effective_on=ctx.pdc.effective_on,
+        pdc_effective_known=bool(ctx.pdc.effective_known),
+        compressor_on=ctx.pdc.compressor_on,
+        boiler_ready=boiler_ready,
+        boiler_signal_available=ctx.boiler.available,
+        valves_ready=valves_ready_for_fsm,
+        needs_valves=ctx.needs_valves,
+    )
+    fsm = fsm_step(stage, inp=fsm_inp, cfg=fsm_cfg)
+    allow_valves = bool(fsm.allow_valves)
+    force_close_valves = bool(fsm.force_close_valves)
 
     # 6) Piano valvole + apply
     valves_plan = compute_zone_valves_plan(
@@ -141,20 +167,9 @@ async def run_staging_cycle(
     valves_ready = valves_plan.result.ready
     valves_stats = valves_plan.result.stats
 
-    # 7) FSM step (unica chiamata)
-    fsm_inp = PlantFsmInputs(
-        now=now,
-        request_on=ctx.request_on,
-        pdc_effective_on=ctx.pdc.effective_on,
-        pdc_effective_known=bool(ctx.pdc.effective_known),
-        compressor_on=ctx.pdc.compressor_on,
-        boiler_ready=boiler_ready,
-        boiler_signal_available=ctx.boiler.available,
-        valves_ready=valves_ready,
-        needs_valves=ctx.needs_valves,
-    )
-    fsm = fsm_step(stage, inp=fsm_inp, cfg=fsm_cfg)
-    allow_pumps, force_pumps_off = fsm_pump_gate(fsm.phase)
+    # 7) Gating pompe dal risultato FSM.
+    allow_pumps = bool(fsm.allow_pumps)
+    force_pumps_off = bool(fsm.force_pumps_off)
 
     # 8) Piano pompe + apply + log
     supply_plan = compute_supply_plan(

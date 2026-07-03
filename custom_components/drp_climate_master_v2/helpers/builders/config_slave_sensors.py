@@ -151,7 +151,11 @@ def build_slave_sensor_defs(runtime_config: RuntimeConfig) -> list[dict[str, Any
             "sensors": SensorPair(
                 temperature=FieldSuffix.INDOOR_TEMPERATURE(GLOBAL),
                 humidity=FieldSuffix.INDOOR_HUMIDITY(GLOBAL),
-                dew_point=FieldSuffix.INDOOR_DEW_POINT(GLOBAL),
+                # Display: psicrometricamente coerente con T/RH "Home" sopra.
+                # Il worst-case di sicurezza (MAX per-zona) resta interno
+                # (global.indoor_dew_point_worst_zone) e non è esposto qui —
+                # vedi note in config_aggregate_sensors.py::FieldSuffix.
+                dew_point=FieldSuffix.INDOOR_DEW_POINT_MEAN(GLOBAL),
             ),
             "unit": runtime_config.climate.unit_system.temperature,
         }
@@ -199,4 +203,3 @@ def build_slave_sensor_defs(runtime_config: RuntimeConfig) -> list[dict[str, Any
 
     # log_debug(_LOGGER, "build_slave_sensor_defs: %d definitions", len(defs))
     return defs
-
