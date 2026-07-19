@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 import logging
 
 from homeassistant.util import dt as dt_util
@@ -13,7 +13,6 @@ from ...helpers.utils import as_float, as_int
 from ...plant.monitor.plant import PlantSnapshot
 from ...domain.enums import HVACOperatingProfile
 
-from .zone.model import ZonesDecision
 from .comfort_band.builder import build_confort_zones
 from .comfort_band.policy_layer import ComfortPolicyLayer, ConfortPolicyConfig
 from .comfort_band.mpc.provider import ZonesMpcProvider
@@ -167,6 +166,7 @@ class PlantDecisionPlanner:
         *,
         snapshot: PlantSnapshot,
         reason: str,
+        hvac_mode: str = "auto",
     ) -> PlantDecision:
         ts = snapshot.timestamp if isinstance(snapshot.timestamp, datetime) else dt_util.utcnow()
         if isinstance(ts, datetime) and ts.tzinfo is None:
@@ -253,6 +253,7 @@ class PlantDecisionPlanner:
             demand=demand,
             zones_decision=zones_decision,
             zones_decision_cool=zones_decision_cool,
+            hvac_mode=hvac_mode,
         )
         dec.mode = mode
         dec.gating = gating

@@ -7,6 +7,8 @@ from ....helpers.utils import as_bool, as_float, clamp
 from ....plant.monitor.plant import PlantSnapshot
 
 from ..config import PlantPlannerConfig
+from homeassistant.components.climate.const import HVACMode
+
 from ..contracts import PlantDecision, PlantDemandSignals, PlantMode
 
 
@@ -41,6 +43,43 @@ class VmcCommandBuilder:
             v.enable_free_cooling = False
             v.force_free_cooling = False
             v.debug.update({"reason": "plant_mode_off"})
+            return
+
+        # ── P-04: FAN_ONLY — ventilazione pura (§4.1) ───────────────────────────
+        # §4.1: in FAN_ONLY nessuna deumidifica, modalità processo VMC = OFF.
+        # Il calcolo decisionale è completo (§4.1 + P-03): dec.mode può essere
+        # HEATING/COOLING/IAQ_ONLY/VENT_ONLY — irrilevante per questo gate.
+        # Eccezione: freecooling è gestito dal suo path dedicato (sotto) perché
+        # §4.1 lo consente esplicitamente ("decision gestisce ricircolo/freecooling").
+        # Nota: PlantMode.OFF è già intercettato sopra; PlantMode.OFF + FAN_ONLY
+        # (vacation/finestre aperte) non raggiunge mai questo branch.
+        if dec.gating.user_hvac_mode == HVACMode.FAN_ONLY.value and not demand.vmc_req_free_cooling:
+            _fo_dp_sp_c = float(
+                getattr(demand, "vmc_dp_sp_c", None)
+                or getattr(cfg.vmc.dehum, "dp_sp_max_c", cfg.vmc.dehum.setpoint_dp_c)
+            )
+            _fo_ddp_c = float(getattr(demand, "vmc_ddp_cmd_c", None) or cfg.vmc.dehum.setpoint_ddp_c)
+            _fo_rh_pct = float(dec.gating.vmc_rh_target_pct)
+            # Velocità presence-driven, nessun boost DP (dp_current_c=None).
+            _fo_speed = self._compute_air_speed(snapshot, None, _fo_dp_sp_c, boost=False)
+            v.power = True
+            v.mode = "off"          # §4.1: processo OFF — solo ventilazione, nessun trattamento termico
+            v.air_speed = int(_fo_speed)
+            v.setpoint_t_c = None   # §4.1: nessun setpoint termico in fan_only
+            v.setpoint_rh_pct = round(_fo_rh_pct, 0)
+            v.setpoint_dp_c = round(_fo_dp_sp_c, 1)
+            v.setpoint_ddp_c = int(round(_fo_ddp_c, 0))
+            v.force_treatment_off = False
+            v.enable_free_cooling = False
+            v.force_free_cooling = False
+            v.debug.update({
+                "reason": "fan_only_vent",
+                "fo_speed": int(_fo_speed),
+                "fo_dp_sp_c": round(_fo_dp_sp_c, 1),
+                "fo_ddp_c": int(round(_fo_ddp_c, 0)),
+                "dehum_suppressed": True,
+                "process_mode": "off",
+            })
             return
 
         # IAQ_ONLY: ricambio aria minimo, nessun trattamento attivo, nessun bypass.
@@ -113,73 +152,6 @@ class VmcCommandBuilder:
                     "iaq_dp_sp_c": round(iaq_dp_sp_c, 1),
                     "iaq_ddp_c": int(round(iaq_ddp_c, 0)),
                     "iaq_rh_pct": round(iaq_rh_pct, 0),
-                }
-            )
-            return
-
-        # ── FAN_ONLY / VENT_ONLY esplicito: ventilazione pura ────────────────
-        # Condizione: modo VENT_ONLY con hvac_mode utente = "fan_only".
-        # Deumidifica disabilitata per contratto: il soffitto radiante è spento,
-        # non esistono superfici fredde → nessun rischio condensa da gestire.
-        # Velocità: base/presence-driven, nessun boost DP (dp_current=None).
-        # Setpoint DP: valore già calcolato dalla VmcPolicy con profilo passivo
-        # (radiant_cooling_active=False → dp_sp_cmd = dp_sp_max_c): soglia
-        # permissiva che non triggera deumidifica sul device.
-        if dec.mode == PlantMode.VENT_ONLY and dec.gating.user_hvac_mode == "fan_only":
-            _fo_op = dec.gating.operative_season
-            if _fo_op == "winter":
-                _fo_mode = cfg.vmc.mode_winter
-            elif _fo_op == "summer":
-                _fo_mode = cfg.vmc.mode_summer
-            else:
-                # Shoulder: usa mode_shoulder se configurato (può essere "Off" = solo
-                # ventilazione, che è esattamente l'intento di fan_only); altrimenti
-                # ricade sul modo corrente del device o sul default invernale.
-                _fo_mode = (
-                    getattr(cfg.vmc, "mode_shoulder", None)
-                    or getattr(getattr(snapshot, "vmc", None), "processing_mode", None)
-                    or cfg.vmc.mode_winter
-                )
-
-            _fo_t_ref_c = float(dec.gating.vmc_t_ref_c)
-            _fo_dead = float(cfg.vmc.temp_neutral_deadband_c)
-            if _fo_mode == cfg.vmc.mode_winter:
-                _fo_t_sp = _fo_t_ref_c - _fo_dead
-            elif _fo_mode == cfg.vmc.mode_summer:
-                _fo_t_sp = _fo_t_ref_c + _fo_dead
-            else:
-                _fo_t_sp = _fo_t_ref_c
-            _fo_t_sp = float(clamp(_fo_t_sp, float(cfg.vmc.temp_min_c), float(cfg.vmc.temp_max_c)))
-
-            _fo_rh_pct = float(dec.gating.vmc_rh_target_pct)
-            # Setpoint DP passivo (già calcolato da VmcPolicy senza cooling attivo).
-            _fo_dp_sp_c = float(
-                getattr(demand, "vmc_dp_sp_c", None)
-                or getattr(cfg.vmc.dehum, "dp_sp_max_c", cfg.vmc.dehum.setpoint_dp_c)
-            )
-            _fo_ddp_c = float(getattr(demand, "vmc_ddp_cmd_c", None) or cfg.vmc.dehum.setpoint_ddp_c)
-            # Velocità presence-driven, nessun boost DP (dp_current_c=None).
-            _fo_speed = self._compute_air_speed(snapshot, None, _fo_dp_sp_c, boost=False)
-
-            v.power = True
-            v.mode = _fo_mode
-            v.air_speed = int(_fo_speed)
-            v.setpoint_t_c = round(_fo_t_sp, 1)
-            v.setpoint_rh_pct = round(_fo_rh_pct, 0)
-            v.setpoint_dp_c = round(_fo_dp_sp_c, 1)
-            v.setpoint_ddp_c = int(round(_fo_ddp_c, 0))
-            v.force_treatment_off = False
-            v.enable_free_cooling = False
-            v.force_free_cooling = False
-            v.debug.update(
-                {
-                    "reason": "fan_only_vent",
-                    "fo_mode": _fo_mode,
-                    "fo_t_sp_c": round(_fo_t_sp, 1),
-                    "fo_dp_sp_c": round(_fo_dp_sp_c, 1),
-                    "fo_ddp_c": int(round(_fo_ddp_c, 0)),
-                    "fo_speed": int(_fo_speed),
-                    "dehum_suppressed": True,
                 }
             )
             return

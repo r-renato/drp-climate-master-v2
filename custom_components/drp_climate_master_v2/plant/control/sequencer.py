@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Sequence
 
+from homeassistant.components.climate.const import HVACMode
 from homeassistant.util import dt as dt_util
 
 from ...helpers.logger import log_debug, log_info
-from ...helpers.utils import as_float
 
 from ...plant.monitor.plant import PlantSnapshot
 from ..decision.contracts import PlantDecision
@@ -42,7 +42,7 @@ async def run_staging_cycle(
     runtime_areas: Sequence[Any],
     supply_configured: bool,
     device_io: PlantDeviceIO,
-) -> None:
+) -> StagingState:
     """Esegue il ciclo di staging idraulico per un tick di controllo.
 
     Sequenza (8 passi)
@@ -69,6 +69,22 @@ async def run_staging_cycle(
     ctx = build_control_context(now=now, snapshot=snapshot, decision=decision, cfg=cfg)
     observed = estimate_observed_phase(snapshot, ctx)
 
+    # ── P-02: Gate OFF (§4.1) — secondo livello di sicurezza ───────────────────
+    # §4.1: in modalità OFF nessun componente dell'impianto deve essere attuato.
+    # Il gate primario è nel Supervisor (async_apply non viene chiamato in OFF).
+    # Questo gate garantisce il contratto §4.1 indipendentemente dal chiamante:
+    # se run_staging_cycle venisse invocato per errore con hvac_mode=OFF
+    # (test, servizi futuri, bug nel supervisor), il sequencer non attua nulla.
+    if decision.gating.user_hvac_mode == HVACMode.OFF.value:
+        log_debug(
+            _LOGGER,
+            "staging_skip: hvac_mode=off fsm=%s mode=%s reason=%s",
+            stage.fsm.phase.value,
+            ctx.mode,
+            getattr(decision, "reason", "-"),
+        )
+        return stage
+
     # 2) VMC-only bypass (VENT_ONLY / IAQ_ONLY in steady-state)
     if ctx.mode in ("vent_only", "iaq_only") and stage.fsm.phase == PlantPhase.OFF:
         await device_io.apply_vmc(decision.vmc)
@@ -81,7 +97,7 @@ async def run_staging_cycle(
             getattr(decision.vmc, "air_speed", None),
             getattr(decision, "reason", "-"),
         )
-        return
+        return stage
 
     # 3) Comandi immediati PDC + VMC
     await device_io.apply_pdc(decision.pdc)
@@ -238,3 +254,6 @@ async def run_staging_cycle(
 
     log_debug(_LOGGER, "Observed phase: %s (%s)", status.observed_phase, " | ".join(getattr(observed, "reasons", []) or []))
     log_debug(_LOGGER, "%s", status)
+
+    # stage.clone(fsm=fsm.phase)  # aggiorna lo stato di staging con la nuova FSM
+    return stage

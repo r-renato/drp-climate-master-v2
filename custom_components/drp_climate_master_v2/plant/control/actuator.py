@@ -91,7 +91,7 @@ class PlantActuator:
         l'I/O verso i driver è in device_io.py.
         """
         async with self._apply_lock:
-            await run_staging_cycle(
+            self._stage = await run_staging_cycle(
                 snapshot=snapshot,
                 decision=decision,
                 stage=self._stage,

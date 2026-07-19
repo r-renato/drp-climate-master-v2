@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from homeassistant.components.climate.const import HVACMode
-
 from ....helpers.utils import as_float
 from ....domain.enums import HVACOperatingProfile
 from ....plant.monitor.plant import PlantSnapshot
@@ -63,6 +61,7 @@ class ModeResolver:
         demand: PlantDemandSignals,
         zones_decision: Optional[ZonesDecision] = None,
         zones_decision_cool: Optional[ZonesDecision] = None,
+        hvac_mode: Optional[str] = None,
     ) -> tuple[PlantMode, GatingDiagnostics]:
         cfg = self.cfg
 
@@ -72,9 +71,15 @@ class ModeResolver:
         # --------------------
         # 0) User intent (HA Climate)
         # --------------------
-        hvac_mode_raw = getattr(snapshot, "climate_hvac_mode", None)
-        hvac_mode_val = getattr(hvac_mode_raw, "value", hvac_mode_raw)
-        hvac_mode_s = str(hvac_mode_val).strip().lower() if hvac_mode_val is not None else "auto"
+        # P-05: usa hvac_mode parametro esplicito (fonte autorevole dal Supervisor);
+        # fallback a snapshot.climate_hvac_mode per retrocompatibilità con
+        # chiamanti che non lo passano ancora (es. test, integrazioni parziali).
+        if hvac_mode is not None:
+            hvac_mode_s = str(hvac_mode).strip().lower()
+        else:
+            hvac_mode_raw = getattr(snapshot, "climate_hvac_mode", None)
+            hvac_mode_val = getattr(hvac_mode_raw, "value", hvac_mode_raw)
+            hvac_mode_s = str(hvac_mode_val).strip().lower() if hvac_mode_val is not None else "auto"
 
         preset_raw = getattr(snapshot, "climate_preset_mode", None)
         profile = (
@@ -95,32 +100,14 @@ class ModeResolver:
         #     return (PlantMode.OFF, gating)
 
         # --------------------
-        # 0.b) fan_only: override esplicito → VENT_ONLY
+        # 0.b) fan_only: nessun early return — calcolo domanda termica completo (§4.1)
         # --------------------
-        # L'utente ha scelto esplicitamente "solo ventilazione": bypass completo
-        # del gating termico. PDC, pompe e valvole rimangono spenti.
-        # La VMC riceve i propri comandi senza deumidifica (gestita in VmcCommandBuilder).
-        # La stagione operativa è letta direttamente dallo snapshot per permettere
-        # al VmcCommandBuilder di selezionare la modalità dispositivo corretta.
-        if hvac_mode_s == HVACMode.FAN_ONLY.value:
-            _season_raw = getattr(getattr(snapshot, "season", None), "season", None)
-            _season_val_fo = getattr(_season_raw, "value", None)
-            if _season_val_fo == "winter":
-                _fo_season = "winter"
-            elif _season_val_fo == "summer":
-                _fo_season = "summer"
-            else:
-                _fo_season = "shoulder"
-            _gating_fo = GatingDiagnostics(
-                user_hvac_mode=hvac_mode_s,
-                user_profile=profile.value,
-                user_forced_off=False,
-                runtime_season=_season_val_fo or "unknown",
-                operative_season=_fo_season,
-                vmc_t_ref_c=float(getattr(demand, "vmc_t_ref_c", 22.0)),
-                vmc_rh_target_pct=float(getattr(demand, "vmc_rh_target_pct", 50.0)),
-            )
-            return (PlantMode.VENT_ONLY, _gating_fo)
+        # §4.1: in FAN_ONLY la componente di decision continua a funzionare come
+        # in OFF o AUTO: bande di comfort, quorum, surplus/deficit vengono calcolati
+        # normalmente. Le restrizioni VMC (no dehum, processo OFF) sono applicate
+        # in VmcCommandBuilder leggendo dec.gating.user_hvac_mode == "fan_only".
+        # L'attuazione idraulica (PDC/pompe/valvole) è bloccata nel Supervisor.
+        # user_hvac_mode="fan_only" è propagato in GatingDiagnostics (sezione 2).
 
         # --------------------
         # 1) Profile-aware gating (thresholds + booleans)

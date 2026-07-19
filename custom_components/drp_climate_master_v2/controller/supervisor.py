@@ -72,13 +72,10 @@ from ..plant.decision.zone.model import ZonesDecision
 
 from ..plant.decision.contracts import PlantDecision, PlantMode
 from ..plant.decision.planner import PlantDecisionPlanner
-from ..plant.decision.context import DecisionDerivedInputs
 
 from ..const import DOMAIN
 from ..helpers.logger import log_debug, log_exception, log_info, log_warning
-from ..helpers.diagnostics.dashboard import build_dashboard, render_dashboard_text
 from ..helpers.scheduler import IntervalGatedSchedulerBase
-from ..helpers.utils import as_float, as_int
 
 from ..domain.enums import HVACOperatingProfile
 from .coordinator import ClimateCoordinator
@@ -353,7 +350,10 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
                         self._last_plant_decision = self._plant_decision_planner.plan(
                             snapshot=snap,
                             reason="tick",
-                            # derived=derived,
+                            # P-05: hvac_mode esplicito dal Supervisor (fonte autorevole).
+                            # Evita divergenza di un tick tra _state.hvac_mode e
+                            # snapshot.climate_hvac_mode (coordinator non ancora aggiornato).
+                            hvac_mode=self.current_hvac_mode.value,
                         )
                         log_debug(_LOGGER, "PlantDecision %s", self._last_plant_decision)
 

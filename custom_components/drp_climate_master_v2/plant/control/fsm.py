@@ -37,6 +37,9 @@ class PlantFsmConfig:
     start_timeout_s: float
     stop_timeout_s: float
     energy_stall_timeout_s: float = 600.0
+    # Durata default del blocco LOCKOUT (§5.2: MIN_OFF_TIME_MINUTES * 60 = 600s).
+    # Sovrascrivibile per lockout DP più lunghi (es. 1800s da dew-guard).
+    lockout_duration_s: float = 600.0
 
 
 @dataclass(slots=True, frozen=True)
@@ -64,6 +67,22 @@ class PlantFsmInputs:
 
     valves_ready: bool
     needs_valves: bool
+    # ── Campi §6: stati eccezionali (default=safe per retrocompatibilità) ──
+    # True se un allarme hardware esplicito (PDC, pompa) è presente.
+    # Priorità massima: forza FAULT immediato da qualsiasi stato attivo.
+    fault_present: bool = False
+    # True se è richiesto un blocco temporizzato (dew-guard persistente,
+    # anti-cycling esplicito). lockout_duration_s specifica la durata;
+    # se 0 viene usato cfg.lockout_duration_s come default.
+    lockout_requested: bool = False
+    lockout_duration_s: float = 0.0
+    # True se una condizione di degrado parziale è attiva (VMC KO, pompa KO,
+    # sensore T_mandata mancante, ≥2 sensori zona mancanti — §6 DEGRADED).
+    degraded: bool = False
+    degraded_reason: Optional[str] = None
+    # True se richiesto blocco manutenzione volontario (set da service call).
+    # Uscita solo su reset esplicito (maintenance=False).
+    maintenance: bool = False
 
 
 def _pdc_known_off(inp: PlantFsmInputs) -> bool:
@@ -106,6 +125,13 @@ def _transition(st: PlantFsmState, new_phase: PlantPhase, now: datetime, cfg: Pl
     st.start_deadline = None
     st.stop_deadline = None
     st.energy_stall_since = None
+    # Azzeramento campi di stato specifici per fase:
+    # lockout_until viene mantenuto solo mentre si è IN LOCKOUT;
+    # degraded_reason viene azzerato quando si esce da DEGRADED.
+    if new_phase != PlantPhase.LOCKOUT:
+        st.lockout_until = None
+    if new_phase != PlantPhase.DEGRADED:
+        st.degraded_reason = None
     if new_phase == PlantPhase.STARTING:
         st.start_deadline = now + timedelta(seconds=float(cfg.start_timeout_s))
     if new_phase == PlantPhase.STOPPING:
@@ -116,14 +142,26 @@ _HandlerResult = tuple[Optional[PlantPhase], list[str]]
 
 
 def _handle_off(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmConfig, elapsed: float) -> _HandlerResult:
+    if inp.maintenance:
+        return PlantPhase.MAINTENANCE, ["off->maintenance"]
     if not inp.request_on:
         return None, []
+    # Lockout esplicito anche da OFF (es. dew-guard persistente che impedisce
+    # il riavvio prima che la situazione sia rientrata — §5.1 escalation c).
+    if inp.lockout_requested:
+        duration = inp.lockout_duration_s if inp.lockout_duration_s > 0.0 else float(cfg.lockout_duration_s)
+        st.lockout_until = inp.now + timedelta(seconds=duration)
+        return PlantPhase.LOCKOUT, [f"off->lockout:{duration:.0f}s"]
     if elapsed >= float(cfg.min_off_s):
         return PlantPhase.STARTING, []
     return None, ["min_off_hold"]
 
 
 def _handle_starting(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmConfig, elapsed: float) -> _HandlerResult:
+    if inp.maintenance:
+        return PlantPhase.MAINTENANCE, ["starting->maintenance"]
+    if inp.fault_present:
+        return PlantPhase.FAULT, ["starting->fault:hardware_alarm"]
     if not inp.request_on:
         return PlantPhase.STOPPING, []
 
@@ -149,8 +187,18 @@ def _handle_starting(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmConfig
 
 
 def _handle_running(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmConfig, elapsed: float) -> _HandlerResult:
-    # Ordine di priorità: request_on PRIMA di energy_ok (vedi rationale
-    # originale — spegnimento volontario non deve attendere stall timeout).
+    # Ordine di priorità (§6): maintenance > fault > lockout > request_on > energy > degraded
+    if inp.maintenance:
+        return PlantPhase.MAINTENANCE, ["running->maintenance"]
+    if inp.fault_present:
+        return PlantPhase.FAULT, ["running->fault:hardware_alarm"]
+    if inp.lockout_requested:
+        duration = inp.lockout_duration_s if inp.lockout_duration_s > 0.0 else float(cfg.lockout_duration_s)
+        st.lockout_until = inp.now + timedelta(seconds=duration)
+        return PlantPhase.LOCKOUT, [f"running->lockout:{duration:.0f}s"]
+
+    # request_on PRIMA di energy_ok (rationale originale: spegnimento volontario
+    # non deve attendere lo stall timeout di 600s).
     if not inp.request_on:
         if elapsed >= float(cfg.min_on_s):
             return PlantPhase.STOPPING, []
@@ -167,6 +215,13 @@ def _handle_running(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmConfig,
 
     if st.energy_stall_since is not None:
         st.energy_stall_since = None
+
+    # Degrado parziale (§6 DEGRADED): verificato DOPO energy per non confondere
+    # uno stall energetico con un degrado di sottosistema.
+    if inp.degraded:
+        st.degraded_reason = inp.degraded_reason
+        return PlantPhase.DEGRADED, [f"running->degraded:{inp.degraded_reason or 'unknown'}"]
+
     return None, []
 
 
@@ -190,12 +245,69 @@ def _handle_fault(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmConfig, e
     return None, []
 
 
+def _handle_lockout(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmConfig, elapsed: float) -> _HandlerResult:
+    """Blocco temporizzato (§6 LOCKOUT): attende scadenza lockout_until → OFF.
+
+    Uscita anticipata solo per manutenzione (priorità assoluta).
+    Il lockout persiste anche se request_on=False: è un blocco di sicurezza,
+    non uno spegnimento volontario. Non si transita a STARTING finché non scade.
+    """
+    if inp.maintenance:
+        return PlantPhase.MAINTENANCE, ["lockout->maintenance"]
+    if st.lockout_until is not None and inp.now >= st.lockout_until:
+        return PlantPhase.OFF, ["lockout_expired"]
+    remaining = (st.lockout_until - inp.now).total_seconds() if st.lockout_until else 0.0
+    return None, [f"lockout_wait:{remaining:.0f}s"]
+
+
+def _handle_degraded(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmConfig, elapsed: float) -> _HandlerResult:
+    """Operazione parziale (§6 DEGRADED): impianto funzionante con limitazioni.
+
+    Trigger: VMC KO, pompa KO, sensore T_mandata mancante, ≥2 sensori zona mancanti.
+    Valvole e pompe rimangono abilitate (gating = RUNNING); le limitazioni operative
+    sono responsabilità dello strato superiore (sequencer/actuator) che legge
+    dec.gating.degraded_reason per restringere l'attuazione.
+    Transizioni: maintenance > fault > lockout > request_off > degraded_cleared > normale.
+    """
+    if inp.maintenance:
+        return PlantPhase.MAINTENANCE, ["degraded->maintenance"]
+    if inp.fault_present:
+        return PlantPhase.FAULT, ["degraded->fault:hardware_alarm"]
+    if inp.lockout_requested:
+        duration = inp.lockout_duration_s if inp.lockout_duration_s > 0.0 else float(cfg.lockout_duration_s)
+        st.lockout_until = inp.now + timedelta(seconds=duration)
+        return PlantPhase.LOCKOUT, [f"degraded->lockout:{duration:.0f}s"]
+    if not inp.request_on:
+        if elapsed >= float(cfg.min_on_s):
+            return PlantPhase.STOPPING, []
+        return None, ["min_on_hold"]
+    if not inp.degraded:
+        st.degraded_reason = None
+        return PlantPhase.RUNNING, ["degraded_cleared"]
+    st.degraded_reason = inp.degraded_reason
+    return None, [f"degraded:{inp.degraded_reason or 'unknown'}"]
+
+
+def _handle_maintenance(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmConfig, elapsed: float) -> _HandlerResult:
+    """Blocco manutenzione (§6 MAINTENANCE): uscita solo su reset esplicito.
+
+    Non risponde a request_on, energy, lockout o fault: il tecnico ha il
+    controllo assoluto. Valvole e pompe rimangono chiuse per tutto il periodo.
+    """
+    if not inp.maintenance:
+        return PlantPhase.OFF, ["maintenance_cleared"]
+    return None, ["maintenance_active"]
+
+
 _TRANSITION_HANDLERS: dict[PlantPhase, Callable[[PlantFsmState, PlantFsmInputs, PlantFsmConfig, float], _HandlerResult]] = {
     PlantPhase.OFF: _handle_off,
     PlantPhase.STARTING: _handle_starting,
     PlantPhase.RUNNING: _handle_running,
     PlantPhase.STOPPING: _handle_stopping,
     PlantPhase.FAULT: _handle_fault,
+    PlantPhase.LOCKOUT: _handle_lockout,
+    PlantPhase.DEGRADED: _handle_degraded,
+    PlantPhase.MAINTENANCE: _handle_maintenance,
 }
 
 
@@ -214,6 +326,10 @@ _BASE_GATING: dict[PlantPhase, _PhaseGating] = {
     PlantPhase.RUNNING: _PhaseGating(allow_valves=True, allow_pumps=True),
     PlantPhase.STOPPING: _PhaseGating(allow_valves=False, allow_pumps=False),
     PlantPhase.FAULT: _PhaseGating(allow_valves=False, allow_pumps=False),
+    # §6: nuovi stati — fail-safe conservativo salvo DEGRADED (operativo parziale)
+    PlantPhase.LOCKOUT: _PhaseGating(allow_valves=False, allow_pumps=False),
+    PlantPhase.DEGRADED: _PhaseGating(allow_valves=True, allow_pumps=True),
+    PlantPhase.MAINTENANCE: _PhaseGating(allow_valves=False, allow_pumps=False),
 }
 
 
@@ -237,7 +353,7 @@ def _build_output(st: PlantFsmState, inp: PlantFsmInputs, reasons: list[str]) ->
 
     return PlantFsmOutput(
         phase=phase,
-        plant_on=phase in (PlantPhase.STARTING, PlantPhase.RUNNING),
+        plant_on=phase in (PlantPhase.STARTING, PlantPhase.RUNNING, PlantPhase.DEGRADED),
         allow_valves=allow_valves,
         allow_pumps=gating.allow_pumps,
         force_close_valves=not allow_valves,
