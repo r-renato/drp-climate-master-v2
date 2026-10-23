@@ -11,13 +11,16 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime
+import hashlib
+import json
 import logging
+import time
 from typing import Literal, Mapping, cast
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from ...domain.models.season import SeasonState, Seasons
+from ...domain.models.season import RegimeForecastDay, RegimePeriod, RegimeSpan, SeasonState, Seasons, WeatherSeason
 from ...domain.models.weather import Forecast, Historical
 from ...helpers.logger import log_debug, log_warning
 from ...helpers.season.season_weather_calendar import CalendarSeason
@@ -30,6 +33,83 @@ _LOGGER = logging.getLogger(__name__)
 
 ForecastType = Literal["daily", "hourly", "twice_daily"]
 _Hemisphere = Literal["north", "south"]
+
+@dataclass(frozen=True, slots=True)
+class _ModelOutcome:
+    """Esito di fit + lookup del modello stagionale (calcolato in executor)."""
+
+    info: WeatherSeason | None
+    source: str
+    windows: list[tuple[date, date, Seasons]]
+    hot_regime_ends: dict[int, date]
+    regime_spans: dict[int, dict[str, RegimeSpan]]
+    regime_periods: list[RegimePeriod]
+    regime_forecast: list[RegimeForecastDay]
+    model: MeteoContiguousSeasonModel
+    fingerprint: str
+    cache_hit: bool
+    elapsed_s: float
+
+
+def _data_fingerprint(working_data: Mapping[str, object]) -> str:
+    """Impronta stabile dei dati in ingresso al modello (solo contenuto).
+
+    Il fit dipende esclusivamente dai dati: se storico+forecast non cambiano,
+    il modello già calcolato è riutilizzabile (il fit costa decine di secondi).
+    """
+    payload = json.dumps(working_data, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _fit_and_lookup(
+    working_data: dict[str, Historical],
+    today: date,
+    calendar_season: Seasons,
+    cached: tuple[str, MeteoContiguousSeasonModel] | None,
+) -> _ModelOutcome:
+    """Fit (o riuso dalla cache) e lookup del giorno corrente.
+
+    Funzione sincrona e CPU-bound: va eseguita in executor, mai nell'event loop
+    (il fit richiede da pochi a decine di secondi). Non tocca stato condiviso:
+    la cache viene aggiornata dal chiamante, nel loop, dopo l'await.
+    """
+    started = time.monotonic()
+    fingerprint = _data_fingerprint(working_data)
+    cache_hit = cached is not None and cached[0] == fingerprint
+    if cached is not None and cache_hit:
+        model = cached[1]
+    else:
+        model = MeteoContiguousSeasonModel()
+        model.fit(history=working_data)
+
+    info = model.day(today)
+    source = "segmented"
+
+    if info is None:
+        info = model.infer(today, expected_season=calendar_season)
+        source = "inferred" if info is not None else "missing"
+
+    if info is None:
+        all_days = sorted(model.all())
+        if all_days:
+            last_day = all_days[-1]
+            info = model.day(last_day)
+            source = f"fallback_last_known({last_day})"
+
+    return _ModelOutcome(
+        info=info,
+        source=source,
+        windows=model.windows(),
+        hot_regime_ends=model.hot_regime_ends(until=today),
+        regime_spans=model.regime_spans(until=today),
+        regime_periods=model.regime_periods(until=today),
+        regime_forecast=model.regime_forecast(today=today),
+        model=model,
+        fingerprint=fingerprint,
+        cache_hit=cache_hit,
+        elapsed_s=time.monotonic() - started,
+    )
+
 
 @dataclass(slots=True)
 class SeasonDetectorConfig:
@@ -58,6 +138,8 @@ class SeasonDetector:
     ) -> None:
         self._hass = hass
         self._cfg = cfg
+        self._fit_cache: tuple[str, MeteoContiguousSeasonModel] | None = None
+        """(impronta dati, modello fittato) dell'ultimo rilevamento."""
 
     # ------------------------------------------------------------------
     # API pubblica
@@ -108,24 +190,25 @@ class SeasonDetector:
             )
             # Continua: il modello può fittare con solo storico
 
-        # --- Fit modello ---
-        model = MeteoContiguousSeasonModel()
-        model.fit(history=working_data)
+        # --- Fit modello + lookup (CPU-bound: in executor, mai nell'event loop) ---
+        outcome = await self._hass.async_add_executor_job(
+            _fit_and_lookup,
+            working_data,
+            today,
+            calendar_season,
+            self._fit_cache,
+        )
+        self._fit_cache = (outcome.fingerprint, outcome.model)
+        log_debug(
+            _LOGGER,
+            "Season model: cache_hit=%s elapsed=%.1fs source=%s",
+            outcome.cache_hit,
+            outcome.elapsed_s,
+            outcome.source,
+        )
 
-        # --- Lookup giorno corrente ---
-        info = model.day(today)
-        source = "segmented"
-
-        if info is None:
-            info = model.infer(today, expected_season=calendar_season)
-            source = "inferred" if info is not None else "missing"
-
-        if info is None:
-            all_days = sorted(model.all())
-            if all_days:
-                last_day = all_days[-1]
-                info = model.day(last_day)
-                source = f"fallback_last_known({last_day})"
+        info = outcome.info
+        source = outcome.source
 
         if info is None:
             log_warning(_LOGGER, "Il modello stagionale non ha prodotto output per %s.", today)
@@ -134,11 +217,15 @@ class SeasonDetector:
         season_state = SeasonState(
             as_of=today,
             window=current_window,
-            weather=info.replace_windows(model.windows()),
+            weather=info.replace_windows(outcome.windows)
+            .replace_hot_regime_ends(outcome.hot_regime_ends)
+            .replace_regime_spans(outcome.regime_spans)
+            .replace_regime_periods(outcome.regime_periods)
+            .replace_regime_forecast(outcome.regime_forecast),
             detect_model=source,
         )
 
-        log_debug(_LOGGER, "Model windows=%s", model.windows())
+        log_debug(_LOGGER, "Model windows=%s", outcome.windows)
         log_debug(_LOGGER, "Season state=%s", season_state)
 
         return season_state

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any, Sequence
 
 from homeassistant.components.climate.const import HVACMode
@@ -17,7 +18,7 @@ from .readiness import update_boiler_ready
 from .fsm import PlantFsmConfig, PlantFsmInputs, fsm_step
 from .plans import compute_supply_plan, compute_zone_valves_plan
 from .observed_phase import estimate_observed_phase
-from .model import PlantActuatorStatus, PlantPhase, StagingState
+from .model import PlantActuatorStatus, StagingState
 from .device_io import PlantDeviceIO
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,14 +49,23 @@ async def run_staging_cycle(
     Sequenza (8 passi)
     ------------------
     1) Derivazione contesto tipizzato (requested vs observed).
-    2) VMC-only bypass: se modo=vent_only/iaq_only e FSM in OFF, applica solo
-       VMC e ritorna (nessun comando a PDC/pompe/valvole).
-    3) Comandi immediati PDC + VMC (non dipendono da staging).
+    2) Gate OFF (§4.1): nessuna attuazione se hvac_mode=off.
+    3) Comando immediato PDC (non dipende da staging).
     4) Aggiornamento boiler readiness (isteresi).
-    5) FSM step (unica chiamata) → avanza stato + gating forte.
-    6) Piano valvole + attuazione.
-    7) Piano pompe/miscelatrice + attuazione.
-    8) Log strutturato.
+    5) FSM step (unica chiamata) → avanza stato + gating forte (valvole,
+       pompe, VMC — inclusa la fase VMC_ONLY, P-07b).
+    6) Comando VMC, gated dall'esito FSM (allow_vmc/force_vmc_off).
+    7) Piano valvole + attuazione.
+    8) Piano pompe/miscelatrice + attuazione.
+    9) Log strutturato.
+
+    P-07b — nessun bypass VMC
+    -------------------------
+    Prima di questa patch, i modi vent_only/iaq_only in stato stazionario
+    bypassavano fsm_step (la VMC veniva applicata senza mai passare dalla
+    FSM): FAULT/LOCKOUT/MAINTENANCE non avevano quindi alcun effetto sulla
+    VMC. Ora la VMC segue lo stesso gating forte di valvole/pompe tramite
+    la fase FSM dedicata `PlantPhase.VMC_ONLY`.
 
     Separazione da PlantActuator
     ----------------------------
@@ -65,8 +75,18 @@ async def run_staging_cycle(
     """
     now = dt_util.utcnow()
 
+    # ── P-07a: purezza dell'input ───────────────────────────
+    # `run_staging_cycle` non deve mutare lo `StagingState` ricevuto dal
+    # chiamante (contratto della firma: riceve e restituisce `StagingState`,
+    # non modifica per side-effect). Le funzioni interne (fsm_step,
+    # update_boiler_ready, compute_zone_valves_plan) mutano `stage` in place:
+    # operando su una copia locale, la mutazione resta interna a questo tick
+    # e il valore di ritorno è l'unica fonte di verità per lo stato aggiornato.
+    stage = stage.clone()
+
     # 1) Derivazione contesto
     ctx = build_control_context(now=now, snapshot=snapshot, decision=decision, cfg=cfg)
+    log_debug(_LOGGER, "Control context: %s", ctx)
     observed = estimate_observed_phase(snapshot, ctx)
 
     # ── P-02: Gate OFF (§4.1) — secondo livello di sicurezza ───────────────────
@@ -85,23 +105,8 @@ async def run_staging_cycle(
         )
         return stage
 
-    # 2) VMC-only bypass (VENT_ONLY / IAQ_ONLY in steady-state)
-    if ctx.mode in ("vent_only", "iaq_only") and stage.fsm.phase == PlantPhase.OFF:
-        await device_io.apply_vmc(decision.vmc)
-        log_debug(
-            _LOGGER,
-            "staging_bypass: phase=%s mode=%s | vmc_power=%s speed=%s reason=%s",
-            PlantPhase.VMC_ONLY.value,
-            ctx.mode,
-            getattr(decision.vmc, "power", None),
-            getattr(decision.vmc, "air_speed", None),
-            getattr(decision, "reason", "-"),
-        )
-        return stage
-
-    # 3) Comandi immediati PDC + VMC
+    # 3) Comando immediato PDC (non dipende da staging).
     await device_io.apply_pdc(decision.pdc)
-    await device_io.apply_vmc(decision.vmc)
 
     # 4) Boiler readiness (isteresi)
     prev_ready = stage.boiler_ready
@@ -164,12 +169,27 @@ async def run_staging_cycle(
         boiler_signal_available=ctx.boiler.available,
         valves_ready=valves_ready_for_fsm,
         needs_valves=ctx.needs_valves,
+        vmc_request_on=ctx.vmc_request_on,
+        mode=ctx.mode,
     )
     fsm = fsm_step(stage, inp=fsm_inp, cfg=fsm_cfg)
     allow_valves = bool(fsm.allow_valves)
     force_close_valves = bool(fsm.force_close_valves)
 
-    # 6) Piano valvole + apply
+    # 6) Comando VMC, gated dall'esito FSM (P-07b). Se non consentita
+    # (OFF/STOPPING/FAULT/LOCKOUT/MAINTENANCE), forziamo esplicitamente lo
+    # spegnimento invece di limitarci a non comandarla — stesso principio
+    # di "force_close_valves": lo stato desiderato è asserito, non implicito.
+    allow_vmc = bool(fsm.allow_vmc)
+    force_vmc_off = bool(fsm.force_vmc_off)
+    vmc_to_apply = (
+        decision.vmc
+        if allow_vmc
+        else replace(decision.vmc, power=False, enable_free_cooling=False, force_free_cooling=False)
+    )
+    await device_io.apply_vmc(vmc_to_apply)
+
+    # 7) Piano valvole + apply
     valves_plan = compute_zone_valves_plan(
         stage,
         runtime_areas=runtime_areas,
@@ -183,11 +203,11 @@ async def run_staging_cycle(
     valves_ready = valves_plan.result.ready
     valves_stats = valves_plan.result.stats
 
-    # 7) Gating pompe dal risultato FSM.
+    # 8) Gating pompe dal risultato FSM.
     allow_pumps = bool(fsm.allow_pumps)
     force_pumps_off = bool(fsm.force_pumps_off)
 
-    # 8) Piano pompe + apply + log
+    # 8b) Piano pompe + apply
     supply_plan = compute_supply_plan(
         decision,
         supply_configured=supply_configured,
@@ -234,6 +254,8 @@ async def run_staging_cycle(
         allow_pumps=bool(allow_pumps),
         force_close_valves=bool(force_close_valves),
         force_pumps_off=bool(force_pumps_off),
+        allow_vmc=bool(allow_vmc),
+        force_vmc_off=bool(force_vmc_off),
         direct_on=bool(supply_plan.direct_on),
         adj_on=bool(supply_plan.adj_on),
         mix_valve_pct_applied=supply_plan.mix_valve_pct_applied,
@@ -255,5 +277,4 @@ async def run_staging_cycle(
     log_debug(_LOGGER, "Observed phase: %s (%s)", status.observed_phase, " | ".join(getattr(observed, "reasons", []) or []))
     log_debug(_LOGGER, "%s", status)
 
-    # stage.clone(fsm=fsm.phase)  # aggiorna lo stato di staging con la nuova FSM
     return stage

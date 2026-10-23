@@ -19,7 +19,7 @@ def mode_value(decision: PlantDecision) -> str:
     return getattr(m, "value", str(m))
 
 
-def pdc_requested_on(pdc: Optional[PdcCommand]) -> bool:
+def pdc_requested_power_on(pdc: Optional[PdcCommand]) -> bool:
     """True se la decisione richiede PDC ON (power o fm_power)."""
     if pdc is None:
         return False
@@ -183,11 +183,61 @@ class PlantControlContext:
 
     request_on: bool
     needs_valves: bool
+    # P-07b: domanda VMC indipendente da request_on idronico — guida la
+    # fase FSM VMC_ONLY (nessun idronico attivo, solo ventilazione).
+    vmc_request_on: bool
 
     pdc: PdcSignals
     boiler: BoilerSignals
     supply: SupplyDemand
     desired_valves: ZoneValvesDesired
+
+    def __str__(self) -> str:
+        """Rappresentazione compatta multi-linea per log/commissioning (§10)."""
+
+        def fbool(b: object) -> str:
+            return "True" if b is True else ("False" if b is False else "-")
+
+        def fnum(x: Optional[float], nd: int = 2) -> str:
+            return f"{float(x):.{nd}f}" if x is not None else "-"
+
+        lines: list[str] = [
+            "",
+            "Plant control context",
+            f"  Timestamp          :: {self.now.isoformat()}",
+            f"  Mode               :: {self.mode}",
+            f"  Faults present     :: {fbool(self.faults_present)}",
+            "------------------------------------------------------------------",
+            "Requests",
+            f"  request_on         :: {fbool(self.request_on)}",
+            f"  needs_valves       :: {fbool(self.needs_valves)}",
+            f"  vmc_request_on     :: {fbool(self.vmc_request_on)}",
+            "------------------------------------------------------------------",
+            "PDC",
+            f"  requested_on       :: {fbool(self.pdc.requested_on)}",
+            f"  fm_power_on        :: {fbool(self.pdc.fm_power_on)}",
+            f"  power_on           :: {fbool(self.pdc.power_on)}",
+            f"  compressor_on      :: {fbool(self.pdc.compressor_on)}",
+            f"  effective_on       :: {fbool(self.pdc.effective_on)}",
+            f"  effective_known    :: {fbool(self.pdc.effective_known)}",
+            "------------------------------------------------------------------",
+            "Boiler",
+            f"  t_supply_c         :: {fnum(self.boiler.t_supply_c)} degC",
+            f"  t_control_target_c :: {fnum(self.boiler.t_control_target_c)} degC",
+            f"  t_ready_ref_c      :: {fnum(self.boiler.t_ready_ref_c)} degC",
+            f"  available          :: {fbool(self.boiler.available)}",
+            "------------------------------------------------------------------",
+            "Supply demand",
+            f"  direct_desired     :: {fbool(self.supply.direct_desired)}",
+            f"  adjustable_desired :: {fbool(self.supply.adjustable_desired)}",
+            f"  any                :: {fbool(self.supply.any)}",
+            "------------------------------------------------------------------",
+            "Zone valves desired",
+            f"  on_count           :: {self.desired_valves.on_count}",
+            f"  any_open           :: {fbool(self.desired_valves.any_open)}",
+            f"  by_zone            :: {self.desired_valves.by_zone or '-'}",
+        ]
+        return "\n".join(lines)
 
 
 def build_control_context(
@@ -201,15 +251,15 @@ def build_control_context(
     mode = mode_value(decision)
 
     # --- PDC signals
-    pdc_cmd = getattr(decision, "pdc", None)
-    req_on = pdc_requested_on(pdc_cmd)
+    pdc_command = getattr(decision, "pdc", None)
+    req_power_on = pdc_requested_power_on(pdc_command)
 
-    pdc_sta = getattr(snapshot, "pdc", None)
-    pdc = PdcSignals(
-        requested_on=bool(req_on),
-        fm_power_on=getattr(pdc_sta, "fm_power_on", None) if pdc_sta else None,
-        power_on=getattr(pdc_sta, "power_on", None) if pdc_sta else None,
-        compressor_on=getattr(pdc_sta, "sensor_compressor_state", None) if pdc_sta else None,
+    pdc_snapshot = getattr(snapshot, "pdc", None)
+    pdc_signals = PdcSignals(
+        requested_on=bool(req_power_on),
+        fm_power_on=getattr(pdc_snapshot, "fm_power_on", None) if pdc_snapshot else None,
+        power_on=getattr(pdc_snapshot, "power_on", None) if pdc_snapshot else None,
+        compressor_on=getattr(pdc_snapshot, "sensor_compressor_state", None) if pdc_snapshot else None,
     )
 
     # --- Boiler signals (readiness)
@@ -225,7 +275,7 @@ def build_control_context(
         heat_bias_c=cfg.boiler_ready_heat_bias_c,
         cool_bias_c=cfg.boiler_ready_cool_bias_c,
     )
-    boiler = BoilerSignals(
+    boiler_signals = BoilerSignals(
         t_supply_c=t_boiler_supply_c,
         t_control_target_c=t_control_target_c,
         t_ready_ref_c=t_ready_ref_c,
@@ -240,8 +290,13 @@ def build_control_context(
     # --- Desired zone valves
     desired_valves = desired_zone_valves(decision)
 
+    # --- VMC demand (P-07b): indipendente dalla domanda idronica, guida
+    # la fase FSM VMC_ONLY (vent_only/iaq_only in stato stazionario).
+    vmc_cmd = getattr(decision, "vmc", None)
+    vmc_request_on = bool(getattr(vmc_cmd, "power", False)) if vmc_cmd is not None else False
+
     # --- Request derivation (single source of truth)
-    request_on = bool(pdc.requested_on or supply.any or desired_valves.any_open)
+    request_on = bool(pdc_signals.requested_on or supply.any or desired_valves.any_open)
     needs_valves = bool(supply.adjustable_desired and desired_valves.any_open)
 
     faults_present = bool(getattr(snapshot, "faults", None))
@@ -252,8 +307,9 @@ def build_control_context(
         faults_present=faults_present,
         request_on=request_on,
         needs_valves=needs_valves,
-        pdc=pdc,
-        boiler=boiler,
+        vmc_request_on=vmc_request_on,
+        pdc=pdc_signals,
+        boiler=boiler_signals,
         supply=supply,
         desired_valves=desired_valves,
     )

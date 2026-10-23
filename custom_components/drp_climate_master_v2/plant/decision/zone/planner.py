@@ -9,11 +9,11 @@ from typing import Any, Iterable, Mapping, Optional
 from homeassistant.util import dt as dt_util
 
 from ....helpers.utils import as_float
-from ....helpers.sensor_aggregator import AggregatedValue
 from ....plant.monitor.plant import PlantSnapshot, ZoneSnapshot
 from ....domain.enums import HVACOperatingProfile
 
 from .model import ZoneCommand, ZonesDecision
+from .outdoor_temperature import OUTDOOR_SRC_SENSOR, resolve_outdoor_temperature
 from .config import ControlConfig, MpcConfig
 from ..config import DemandGatingConfig
 from ..comfort_band.mpc.rc_model import RcZoneModel
@@ -67,54 +67,12 @@ class ZoneDecisionPlanner:
     """
 
     def _resolve_mpc_outdoor_temp(self, snapshot: PlantSnapshot) -> tuple[float | None, str]:
-        """Temperatura esterna per il modello RC (sorgente più aggiornata disponibile).
+        """Temperatura esterna per il modello RC e sorgente usata.
 
-        Ordine di priorità (dalla più aggiornata alla più datata):
-
-        1. ``global_outdoor_temperature`` — sensore istantaneo aggregato (aggiornato
-           ogni ciclo HA). È la sorgente corretta per la predizione RC a breve termine
-           (orizzonte tipico: 10 min × 12 step = 2h). Viene scartata solo se stale
-           o insufficiente secondo il flag del sensor_aggregator.
-
-        2. ``season.weather_signals.t_mean`` — media giornaliera di oggi dal forecast
-           meteo (es. PirateWeather). Aggiornamento orario/giornaliero. Accettabile
-           come fallback perché riflette la temperatura media del giorno corrente, non
-           di mesi fa. Non usa t_smooth che è una media mobile 2 mesi.
-
-        3. ``None`` — il piano MPC viene abortito (mancanza di contesto termico).
-
-        Nota: ``t_smooth`` (media mobile ~60 giorni) è deliberatamente ESCLUSO.
-        È lo strumento giusto per la classificazione stagionale ML, ma usando
-        22.7°C (media maggio) come temperatura RC a maggio con T_corrente=13°C
-        la deriva predetta è quasi nulla → il modello non vede necessità di
-        riscaldamento → piano MPC incoerente con la realtà istantanea.
+        Delega a ``resolve_outdoor_temperature`` (funzione pura, testabile):
+        sensore fresco → sensore stale → media giornaliera forecast → ``missing``.
         """
-        # 1) Sensore istantaneo: sorgente preferita per la predizione RC.
-        av = getattr(snapshot, "global_outdoor_temperature", None)
-        if av is not None:
-            t0 = as_float(getattr(av, "value", None))
-            if t0 is not None and not getattr(av, "is_stale", False) and not getattr(av, "is_insufficient", False):
-                return float(t0), "global_outdoor_temperature"
-
-        # 2) Media giornaliera forecast (oggi): fallback accettabile a breve termine.
-        # Usa t_mean (media giornaliera corrente), mai t_smooth (media 2 mesi).
-        try:
-            ws = getattr(getattr(snapshot, "season", None), "weather_signals", None)
-            if ws is not None:
-                t = as_float(getattr(ws, "t_mean", None))
-                if t is not None:
-                    return float(t), "season.weather_signals.t_mean"
-        except Exception:
-            pass  # best-effort
-
-        # 3) Sensore stale come ultima risorsa prima di rinunciare.
-        # Meglio una lettura vecchia di qualche minuto che nessuna stima.
-        if av is not None:
-            t0 = as_float(getattr(av, "value", None))
-            if t0 is not None:
-                return float(t0), "global_outdoor_temperature_stale"
-
-        return None, "missing"
+        return resolve_outdoor_temperature(snapshot)
 
     def _profile_scaled_mpc(self, snapshot: PlantSnapshot, mpc: MpcConfig) -> tuple[MpcConfig, float]:
         """Scale MPC weights/slack based on the user preset/profile.
@@ -315,11 +273,10 @@ class ZoneDecisionPlanner:
             plan.warnings.append("missing_outdoor_temperature")
             return plan
 
-        # If we had to fall back to the raw aggregated sensor, preserve the reliability warning.
-        t_out0_av: AggregatedValue | None = getattr(snapshot, "global_outdoor_temperature", None)
-        if t_out_src == "global_outdoor_temperature" and t_out0_av is not None:
-            if getattr(t_out0_av, "is_stale", False) or getattr(t_out0_av, "is_insufficient", False):
-                plan.warnings.append("outdoor_temperature_unreliable")
+        # Qualsiasi sorgente diversa dal sensore fresco (stale o forecast) è degradata:
+        # segnalarlo, così il log spiega perché il piano usa quella temperatura.
+        if t_out_src != OUTDOOR_SRC_SENSOR:
+            plan.warnings.append("outdoor_temperature_unreliable")
 
         plan.meta["t_out_mpc_c"] = float(t_out0)
         plan.meta["t_out_mpc_src"] = str(t_out_src)

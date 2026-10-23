@@ -25,8 +25,6 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta
 
-import pytest
-
 from custom_components.drp_climate_master_v2.plant.control.fsm import (
     PlantFsmConfig,
     PlantFsmInputs,
@@ -60,6 +58,11 @@ def _inputs(
     boiler_signal_available: bool = True,
     valves_ready: bool = True,
     needs_valves: bool = True,
+    fault_present: bool = False,
+    lockout_requested: bool = False,
+    maintenance: bool = False,
+    vmc_request_on: bool = False,
+    mode: str | None = None,
 ) -> PlantFsmInputs:
     return PlantFsmInputs(
         now=now,
@@ -71,6 +74,11 @@ def _inputs(
         boiler_signal_available=boiler_signal_available,
         valves_ready=valves_ready,
         needs_valves=needs_valves,
+        fault_present=fault_present,
+        lockout_requested=lockout_requested,
+        maintenance=maintenance,
+        vmc_request_on=vmc_request_on,
+        mode=mode,
     )
 
 
@@ -265,5 +273,122 @@ class TestFsmSimulationStartTimeoutAndRecovery:
         assert out.phase == PlantPhase.OFF
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v", "-s"])
+class TestFsmSimulationVmcOnly:
+    """Scenario 6 (P-07b): ventilazione-sola come fase FSM reale.
+
+    Copre:
+    - OFF -> VMC_ONLY quando compare domanda VMC senza domanda idronica.
+    - VMC_ONLY -> OFF quando cessa la domanda VMC.
+    - VMC_ONLY -> FAULT/LOCKOUT/MAINTENANCE (gating che prima del bypass
+      rimosso non si applicava mai alla VMC).
+    - request_on idronico ignorato in VMC_ONLY (nessuna transizione a
+      STARTING), con warning esplicito in log.
+    """
+
+    def test_off_to_vmc_only_and_back(self):
+        cfg = _cfg()
+        stage = StagingState()
+        now = START_T
+
+        # Tick 0: nessuna domanda di alcun tipo -> resta OFF.
+        out = fsm_step(stage, inp=_inputs(now, request_on=False, vmc_request_on=False), cfg=cfg)
+        assert out.phase == PlantPhase.OFF
+        assert out.allow_vmc is False
+        assert out.force_vmc_off is True
+
+        # Compare domanda VMC (vent_only/iaq_only), nessuna domanda idronica:
+        # transizione immediata (nessun anti-cycling per la VMC, per scelta
+        # esplicita — vedi discussione P-07b).
+        now += timedelta(seconds=1)
+        out = fsm_step(stage, inp=_inputs(now, request_on=False, vmc_request_on=True, mode="vent_only"), cfg=cfg)
+        _log_step("off->vmc_only", now, out)
+        assert out.phase == PlantPhase.VMC_ONLY
+        assert "phase:off->vmc_only" in out.reasons
+        assert out.allow_vmc is True
+        assert out.force_vmc_off is False
+        # Valvole/pompe restano bloccate: VMC_ONLY non è idronico.
+        assert out.allow_valves is False
+        assert out.allow_pumps is False
+
+        # Persiste in VMC_ONLY finché la domanda VMC resta attiva.
+        now += timedelta(seconds=30)
+        out = fsm_step(stage, inp=_inputs(now, request_on=False, vmc_request_on=True, mode="vent_only"), cfg=cfg)
+        assert out.phase == PlantPhase.VMC_ONLY
+
+        # Cessata domanda VMC -> OFF, immediato (nessun timer).
+        now += timedelta(seconds=1)
+        out = fsm_step(stage, inp=_inputs(now, request_on=False, vmc_request_on=False), cfg=cfg)
+        _log_step("vmc_only->off", now, out)
+        assert out.phase == PlantPhase.OFF
+        assert "phase:vmc_only->off" in out.reasons
+
+    def test_vmc_only_gated_by_fault_lockout_maintenance(self):
+        """Prima di P-07b, FAULT/LOCKOUT/MAINTENANCE non avevano alcun
+        effetto sulla VMC (bypass nel sequencer, mai passava da fsm_step).
+        Ora la VMC è soggetta allo stesso gating forte del resto."""
+
+        # --- FAULT ---
+        cfg = _cfg()
+        stage = StagingState()
+        now = START_T
+        fsm_step(stage, inp=_inputs(now, request_on=False, vmc_request_on=True), cfg=cfg)
+        assert stage.fsm.phase == PlantPhase.VMC_ONLY
+        now += timedelta(seconds=1)
+        out = fsm_step(stage, inp=_inputs(now, request_on=False, vmc_request_on=True, fault_present=True), cfg=cfg)
+        _log_step("vmc_only->fault", now, out)
+        assert out.phase == PlantPhase.FAULT
+        assert out.allow_vmc is False
+        assert out.force_vmc_off is True
+
+        # --- LOCKOUT ---
+        stage = StagingState()
+        now = START_T
+        fsm_step(stage, inp=_inputs(now, request_on=False, vmc_request_on=True), cfg=cfg)
+        now += timedelta(seconds=1)
+        out = fsm_step(
+            stage,
+            inp=_inputs(now, request_on=False, vmc_request_on=True, lockout_requested=True),
+            cfg=cfg,
+        )
+        _log_step("vmc_only->lockout", now, out)
+        assert out.phase == PlantPhase.LOCKOUT
+        assert out.allow_vmc is False
+
+        # --- MAINTENANCE ---
+        stage = StagingState()
+        now = START_T
+        fsm_step(stage, inp=_inputs(now, request_on=False, vmc_request_on=True), cfg=cfg)
+        now += timedelta(seconds=1)
+        out = fsm_step(stage, inp=_inputs(now, request_on=False, vmc_request_on=True, maintenance=True), cfg=cfg)
+        _log_step("vmc_only->maintenance", now, out)
+        assert out.phase == PlantPhase.MAINTENANCE
+        assert out.allow_vmc is False
+
+    def test_vmc_only_ignores_hydronic_request_and_logs_warning(self, caplog):
+        """Domanda idronica in VMC_ONLY è un segnale di contratto violato a
+        monte (PlantMode.VENT_ONLY/IAQ_ONLY dovrebbero implicare PDC OFF e
+        valvole chiuse): va ignorata come trigger, solo loggata come warning.
+        """
+        cfg = _cfg()
+        stage = StagingState()
+        now = START_T
+        fsm_step(stage, inp=_inputs(now, request_on=False, vmc_request_on=True), cfg=cfg)
+        assert stage.fsm.phase == PlantPhase.VMC_ONLY
+
+        now += timedelta(seconds=1)
+        with caplog.at_level("WARNING"):
+            out = fsm_step(
+                stage,
+                inp=_inputs(now, request_on=True, vmc_request_on=True, mode="vent_only"),
+                cfg=cfg,
+            )
+        _log_step("vmc_only + spurious request_on", now, out)
+
+        # Nessuna transizione: request_on idronico ignorato per contratto.
+        assert out.phase == PlantPhase.VMC_ONLY
+        assert out.allow_vmc is True
+
+        # Warning esplicito emesso (non un semplice debug silenzioso).
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("VMC_ONLY" in r.message for r in warnings)
+        assert any("vent_only" in r.message for r in warnings)

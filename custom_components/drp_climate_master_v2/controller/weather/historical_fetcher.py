@@ -24,27 +24,75 @@ from ...domain.models.weather import Historical
 from ...helpers.cache import JsonObject, Codec, PersistentCache
 from ...helpers.logger import log_debug, log_warning
 from ...helpers.timeutils import as_iso_local
-from ...helpers.weather.pirateweather_client import PirateWeatherTimeMachineClient
+from ...helpers.weather.pirateweather_client import (
+    FAILED_TRANSIENT_KEY,
+    PirateWeatherTimeMachineClient,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+HISTORY_DAYS_BACK: int = 2250
+"""Profondità dello storico meteo (giorni). ~6,2 anni: garantisce almeno 4 anni
+meteo completi (dic→nov) in ogni momento dell'anno, perché il numero di anni
+completi oscilla di 1 con la data (servono ≈ N+1 anni per averne sempre N)."""
+
+HISTORY_CACHE_MARGIN_DAYS: int = 31
+"""Margine di retention oltre ``HISTORY_DAYS_BACK`` (evita potatura anticipata)."""
+
+HISTORY_CACHE_MAX_DAYS: int = HISTORY_DAYS_BACK + HISTORY_CACHE_MARGIN_DAYS
+"""Limite di retention della cache persistente (chiavi giorno ISO)."""
+
+HISTORY_PRIORITY_DAYS: int = 60
+"""Giorni recenti scaricati per primi e senza budget: servono a RMOT (30 d) e al meteo."""
+
+BACKFILL_BATCH_DAYS: int = 20
+"""Giorni per lotto: la cache viene salvata a ogni lotto (un crash non perde il lavoro)."""
+
+BACKFILL_BUDGET_DAYS_PER_CYCLE: int = 150
+"""Giorni *vecchi* richiesti al massimo per ciclo (1 ciclo/giorno, gate 24 h).
+
+Piano PirateWeather: 10 000 chiamate/mese ≈ 330/giorno. 150 lascia margine al meteo
+corrente; 1500 giorni arretrati si recuperano in ~10 giorni."""
+
+BACKFILL_CONCURRENCY: int = 2
+"""Richieste in volo durante il backfill. Il time machine impiega ~6 s a freddo sulle
+date vecchie e sale a ~15 s con 6 richieste in parallelo (timeout/503 osservati)."""
+
+BACKFILL_BATCH_PAUSE_S: float = 2.0
+"""Pausa tra due lotti (non bloccante)."""
+
+BACKFILL_MAX_BAD_BATCHES: int = 2
+"""Interruttore: dopo N lotti consecutivi senza alcun successo il ciclo si ferma e
+riprende al prossimo (il servizio è in difficoltà: inutile insistere)."""
+
+FAILED_KIND_PERMANENT: str = "permanent"
+"""Valore di ``failed_kind``: ``failed`` conta fallimenti *definitivi* (400/404, payload
+non valido). Le entry legacy non hanno ``failed_kind`` e vengono ritentate da zero."""
 
 
 @dataclass(slots=True)
 class HistoricalFetcherConfig:
     """Parametri operativi del fetcher storico."""
 
-    days_back: int = 730
+    days_back: int = HISTORY_DAYS_BACK
     """Finestra temporale da mantenere in cache (giorni indietro da oggi)."""
 
     always_refresh_today: bool = True
     """Ri-scarica sempre il giorno corrente (PirateWeather aggiorna intraday)."""
 
     cache_persist: bool = True
-    cache_max_days: int = 740
+    cache_max_days: int = HISTORY_CACHE_MAX_DAYS
     cache_save_cooldown_s: float = 60.0
 
     max_fetch_failures: int = 3
-    """Dopo N fallimenti consecutivi per un giorno, smette di ritentare."""
+    """Dopo N fallimenti *definitivi* per un giorno, smette di ritentare."""
+
+    priority_days: int = HISTORY_PRIORITY_DAYS
+    backfill_batch_days: int = BACKFILL_BATCH_DAYS
+    backfill_budget_days: int = BACKFILL_BUDGET_DAYS_PER_CYCLE
+    backfill_concurrency: int = BACKFILL_CONCURRENCY
+    backfill_batch_pause_s: float = BACKFILL_BATCH_PAUSE_S
+    backfill_max_bad_batches: int = BACKFILL_MAX_BAD_BATCHES
 
 
 class HistoricalFetcher:
@@ -213,8 +261,20 @@ class HistoricalFetcher:
         if self._data:
             self._is_healthy = True  # abbiamo dati cached: considerato healthy
 
+    @staticmethod
+    def _permanent_failures(entry: CMapping[str, Any] | None) -> int:
+        """Fallimenti definitivi registrati. Le entry legacy (senza ``failed_kind``) → 0."""
+        if not entry or entry.get("failed_kind") != FAILED_KIND_PERMANENT:
+            return 0
+        return int(entry.get("failed") or 0)
+
     async def _fetch_and_cache(self, *, reason: str) -> dict[date, Historical]:
-        """Logica di fetch effettivo: determina giorni mancanti, scarica, salva."""
+        """Determina i giorni mancanti e li scarica a lotti.
+
+        Fase 1: giorni recenti (``priority_days``), tutti. Fase 2: giorni arretrati,
+        al massimo ``backfill_budget_days`` per ciclo, dal più recente. Ogni lotto è
+        salvato subito; un interruttore ferma il ciclo se il servizio non risponde.
+        """
         days = self._target_days()
         today = dt_util.now().date()
 
@@ -223,23 +283,33 @@ class HistoricalFetcher:
         missing: list[date] = []
         for d in days:
             existing = cached.get(d)
-            failures = int(existing.get("failed") or 0) if existing else 0
-
-            if failures >= self._cfg.max_fetch_failures:
-                continue  # troppi fallimenti: skip silenzioso
-            if existing is None or failures > 0:
+            if self._permanent_failures(existing) >= self._cfg.max_fetch_failures:
+                continue  # fallimenti definitivi: skip silenzioso
+            if existing is None or int(existing.get("failed") or 0) > 0:
                 missing.append(d)
                 continue
             if self._cfg.always_refresh_today and d == today:
                 missing.append(d)
 
+        recent = [d for d in missing if (today - d).days < self._cfg.priority_days]
+        older = [d for d in missing if (today - d).days >= self._cfg.priority_days]
+        backlog = len(older)
+        older = older[: self._cfg.backfill_budget_days]
+
         fetched: dict[date, Historical] = {}
+        stats = {"ok": 0, "transient": 0, "permanent": 0}
+        stopped = await self._fetch_batches(recent, cached, fetched, stats, reason=reason)
+        if not stopped:
+            stopped = await self._fetch_batches(older, cached, fetched, stats, reason=reason)
 
-        if missing:
-            raw = await self._pw_client.async_fetch_days(missing)
-            fetched = self._merge_fetch_results(missing, raw, cached)
-
-            await self._save_to_cache(fetched, reason=reason)
+        log_debug(
+            _LOGGER,
+            "Storico PW (%s): recenti=%d arretrati_richiesti=%d backlog=%d ok=%d "
+            "transitori=%d definitivi=%d stop=%s",
+            reason, len(recent), len(older), backlog,
+            stats["ok"], stats["transient"], stats["permanent"],
+            "interruttore" if stopped else "completato",
+        )
 
         out: dict[date, Historical] = {}
         for d in days:
@@ -248,33 +318,88 @@ class HistoricalFetcher:
                 out[d] = v
         return out
 
+    async def _fetch_batches(
+        self,
+        days: list[date],
+        cached: CMapping[date, Historical],
+        fetched: dict[date, Historical],
+        stats: dict[str, int],
+        *,
+        reason: str,
+    ) -> bool:
+        """Scarica ``days`` a lotti. Restituisce True se l'interruttore ha fermato il ciclo."""
+        size = max(1, self._cfg.backfill_batch_days)
+        bad_in_row = 0
+        for i in range(0, len(days), size):
+            chunk = days[i : i + size]
+            raw = await self._pw_client.async_fetch_days(
+                chunk, max_concurrency=max(1, self._cfg.backfill_concurrency)
+            )
+            merged = self._merge_fetch_results(chunk, raw, cached)
+            if merged:
+                await self._save_to_cache(merged, reason=reason)
+                fetched.update(merged)
+
+            ok = 0
+            for d in chunk:
+                fc = raw.get(d)
+                if fc is not None and not int(fc.get("failed") or 0):
+                    ok += 1
+                elif fc is None or fc.get(FAILED_TRANSIENT_KEY):  # type: ignore[misc]
+                    stats["transient"] += 1
+                else:
+                    stats["permanent"] += 1
+            stats["ok"] += ok
+
+            bad_in_row = bad_in_row + 1 if ok == 0 else 0
+            if bad_in_row >= max(1, self._cfg.backfill_max_bad_batches):
+                log_warning(
+                    _LOGGER,
+                    "Storico PW (%s): %d lotti consecutivi senza successi, ciclo interrotto "
+                    "(riprende al prossimo).",
+                    reason, bad_in_row,
+                )
+                return True
+            if i + size < len(days):
+                await asyncio.sleep(self._cfg.backfill_batch_pause_s)
+        return False
+
     def _merge_fetch_results(
         self,
         missing: list[date],
         raw: CMapping[date, Historical | None],
         cached: CMapping[date, Historical],
     ) -> dict[date, Historical]:
-        """Unisce i risultati del fetch con i dati cached gestendo i fallimenti."""
+        """Unisce i risultati del fetch con la cache.
+
+        - successo: sostituisce l'entry (senza ``failed``);
+        - guasto transitorio (timeout/rete/429/5xx) o risultato assente: NESSUNA scrittura,
+          il giorno resta da scaricare e non consuma i tentativi;
+        - fallimento definitivo (400/404, payload non valido): ``failed`` += 1 con
+          ``failed_kind = permanent``, fino a ``max_fetch_failures``.
+        """
         fetched: dict[date, Historical] = {}
         for d in missing:
             fc = raw.get(d)
             if fc is None:
-                fc = cast(Historical, {"datetime": as_iso_local(d), "failed": 1})
+                continue  # eccezione/assenza: trattata come transitoria
 
-            is_failed = int(fc.get("failed") or 0) >= 1
-
-            if is_failed:
+            if int(fc.get("failed") or 0) >= 1:
+                if fc.get(FAILED_TRANSIENT_KEY):  # type: ignore[misc]
+                    continue
                 prev = cached.get(d)
-                prev_failed = int(prev.get("failed") or 0) if prev else 0
-                new_failed = min(self._cfg.max_fetch_failures, prev_failed + 1) if prev else 1
-
+                new_failed = min(
+                    self._cfg.max_fetch_failures, self._permanent_failures(prev) + 1
+                )
                 new_fc: dict[str, Any] = dict(prev) if prev else {}
                 new_fc["failed"] = new_failed
+                new_fc["failed_kind"] = FAILED_KIND_PERMANENT
                 new_fc.setdefault("datetime", as_iso_local(d))
                 fetched[d] = cast(Historical, new_fc)
             else:
                 new_fc = dict(fc)
-                new_fc.pop("failed", None)
+                for key in ("failed", "failed_kind", FAILED_TRANSIENT_KEY):
+                    new_fc.pop(key, None)
                 fetched[d] = cast(Historical, new_fc)
 
         return fetched

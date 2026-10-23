@@ -328,10 +328,12 @@ class ClimateSupervisor(IntervalGatedSchedulerBase):
         """
 
         if not self._coordinator.ready:
+            # Defensive: coordinator may not be ready yet (e.g., during HA startup).
             return 
         
         plan = None
         if self._stop_event.is_set():
+            # Defensive: if the supervisor is stopping, skip any decision.
             return
 
         # Avoid heavy IO / side effects while the coordinator isn't ready yet.

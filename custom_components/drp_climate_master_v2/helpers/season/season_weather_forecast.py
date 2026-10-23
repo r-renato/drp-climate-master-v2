@@ -6,13 +6,29 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union, c
 import logging
 import math
 
-from ...domain.models.season import RegimeHint, WeatherSeason, WeatherDaySignals
+from ...domain.models.season import (
+    RegimeForecastDay,
+    RegimeHint,
+    RegimePeriod,
+    RegimeSpan,
+    WeatherSeason,
+    WeatherDaySignals,
+)
 
 from ...domain.models.weather import Forecast, Historical
 
-from ..logger import log_warning
+from ..logger import log_debug, log_warning
 from ...domain.models.season import Seasons
 from .season_weather_calendar import CalendarSeason
+from .thermal_regime import (
+    classify_regimes,
+    compute_rmot,
+    legacy_regime,
+    regime_end_by_year,
+    regime_forecast_days,
+    regime_periods,
+    regime_spans_by_year,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,6 +95,16 @@ class MeteoSeasonConfig:
     # trend (delta tra medie smussate distanti)
     trend_days: int = 28
 
+    # Temperatura media giornaliera = (Tmax + Tmin) / 2.
+    #
+    # Perché: ``native_temperature`` del provider è la Tmax del giorno. Usarla come
+    # media sovrastima di ~3-5 °C (escursione diurna) tutte le medie smussate:
+    # t_smooth di fine ottobre ~26 °C invece di ~22 °C tiene il regime su "hot" da
+    # maggio a ottobre e blocca il preriscaldo (gating ``regime_hot``). Un giorno
+    # senza Tmin non ha media vera: è escluso (non sostituito dalla Tmax).
+    # False = comportamento precedente (rollback): media = Tmax.
+    use_true_daily_mean: bool = True
+
     # segmentazione annuale DP: limiti di sicurezza
     max_days_per_year: int = 370
 
@@ -130,6 +156,20 @@ class MeteoSeasonConfig:
     # se anno troppo incompleto, viene ignorato dalla segmentazione (stabilità)
     min_days_per_year: int = 300
 
+    # Anno meteo (Dic Y-1 → Nov Y) segmentabile solo se *completo*.
+    #
+    # Perché: la DP impone sempre 4 segmenti >= min_season_days. Su un anno ancora
+    # in corso (es. 319 giorni a metà ottobre) l'ultimo segmento viene allungato fino
+    # al bordo dei dati (fine forecast) e, avendo la media termica più alta, viene
+    # etichettato SUMMER: da ~20 settembre a fine novembre ogni anno.
+    # Un anno non completo viene quindi lasciato a infer() (prior di calendario).
+    # False ripristina il comportamento precedente (rollback).
+    require_complete_year: bool = True
+
+    # Tolleranza (giorni) tra l'ultimo giorno disponibile e il 30/11 per considerare
+    # l'anno completo. Assorbe i buchi di fine anno e un forecast che arriva a fine novembre.
+    complete_year_end_tolerance_days: int = 3
+
     # inferenza live: prior meteorologico e isteresi (ex-getattr con fallback hardcoded)
     prior_penalty: float = 0.75
     expected_margin: float = 0.35
@@ -142,6 +182,8 @@ class MeteoSeasonConfig:
             raise ValueError("expected_margin must be >= 0")
         if self.switch_gap_min < 0:
             raise ValueError("switch_gap_min must be >= 0")
+        if self.complete_year_end_tolerance_days < 0:
+            raise ValueError("complete_year_end_tolerance_days must be >= 0")
         # cold_snap_z può essere negativa (cattura anche il lato caldo, utile per debug),
         # ma valori < -3.0 sarebbero semanticamente privi di senso.
         if self.cold_snap_z < -3.0:
@@ -327,6 +369,7 @@ class MeteoContiguousSeasonModel:
             weather_day_signals=sig,
             cold_snap=cold_snap,
             cold_snap_score=max(0.0, cs_score),
+            cold_snap_score_signed=cs_score,
         )
 
 
@@ -354,6 +397,49 @@ class MeteoContiguousSeasonModel:
             prev = dd
         out.append((start, prev, cur))
         return out
+
+    def hot_regime_ends(self, until: Optional[date] = None) -> Dict[int, date]:
+        """Fine del regime dinamico "hot" (RMOT) per anno meteo, fino a ``until``.
+
+        Stima termica a memoria breve (~5 giorni), da confrontare con l'inizio
+        d'autunno del segmentatore (medie a 28 giorni, quindi in ritardo).
+        Solo diagnostica: non guida l'impianto.
+        """
+        return regime_end_by_year(
+            {d: sig.regime_dynamic for d, sig in self._signals.items()},
+            regime="hot",
+            until=until,
+        )
+
+    def regime_spans(self, until: Optional[date] = None) -> Dict[int, Dict[str, RegimeSpan]]:
+        """Inizio e fine dei regimi dinamici hot/cold (RMOT) per anno meteo.
+
+        Stessa fonte di ``hot_regime_ends``; solo diagnostica, non guida l'impianto.
+        """
+        return regime_spans_by_year(
+            {d: sig.regime_dynamic for d, sig in self._signals.items()},
+            until=until,
+        )
+
+    def regime_periods(self, until: Optional[date] = None) -> List[RegimePeriod]:
+        """Tutti i periodi cold/mild/hot (RMOT) in ordine cronologico, fino a ``until``.
+
+        Alimenta la timeline di dashboard. Solo diagnostica: non guida l'impianto.
+        """
+        return regime_periods(
+            {d: sig.regime_dynamic for d, sig in self._signals.items()},
+            until=until,
+        )
+
+    def regime_forecast(self, today: date) -> List[RegimeForecastDay]:
+        """Regime dinamico previsto per i giorni dopo ``today``, con anticipo e peso.
+
+        Solo diagnostica: non guida l'impianto e non modifica i periodi osservati.
+        """
+        return regime_forecast_days(
+            {d: sig.regime_dynamic for d, sig in self._signals.items()},
+            today=today,
+        )
 
     def coverage(self) -> Tuple[Optional[date], Optional[date], int]:
         """Copertura dell'output segmentato."""
@@ -417,10 +503,12 @@ class MeteoContiguousSeasonModel:
 
         T: Dict[date, float] = {}
         Tlow: Dict[date, Optional[float]] = {}
+        Thigh: Dict[date, float] = {}
         Dew: Dict[date, Optional[float]] = {}
         Wind: Dict[date, Optional[float]] = {}
         Cloud: Dict[date, Optional[float]] = {}
 
+        skipped_no_tmin = 0
         for dd in days:
             row = daily[dd]
             if self._is_failed_row(row):
@@ -429,8 +517,19 @@ class MeteoContiguousSeasonModel:
                 # per meteo-model, senza temperatura non possiamo fare nulla
                 continue
 
-            T[dd] = float(row["native_temperature"])
-            Tlow[dd] = float(row["native_templow"]) if row.get("native_templow") is not None else None
+            t_max = float(row["native_temperature"])
+            t_min = float(row["native_templow"]) if row.get("native_templow") is not None else None
+            if self._cfg.use_true_daily_mean:
+                if t_min is None:
+                    # Senza Tmin la media vera non esiste: giorno escluso (gap gestito
+                    # da rolling_min_frac), mai sostituita dalla sola Tmax.
+                    skipped_no_tmin += 1
+                    continue
+                T[dd] = 0.5 * (t_max + t_min)
+            else:
+                T[dd] = t_max
+            Tlow[dd] = t_min
+            Thigh[dd] = t_max
             Dew[dd] = float(row["native_dew_point"]) if row.get("native_dew_point") is not None else None
             Wind[dd] = float(row["native_wind_speed"]) if row.get("native_wind_speed") is not None else None
 
@@ -440,6 +539,13 @@ class MeteoContiguousSeasonModel:
             else:
                 ccf = float(cc)
                 Cloud[dd] = (ccf / 100.0) if ccf > 1.0 else ccf
+
+        if skipped_no_tmin:
+            log_debug(
+                _LOGGER,
+                "Segnali meteo: %d giorni esclusi perché senza Tmin (media vera non calcolabile)",
+                skipped_no_tmin,
+            )
 
         def _min_required(n: int, frac: float) -> int:
             frac = max(0.0, min(1.0, frac))
@@ -471,6 +577,10 @@ class MeteoContiguousSeasonModel:
                 return None
             return sum(vals) / len(vals)
 
+        # RMOT e regime dinamico (shadow): scala veloce, affianca t_smooth (scala lenta).
+        rmot_by_day: Dict[date, Optional[float]] = {dd: compute_rmot(T, dd) for dd in sorted(T)}
+        regime_by_day = classify_regimes(rmot_by_day)
+
         out: Dict[date, WeatherDaySignals] = {}
         for dd in days:
             row = daily[dd]
@@ -499,6 +609,9 @@ class MeteoContiguousSeasonModel:
                 t_smooth=t_sm,
                 dew_smooth=dew_sm,
                 trend=trend,
+                t_rmot=rmot_by_day.get(dd),
+                regime_dynamic=regime_by_day.get(dd),
+                t_max=Thigh.get(dd),
             )
 
         return out
@@ -596,13 +709,11 @@ class MeteoContiguousSeasonModel:
         return out
 
     def _regime_hint(self, sig: WeatherDaySignals) -> RegimeHint:
-        regime_hint = "mild"
-        if sig.t_smooth is not None:
-            if sig.t_smooth <= 8.0:
-                regime_hint = "cold"
-            elif sig.t_smooth >= 22.0:
-                regime_hint = "hot"
-        return regime_hint
+        """Regime storico da ``t_smooth`` (senza isteresi): è quello che guida l'impianto.
+
+        Il regime dinamico (RMOT) è in ``sig.regime_dynamic``, solo diagnostico.
+        """
+        return legacy_regime(sig.t_smooth)
 
     # ------------------------- infer prototypes ------------------------------
 
@@ -931,7 +1042,7 @@ class MeteoContiguousSeasonModel:
         cold_snap_score nel WeatherSeason è sempre >= 0 (saturato a zero se negativo)
         per evitare confusione nella lettura del campo: un valore "assente" è 0.0,
         non un negativo che potrebbe essere frainteso come errore.
-        Il segno informativo rimane accessibile solo attraverso il reason string.
+        Il segno è esposto in ``cold_snap_score_signed`` (e nel reason string).
         """
         from dataclasses import replace as _dc_replace
 
@@ -949,6 +1060,7 @@ class MeteoContiguousSeasonModel:
                 ws,
                 cold_snap=cold_snap,
                 cold_snap_score=max(0.0, cs),
+                cold_snap_score_signed=cs,
                 reason=reason,
             )
         return result
@@ -977,12 +1089,38 @@ class MeteoContiguousSeasonModel:
         lo, hi = self._meteo_year_bounds(y)
         return sorted(d for d in self._signals if lo <= d <= hi)
 
+    def _is_meteo_year_complete(self, y: int, year_days: List[date]) -> bool:
+        """True se l'anno meteo ``y`` (Dic y-1 → Nov y) è coperto fino a fine novembre.
+
+        Completo se:
+          - l'ultimo giorno con segnali è entro ``complete_year_end_tolerance_days``
+            dal 30/11 (forecast incluso), oppure
+          - i segnali proseguono oltre il 30/11: anno già concluso, eventuali buchi
+            finali non devono escluderlo per sempre dalla segmentazione.
+        """
+        _, year_end = self._meteo_year_bounds(y)
+        tolerance = timedelta(days=self._cfg.complete_year_end_tolerance_days)
+        if year_days[-1] >= year_end - tolerance:
+            return True
+        return bool(self._signals) and max(self._signals) > year_end
+
     def _segment_all_years(self) -> Dict[date, WeatherSeason]:
         out: Dict[date, WeatherSeason] = {}
         for y in self._meteo_years_present():
             year_days = self._meteo_year_days(y)
             if len(year_days) < self._cfg.min_days_per_year:
                 # anno meteorologico troppo incompleto: inferenza live coprirà.
+                continue
+            if self._cfg.require_complete_year and not self._is_meteo_year_complete(y, year_days):
+                # anno in corso: segmentarlo forzerebbe 4 segmenti su dati troncati
+                # (ultimo segmento = SUMMER fino al bordo del forecast). Lo copre infer().
+                log_debug(
+                    _LOGGER,
+                    "Meteo year %s non segmentato: incompleto (ultimo giorno=%s < fine anno=%s); uso infer().",
+                    y,
+                    year_days[-1],
+                    self._meteo_year_bounds(y)[1],
+                )
                 continue
             if len(year_days) > self._cfg.max_days_per_year:
                 year_days = year_days[: self._cfg.max_days_per_year]

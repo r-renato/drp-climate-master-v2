@@ -89,6 +89,13 @@ class OperativeSeason(StrEnum):
 # -----------------------------------------------------------------------------
 
 RegimeHint = Literal["cold", "mild", "hot"]
+DynamicRegime = Literal["cold", "cool", "mild", "hot", "torrid"]
+"""Regime dinamico (RMOT, shadow): come ``RegimeHint`` più "cool" (fresco, tra cold e mild)
+e "torrid" (ondata di calore, sopra hot).
+
+"cool" e "torrid" esistono solo nel regime dinamico diagnostico: l'impianto usa ``RegimeHint``
+(``legacy_regime`` su ``t_smooth``), che non li produce mai.
+"""
 
 # -----------------------------------------------------------------------------
 # Core models
@@ -133,7 +140,16 @@ class WeatherDaySignals:
     t_smooth: Optional[float]
     dew_smooth: Optional[float]
     trend: Optional[float]
-    
+
+    # RMOT (EN 16798-1, memoria ~5 giorni) e regime dinamico derivato (shadow).
+    # None = dato non disponibile (copertura insufficiente): ricadere su t_smooth.
+    t_rmot: Optional[float] = None
+    regime_dynamic: Optional[DynamicRegime] = None
+
+    # Massima giornaliera del provider (``native_temperature``). Solo informativa:
+    # ``t_mean`` resta la media vera (Tmax+Tmin)/2. None = dato non disponibile.
+    t_max: Optional[float] = None
+
 @dataclass(frozen=True, slots=True)
 class WeatherSeason:
     """Classificazione e diagnostica stagionale basata sul meteo.
@@ -146,6 +162,8 @@ class WeatherSeason:
       - ``cold_snap`` / ``cold_snap_score``: il giorno è più freddo del
         tipico per la stagione assegnata? (deviazione intra-stagionale firmata).
         Positivo = più freddo del prototipo; negativo = più caldo.
+        ``cold_snap_score`` è saturato a zero (mai negativo); ``cold_snap_score_signed`` ne è la
+        versione con segno, per mostrare anche il lato caldo.
         Soglia default: cold_snap_z=0.0 (metà fredda della distribuzione).
         Indipendente da ``anomaly``: una primavera fresca ha anomaly=False,
         cold_snap=True.
@@ -161,12 +179,26 @@ class WeatherSeason:
     weather_day_signals: WeatherDaySignals
 
     windows: Optional[List[Tuple[date, date, Seasons]]] = None
+    # Fine del regime dinamico "hot" (RMOT) per anno meteo {anno: primo giorno non-hot}.
+    # Diagnostica: confronto con l'inizio d'autunno del segmentatore ML.
+    hot_regime_ends: Optional[Dict[int, date]] = None
+    # Inizio/fine dei regimi dinamici hot e cold per anno meteo {anno: {regime: RegimeSpan}}.
+    # Diagnostica: non guida l'impianto.
+    regime_spans: Optional[Dict[int, Dict[str, RegimeSpan]]] = None
+    # Tutti i periodi cold/mild/hot in ordine cronologico, per la timeline. Diagnostica.
+    regime_periods: Optional[List[RegimePeriod]] = None
+    # Regime previsto per i giorni futuri (forecast), con peso di affidabilità. Diagnostica.
+    regime_forecast: Optional[List[RegimeForecastDay]] = None
     # Deviazione termica intra-stagionale (firmata, in z-space robusto).
     # Positivo = più freddo del prototipo stagionale (cold snap).
     # Negativo = più caldo del prototipo.
     # Valorizzato da MeteoContiguousSeasonModel dopo _fit_infer_prototypes().
     cold_snap: bool = False
     cold_snap_score: float = 0.0
+    # Stessa deviazione di ``cold_snap_score`` ma CON SEGNO (non saturata a zero): positivo = più freddo
+    # del normale per il giorno, negativo = più caldo. Solo diagnostica (dashboard): l'impianto continua
+    # a usare ``cold_snap`` e ``cold_snap_score`` invariati.
+    cold_snap_score_signed: float = 0.0
 
     def __post_init__(self) -> None:
         if self.anomaly_score < 0:
@@ -174,6 +206,68 @@ class WeatherSeason:
 
     def replace_windows(self, windows: List[Tuple[date, date, Seasons]]) -> WeatherSeason:
         return replace(self, windows=windows)
+
+    def replace_hot_regime_ends(self, ends: Dict[int, date]) -> WeatherSeason:
+        return replace(self, hot_regime_ends=ends)
+
+    def replace_regime_spans(self, spans: Dict[int, Dict[str, RegimeSpan]]) -> WeatherSeason:
+        return replace(self, regime_spans=spans)
+
+    def replace_regime_periods(self, periods: List[RegimePeriod]) -> WeatherSeason:
+        return replace(self, regime_periods=periods)
+
+    def replace_regime_forecast(self, forecast: List[RegimeForecastDay]) -> WeatherSeason:
+        return replace(self, regime_forecast=forecast)
+
+@dataclass(frozen=True, slots=True)
+class RegimeSpan:
+    """Sintesi dei periodi di un regime termico dinamico in un anno meteo.
+
+    ``start`` è l'inizio del primo periodo, ``end`` il primo giorno successivo
+    all'ultimo periodo (``None`` se il regime è ancora in corso). ``start_known``
+    è ``False`` quando lo storico inizia già dentro il regime: ``start`` è allora
+    solo un limite superiore. ``periods`` conta le ondate separate da pause,
+    ``days`` i giorni totali in regime.
+    """
+
+    start: date
+    end: Optional[date]
+    start_known: bool
+    periods: int
+    days: int
+
+
+@dataclass(frozen=True, slots=True)
+class RegimePeriod:
+    """Un singolo periodo continuo in un regime termico dinamico (cold/mild/hot).
+
+    ``start`` è il primo giorno nel regime; ``end`` il primo giorno successivo in
+    un regime diverso (``None`` = ancora in corso all'ultimo giorno noto).
+    ``start_known`` è ``False`` se lo storico inizia già dentro il regime
+    (``start`` è allora solo un limite superiore). ``days`` = giorni nel regime.
+    """
+
+    regime: str
+    start: date
+    end: Optional[date]
+    start_known: bool
+    days: int
+
+
+@dataclass(frozen=True, slots=True)
+class RegimeForecastDay:
+    """Regime dinamico *previsto* per un giorno futuro (da forecast meteo).
+
+    ``lead_days`` = giorni di anticipo rispetto a oggi (1 = domani). ``weight`` in
+    [0, 1] esprime l'affidabilità: i primi giorni sono i più attendibili, i
+    successivi solo informativi. Diagnostica: non guida l'impianto.
+    """
+
+    day: date
+    regime: str
+    lead_days: int
+    weight: float
+
 
 @dataclass(frozen=True, slots=True)
 class SeasonState:

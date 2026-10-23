@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Callable, Optional
 
+from ...helpers.logger import log_warning
+
 from .model import PlantFsmOutput, PlantFsmState, PlantPhase, StagingState
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def fsm_pump_gate(phase: PlantPhase) -> tuple[bool, bool]:
@@ -84,6 +89,15 @@ class PlantFsmInputs:
     # Uscita solo su reset esplicito (maintenance=False).
     maintenance: bool = False
 
+    # ── Campi P-07b: ventilazione-sola come fase FSM reale ──
+    # True se la decisione richiede VMC accesa (decision.vmc.power), a
+    # prescindere da request_on idronico. Guida OFF<->VMC_ONLY.
+    vmc_request_on: bool = False
+    # Solo diagnostico: usato per il messaggio di log quando request_on
+    # idronico compare (in contraddizione col contratto PlantMode) mentre
+    # si è in VMC_ONLY. Non influenza alcuna transizione.
+    mode: Optional[str] = None
+
 
 def _pdc_known_off(inp: PlantFsmInputs) -> bool:
     """True se la PDC è nota (sensore disponibile) e nota spenta."""
@@ -145,6 +159,13 @@ def _handle_off(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmConfig, ela
     if inp.maintenance:
         return PlantPhase.MAINTENANCE, ["off->maintenance"]
     if not inp.request_on:
+        # P-07b: nessuna domanda idronica. Se c'è domanda di sola
+        # ventilazione, la FSM la gestisce esplicitamente come fase reale
+        # (VMC_ONLY) invece di lasciarla fuori dal proprio dominio: il
+        # bypass che applicava la VMC senza passare da fsm_step è stato
+        # rimosso dal sequencer (P-07b).
+        if inp.vmc_request_on:
+            return PlantPhase.VMC_ONLY, ["off->vmc_only"]
         return None, []
     # Lockout esplicito anche da OFF (es. dew-guard persistente che impedisce
     # il riavvio prima che la situazione sia rientrata — §5.1 escalation c).
@@ -299,6 +320,50 @@ def _handle_maintenance(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmCon
     return None, ["maintenance_active"]
 
 
+def _handle_vmc_only(st: PlantFsmState, inp: PlantFsmInputs, cfg: PlantFsmConfig, elapsed: float) -> _HandlerResult:
+    """Ventilazione-sola come fase FSM reale (P-07b).
+
+    Prima di P-07b, VENT_ONLY/IAQ_ONLY erano gestiti da un bypass nel
+    sequencer che applicava la VMC senza mai passare da fsm_step: FAULT,
+    LOCKOUT e MAINTENANCE non avevano quindi alcun effetto sulla VMC.
+    Questa fase chiude quella lacuna: la VMC ora segue lo stesso gating
+    forte di valvole/pompe.
+
+    Priorità: maintenance > fault > lockout > vmc_request_on.
+
+    La domanda idronica (request_on) viene deliberatamente IGNORATA come
+    trigger di transizione: per contratto, PlantMode.VENT_ONLY/IAQ_ONLY
+    implicano PDC=OFF e valvole chiuse (vedi contracts.py), quindi
+    request_on=True qui non dovrebbe mai potersi verificare. Se accade
+    comunque, è segnale di una violazione di contratto a monte (bug nel
+    resolver) e viene solo loggato come warning — non gestito come
+    transizione — per non introdurre comportamenti impliciti su un caso
+    che, per costruzione, non dovrebbe esistere.
+    """
+    if inp.maintenance:
+        return PlantPhase.MAINTENANCE, ["vmc_only->maintenance"]
+    if inp.fault_present:
+        return PlantPhase.FAULT, ["vmc_only->fault:hardware_alarm"]
+    if inp.lockout_requested:
+        duration = inp.lockout_duration_s if inp.lockout_duration_s > 0.0 else float(cfg.lockout_duration_s)
+        st.lockout_until = inp.now + timedelta(seconds=duration)
+        return PlantPhase.LOCKOUT, [f"vmc_only->lockout:{duration:.0f}s"]
+
+    if inp.request_on:
+        log_warning(
+            _LOGGER,
+            "FSM: request_on idronico ignorato in VMC_ONLY (mode=%s) — "
+            "possibile violazione contratto PlantMode.VENT_ONLY/IAQ_ONLY "
+            "a monte nel resolver (VENT_ONLY/IAQ_ONLY dovrebbero implicare "
+            "PDC OFF e valvole chiuse per contratto)",
+            inp.mode or "-",
+        )
+
+    if not inp.vmc_request_on:
+        return PlantPhase.OFF, ["vmc_only->off"]
+    return None, []
+
+
 _TRANSITION_HANDLERS: dict[PlantPhase, Callable[[PlantFsmState, PlantFsmInputs, PlantFsmConfig, float], _HandlerResult]] = {
     PlantPhase.OFF: _handle_off,
     PlantPhase.STARTING: _handle_starting,
@@ -308,6 +373,7 @@ _TRANSITION_HANDLERS: dict[PlantPhase, Callable[[PlantFsmState, PlantFsmInputs, 
     PlantPhase.LOCKOUT: _handle_lockout,
     PlantPhase.DEGRADED: _handle_degraded,
     PlantPhase.MAINTENANCE: _handle_maintenance,
+    PlantPhase.VMC_ONLY: _handle_vmc_only,
 }
 
 
@@ -315,21 +381,24 @@ _TRANSITION_HANDLERS: dict[PlantPhase, Callable[[PlantFsmState, PlantFsmInputs, 
 class _PhaseGating:
     allow_valves: bool
     allow_pumps: bool
+    allow_vmc: bool
 
 
 # Gating base per fase. STARTING ha eccezioni applicate in _build_output
 # (soppressione valvole su stall restart / PDC nota spenta) — vedi quel punto
 # per il rationale di sicurezza (niente acqua fredda in circolo senza energia).
 _BASE_GATING: dict[PlantPhase, _PhaseGating] = {
-    PlantPhase.OFF: _PhaseGating(allow_valves=False, allow_pumps=False),
-    PlantPhase.STARTING: _PhaseGating(allow_valves=True, allow_pumps=False),
-    PlantPhase.RUNNING: _PhaseGating(allow_valves=True, allow_pumps=True),
-    PlantPhase.STOPPING: _PhaseGating(allow_valves=False, allow_pumps=False),
-    PlantPhase.FAULT: _PhaseGating(allow_valves=False, allow_pumps=False),
+    PlantPhase.OFF: _PhaseGating(allow_valves=False, allow_pumps=False, allow_vmc=False),
+    PlantPhase.STARTING: _PhaseGating(allow_valves=True, allow_pumps=False, allow_vmc=True),
+    PlantPhase.RUNNING: _PhaseGating(allow_valves=True, allow_pumps=True, allow_vmc=True),
+    PlantPhase.STOPPING: _PhaseGating(allow_valves=False, allow_pumps=False, allow_vmc=False),
+    PlantPhase.FAULT: _PhaseGating(allow_valves=False, allow_pumps=False, allow_vmc=False),
     # §6: nuovi stati — fail-safe conservativo salvo DEGRADED (operativo parziale)
-    PlantPhase.LOCKOUT: _PhaseGating(allow_valves=False, allow_pumps=False),
-    PlantPhase.DEGRADED: _PhaseGating(allow_valves=True, allow_pumps=True),
-    PlantPhase.MAINTENANCE: _PhaseGating(allow_valves=False, allow_pumps=False),
+    PlantPhase.LOCKOUT: _PhaseGating(allow_valves=False, allow_pumps=False, allow_vmc=False),
+    PlantPhase.DEGRADED: _PhaseGating(allow_valves=True, allow_pumps=True, allow_vmc=True),
+    PlantPhase.MAINTENANCE: _PhaseGating(allow_valves=False, allow_pumps=False, allow_vmc=False),
+    # P-07b: ventilazione-sola — nessun idronico, VMC consentita.
+    PlantPhase.VMC_ONLY: _PhaseGating(allow_valves=False, allow_pumps=False, allow_vmc=True),
 }
 
 
@@ -353,11 +422,13 @@ def _build_output(st: PlantFsmState, inp: PlantFsmInputs, reasons: list[str]) ->
 
     return PlantFsmOutput(
         phase=phase,
-        plant_on=phase in (PlantPhase.STARTING, PlantPhase.RUNNING, PlantPhase.DEGRADED),
+        plant_on=phase in (PlantPhase.STARTING, PlantPhase.RUNNING, PlantPhase.DEGRADED, PlantPhase.VMC_ONLY),
         allow_valves=allow_valves,
         allow_pumps=gating.allow_pumps,
+        allow_vmc=gating.allow_vmc,
         force_close_valves=not allow_valves,
         force_pumps_off=not gating.allow_pumps,
+        force_vmc_off=not gating.allow_vmc,
         reasons=reasons or [phase.value],
     )
 

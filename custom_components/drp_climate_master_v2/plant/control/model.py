@@ -110,10 +110,9 @@ class SupplyActuationResult:
 class PlantPhase(str, Enum):
     """Fase logica della plant (FSM sopra lo staging idraulico).
 
-    I valori OFF..FAULT guidano la FSM (fsm_step).
-    VMC_ONLY è esclusivamente diagnostico: indica che il ciclo di staging
-    idraulico è stato bypassato (impianto fermo, solo VMC attiva).
-    Non è mai prodotto da fsm_step, ma compare nei log dell'attuatore.
+    Tutti i valori (inclusi VMC_ONLY, LOCKOUT, DEGRADED, MAINTENANCE) sono
+    prodotti e gestiti da fsm_step (P-07b): non esistono più fasi puramente
+    diagnostiche o bypassate a livello di sequencer.
     """
 
     # L'impianto è spento (staging idraulico fermo, valvole chiuse, pompe spente, VMC spenta).
@@ -121,11 +120,10 @@ class PlantPhase(str, Enum):
     OFF = "off"
 
     # L'impianto sta partendo (staging idraulico in transizione, valvole e pompe in apertura).
-    # In caso di sola ventilazione (vent_only / iaq_only) la fase viene saltata e si passa direttamente a RUNNING.
     # Tutti i comandi di attuazione sono permessi. 
     STARTING = "starting"
 
-    # L'impianto è in funzione (staging idraulico attivo, valvole e pompe aperte oppure è attiva solo la VMC).
+    # L'impianto è in funzione (staging idraulico attivo, valvole e pompe aperte).
     RUNNING = "running"
 
     # L'impianto sta fermarsi (staging idraulico in transizione, valvole e pompe in chiusura).
@@ -137,7 +135,15 @@ class PlantPhase(str, Enum):
     DEGRADED = "degraded"  # Operazione parziale (§6): VMC KO, pompa KO, sensore mancante
     MAINTENANCE = "maintenance"  # Blocco volontario per intervento tecnico (§6)
 
-    VMC_ONLY = "vmc_only"  # Diagnostico: bypass staging, solo VMC attuata
+    # Ventilazione-sola come fase FSM reale (P-07b): nessuna domanda idronica
+    # attiva (PDC/valvole/pompe a riposo per contratto PlantMode.VENT_ONLY/
+    # IAQ_ONLY), solo VMC gestita e gated dalla FSM come qualunque altra fase.
+    # Raggiungibile da OFF; esce verso OFF (cessata domanda VMC), FAULT,
+    # LOCKOUT o MAINTENANCE. Non transita mai verso STARTING/RUNNING: una
+    # domanda idronica che comparisse qui verrebbe ignorata (vedi
+    # _handle_vmc_only in fsm.py) perché in contraddizione con il contratto
+    # di PlantMode.VENT_ONLY/IAQ_ONLY.
+    VMC_ONLY = "vmc_only"
 
 @dataclass(slots=True)
 class PlantFsmState:
@@ -181,8 +187,10 @@ class PlantFsmOutput:
     plant_on: bool
     allow_valves: bool
     allow_pumps: bool
+    allow_vmc: bool
     force_close_valves: bool
     force_pumps_off: bool
+    force_vmc_off: bool
     reasons: list[str] = field(default_factory=list)
 
 
@@ -258,6 +266,8 @@ class PlantActuatorStatus:
     allow_pumps: bool = False
     force_close_valves: bool = False
     force_pumps_off: bool = False
+    allow_vmc: bool = False
+    force_vmc_off: bool = False
 
     direct_on: bool = False
     adj_on: bool = False
@@ -340,8 +350,10 @@ class PlantActuatorStatus:
             "FSM gating",
             f"  allow_valves       :: {fbool(self.allow_valves)}",
             f"  allow_pumps        :: {fbool(self.allow_pumps)}",
+            f"  allow_vmc          :: {fbool(self.allow_vmc)}",
             f"  force_close_valves :: {fbool(self.force_close_valves)}",
             f"  force_pumps_off    :: {fbool(self.force_pumps_off)}",
+            f"  force_vmc_off      :: {fbool(self.force_vmc_off)}",
             "------------------------------------------------------------------",
             "Supply (applied plan)",
             f"  direct_on          :: {fbool(self.direct_on)}",

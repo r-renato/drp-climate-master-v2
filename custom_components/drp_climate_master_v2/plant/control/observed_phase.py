@@ -55,4 +55,5 @@ def estimate_observed_phase(snapshot: PlantSnapshot, ctx: PlantControlContext) -
     # Nessuna richiesta: se qualcosa e ancora acceso -> stopping; altrimenti off.
     if any_observed_on:
         return ObservedPlantPhase(phase=PlantPhase.STOPPING, reasons=reasons or ["stopping_obs"])
+    
     return ObservedPlantPhase(phase=PlantPhase.OFF, reasons=reasons or ["off_obs"])

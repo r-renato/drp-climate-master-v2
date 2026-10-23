@@ -38,6 +38,7 @@ from .domain.models.runtime_schema import SensorPair
 
 from .helpers.sensor_aggregator import AggregatedValue
 from .helpers.logger import log_debug, log_exception, log_info, log_warning
+from .helpers.season.season_attributes import build_season_attributes
 from .helpers.utils import slugify, as_float
 
 from .const import (
@@ -705,62 +706,11 @@ class SeasonSensor(BaseSensor):
     @property
     def extra_state_attributes(self):
         """Return the extra state attributes of the device."""
-        def fnum(x, nd=1):
-            return f"{x:.{nd}f}" if x is not None else "-"
-        def fbool(b, on="on", off="off"):
-            return on if b is True else (off if b is False else "-")
-        
         data: dict[str, Any] = super().extra_state_attributes
         data["category"] = EntityCategory.DIAGNOSTIC
 
         if self._coordinator.plant_snapshot is not None and self._coordinator.plant_snapshot.season is not None:
-            season = self._coordinator.plant_snapshot.season
-            window = season.window
-            weather = season.weather
-            
-            data["calendar window"] = f"{window.start.isoformat()} - {window.end.isoformat()}"
-            # data["calendar window"] = [window.start.isoformat(), window.end.isoformat()]
-            data["calendar days"] = f"{season.days}"
-            data["calendar days passed"] = f"{season.passed}"
-            data["calendar days remaining"] = f"{season.remaining}"
-
-            # data["weather season"] = (
-            #     f"{weather.season} [anomaly={weather.anomaly}, score={fnum(weather.anomaly_score)}] "
-            # )
-            data["weather reason"] = {
-                "detect_model": season.weather_detect_model,
-                "anomaly": weather.anomaly,
-                "score": round(weather.anomaly_score, 2),
-                "cold_snap": weather.cold_snap,
-                "cold_snap_score": round(weather.cold_snap_score, 2),
-            }
-            data["weather regime"] = weather.regime_hint
-            # data["weather signals"] = (
-            #     f"t_low={weather.weather_day_signals.t_low} °C ",
-            #     f"t_mean={weather.weather_day_signals.t_mean} °C ",
-            #     f"dewp={weather.weather_day_signals.dew} °C ",
-            #     f"wind={weather.weather_day_signals.wind} km/h ",
-            #     f"cloud={fnum(weather.weather_day_signals.cloud*100) if weather.weather_day_signals.cloud else '-'} %",        
-            # )
-            data["weather signals"] = {
-                "t_low": {weather.weather_day_signals.t_low},
-                "t_mean": {weather.weather_day_signals.t_mean},
-                "dewp": {weather.weather_day_signals.dew},
-                "wind": {weather.weather_day_signals.wind},
-                "cloud": {fnum(weather.weather_day_signals.cloud*100) if weather.weather_day_signals.cloud else '-'}
-            }
-
-
-            # data["weather signals eng."] = (
-            #     f"smooth=[t={fnum(season.weather.weather_day_signals.t_smooth)} °C ",
-            #     f"dewp={fnum(season.weather.weather_day_signals.dew_smooth)} °C] ",
-            #     f"trend={fnum(season.weather.weather_day_signals.trend)}",
-            # )
-            data["weather signals eng."] = {
-                "smooth": round(season.weather.weather_day_signals.t_smooth,2 ) if season.weather.weather_day_signals.t_smooth is not None else None,
-                "dewp": round(season.weather.weather_day_signals.dew_smooth, 2) if season.weather.weather_day_signals.dew_smooth is not None else None,
-                "trend": round(season.weather.weather_day_signals.trend, 2) if season.weather.weather_day_signals.trend is not None else None
-            }
+            data.update(build_season_attributes(self._coordinator.plant_snapshot.season))
         return data
     
     def _slave_update(self) -> bool:
@@ -856,13 +806,13 @@ class PDCSensor(BaseSensor):
             data["heat coverage"]  = f"{fnum(signals.heat_cov, nd=0)} %"
             data["heat on thr"]    = f"{fnum(gating.heat_on_thr_c, nd=1)} °C"
             data["cool sur max"]   = f"{fnum(signals.cool_sur_max_c, nd=1)} °C"
-            data["cool coverage"]  = f"{fnum(signals.cool_cov, nd=0)} %"
+            data["cool coverage"]  = f"{fnum(signals.cool_cov*100, nd=0)} %"
 
             # Gating / quorum (il "se" la PDC parte)
             data["heat override"]  = gating.heat_override
             data["heat quorum ok"] = gating.heat_quorum_ok
             data["heat mean ok"]   = gating.heat_mean_ok
-            data["quorum cov req"] = f"{fnum(gating.quorum_cov_req, nd=0)} %"
+            data["quorum cov req"] = f"{fnum(gating.quorum_cov_req*100, nd=0)} %"
             data["any heat"]       = gating.any_heat
             data["any cool"]       = gating.any_cool
 

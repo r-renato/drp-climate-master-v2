@@ -23,7 +23,12 @@ from homeassistant.util import dt as dt_util
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
 from .coordinator import ClimateCoordinator
-from .weather.historical_fetcher import HistoricalFetcher, HistoricalFetcherConfig
+from .weather.historical_fetcher import (
+    HISTORY_CACHE_MAX_DAYS,
+    HISTORY_DAYS_BACK,
+    HistoricalFetcher,
+    HistoricalFetcherConfig,
+)
 from .weather.season_detector import SeasonDetector, SeasonDetectorConfig
 from ..domain.models.season import SeasonState
 from ..helpers.logger import log_debug, log_exception, log_info, log_warning
@@ -33,9 +38,17 @@ from ..helpers.weather.pirateweather_client import (
     ProviderOptions,
 )
 from ..helpers.scheduler import IntervalGatedSchedulerBase, ThrottledAsyncJob
+from ..helpers.season.season_attributes import (
+    format_season_log_line,
+    season_log_signature,
+)
 from ..const import DOMAIN, SEASON_STATE
 
 _LOGGER = logging.getLogger(__name__)
+
+PW_HTTP_TIMEOUT_S: int = 45
+"""Timeout per richiesta PirateWeather: il time machine impiega ~6 s a freddo sulle date
+vecchie e ~15 s sotto carico; il default di 20 s produceva timeout a raffica."""
 
 
 @dataclass(slots=True)
@@ -56,10 +69,10 @@ class WeatherCoordinatorConfig:
     decider_debounce_cooldown_s: float = 20.0
 
     # --- Parametri fetch (delegati a HistoricalFetcherConfig) ---
-    days_back: int = 730
+    days_back: int = HISTORY_DAYS_BACK
     always_refresh_today: bool = True
     cache_persist: bool = True
-    cache_max_days: int = 740
+    cache_max_days: int = HISTORY_CACHE_MAX_DAYS
     cache_save_cooldown_s: float = 60.0
 
     # DEPRECATO — mantenuto per compatibilità configurazione esistente, non usato.
@@ -107,7 +120,7 @@ class WeatherCoordinator(IntervalGatedSchedulerBase):
             api_key=self._runtime_weather_config.historical_data.token,
             units=self._unit_system,
         )
-        pw_opts = ProviderOptions()
+        pw_opts = ProviderOptions(http_timeout_s=PW_HTTP_TIMEOUT_S)
         pw_client = PirateWeatherTimeMachineClient.from_hass(hass, pw_cfg, pw_opts)
 
         # Cache key (identica alla versione precedente: compatibilità cache on-disk)
@@ -133,6 +146,10 @@ class WeatherCoordinator(IntervalGatedSchedulerBase):
             forecast_provider=self._runtime_weather_config.forecast_data.provider,
         )
         self._detector = SeasonDetector(hass, detector_cfg)
+
+        # Firma dell'ultima riga di log stagionale emessa a INFO (calendario, meteo, sorgente):
+        # evita rumore ad ogni refresh, ma rende visibile ogni cambio di stagione/sorgente.
+        self._last_season_log_sig: tuple[str, str, str] | None = None
 
         # --- Base scheduler (daily gating + point-in-time tick) ---
         super().__init__(
@@ -294,11 +311,15 @@ class WeatherCoordinator(IntervalGatedSchedulerBase):
         # Questo può triggerare listener sincroni: hass.data è già aggiornato.
         self._coordinator.set_season_state(season_state)
 
-        log_debug(
+        # Una riga per ciclo (commissioning): INFO solo se cambia la firma
+        # (calendario, meteo, sorgente), DEBUG altrimenti.
+        sig = season_log_signature(season_state)
+        log = log_info if sig != self._last_season_log_sig else log_debug
+        self._last_season_log_sig = sig
+        log(
             _LOGGER,
-            "SeasonState propagata: season=%s source=%s as_of=%s healthy=%s",
-            season_state.weather.season if season_state.weather else "N/A",
-            season_state.detect_model,
+            "%s as_of=%s healthy=%s",
+            format_season_log_line(season_state),
             season_state.as_of,
             self._fetcher.is_healthy,
         )

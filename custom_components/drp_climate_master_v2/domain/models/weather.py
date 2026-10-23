@@ -17,6 +17,10 @@ class Forecast(TypedDict, total=False):
     """(Opzionale / non standard) Indicatore o contatore di errore legato a questa entry.
     Non è definito nello schema forecast dei Developer Docs; trattalo come metadata extra."""
 
+    failed_kind: str | None
+    """(Opzionale / non standard) "permanent" se ``failed`` conta fallimenti definitivi del
+    giorno. Assente nelle entry legacy: ``failed`` va allora riletto da zero (patch #21)."""
+
     timezone: str | None
     """(Opzionale / non standard) Timezone associata ai dati (es. 'Europe/Rome').
     Non è definita nello schema forecast dei Developer Docs; preferisci sempre `datetime` in UTC."""

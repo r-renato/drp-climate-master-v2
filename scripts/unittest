@@ -46,6 +46,9 @@ run_test "test_rc_model" \
 run_test "test_clo_met_provider" \
   python3 -m pytest "$PWD/test/unit/test_clo_met_provider.py" -v
 
+run_test "test_sequencer_purity" \
+  python3 -m pytest "$PWD/test/unit/test_sequencer_purity.py" -s -v
+
 run_test "sim_clo_met_provider" \
   python3 -m pytest "$PWD/test/sim/sim_clo_met_provider.py" -s -v
 

@@ -48,6 +48,10 @@ from ..utils import as_float, ratio_or_percent_to_int
 
 _LOGGER = logging.getLogger(__name__)
 
+FAILED_TRANSIENT_KEY = "_transient"
+"""Chiave (solo in memoria, mai persistita) con cui un Forecast "failed" segnala un
+guasto momentaneo: timeout, rete, 429/5xx. Il fetcher non lo conta come fallimento."""
+
 
 # ---------------------------
 # Types & helpers
@@ -258,12 +262,17 @@ class PirateWeatherDayClient:
         return f"{self._cfg.base_url}/***REDACTED***/{self._cfg.lat},{self._cfg.lon},{iso}"
 
     @staticmethod
-    def _failed_forecast(d: date) -> Forecast:
+    def _failed_forecast(d: date, *, transient: bool = False) -> Forecast:
+        """Forecast "failed" per il giorno ``d``.
+
+        ``transient=True`` indica un guasto momentaneo (timeout, rete, 429/5xx): il
+        chiamante NON deve contarlo come fallimento definitivo del giorno.
+        """
         # datetime obbligatoria nel tuo TypedDict, failed flag per downstream
-        return cast(Forecast, {
-            "datetime": as_iso_local(d),
-            "failed": 1,
-        })
+        out: dict[str, Any] = {"datetime": as_iso_local(d), "failed": 1}
+        if transient:
+            out[FAILED_TRANSIENT_KEY] = True
+        return cast(Forecast, out)
     
     @staticmethod
     def _parse_daily_payload(d: date, payload: dict[str, Any], *, units: str) -> Optional[Forecast]:
@@ -493,6 +502,7 @@ class PirateWeatherDayClient:
         res: Optional[Forecast] = None
         last_retry_after_s: float = 0.0
         status: int | str = "n/a"
+        transient = False  # ultimo esito negativo: guasto momentaneo (vs permanente)
 
         when = datetime(d.year, d.month, d.day, 12, 0, 0, tzinfo=timezone.utc)
         url = self._build_url(when)
@@ -519,6 +529,7 @@ class PirateWeatherDayClient:
                                 log_debug(_LOGGER, "PW daily(%s) json error: %r", d, e)
                                 payload = {}
 
+                            transient = False  # 200 con payload anomalo: errore del dato, non del servizio
                             res = self._parse_daily_payload(d, payload, units=self._cfg.units)
                             if res is not None:
                                 break
@@ -529,6 +540,7 @@ class PirateWeatherDayClient:
                                 break
 
                         elif status in self.RETRYABLE_STATUSES:
+                            transient = True
                             ra = _parse_retry_after(resp.headers.get("Retry-After"))
                             last_retry_after_s = max(last_retry_after_s, ra)
 
@@ -562,11 +574,13 @@ class PirateWeatherDayClient:
                             continue
 
                         elif status in self.NON_RETRYABLE_STATUSES:
+                            transient = False
                             log_warning(_LOGGER, "PW daily(%s) non-retryable status=%s url=%s", d, status, safe_url)
                             break
 
                         else:
                             # Unknown status -> conservative retry
+                            transient = True
                             if attempt >= self._opts.retries:
                                 log_warning(_LOGGER, "PW daily(%s) unexpected status=%s url=%s", d, status, safe_url)
                                 break
@@ -589,6 +603,7 @@ class PirateWeatherDayClient:
 
             except asyncio.TimeoutError as e:
                 status = "timeout"
+                transient = True
                 if attempt >= self._opts.retries:
                     log_warning(_LOGGER, "PW daily(%s) timeout: %r url=%s", d, e, safe_url)
                     break
@@ -598,6 +613,7 @@ class PirateWeatherDayClient:
 
             except aiohttp.ClientError as e:
                 status = type(e).__name__
+                transient = True
                 if attempt >= self._opts.retries:
                     log_warning(_LOGGER, "PW daily(%s) aiohttp error (%s): %r url=%s", d, status, e, safe_url)
                     break
@@ -607,6 +623,7 @@ class PirateWeatherDayClient:
 
             except Exception as e:  # noqa: BLE001
                 status = type(e).__name__
+                transient = True
                 if attempt >= self._opts.retries:
                     log_warning(_LOGGER,
                         "PW daily(%s) exception (%s): %r url=%s",
@@ -623,7 +640,7 @@ class PirateWeatherDayClient:
 
         # Se dopo tutti i tentativi non abbiamo dati validi, restituiamo Forecast "failed"
         if res is None:
-            res = self._failed_forecast(d)
+            res = self._failed_forecast(d, transient=transient)
 
         log_debug(_LOGGER,
             "PW daily(%s): status=%s elapsed=%.1fms ok=%s failed=%s",
@@ -681,10 +698,24 @@ class PirateWeatherTimeMachineClient:
     async def async_fetch_day(self, d: date) -> Optional[Forecast]:
         return await self._sf.run(d, lambda: self._fetch_one(d))
 
-    async def async_fetch_days(self, days: list[date]) -> dict[date, Historical]:
-        """Fetch multiple days and return only successful ones."""
-        # Preserve order is not required; return mapping.
-        tasks = [asyncio.create_task(self.async_fetch_day(d)) for d in days]
+    async def async_fetch_days(
+        self, days: list[date], *, max_concurrency: int | None = None
+    ) -> dict[date, Historical]:
+        """Scarica più giorni e restituisce l'esito per ciascuno (anche i "failed").
+
+        ``max_concurrency`` limita le richieste in volo per questa chiamata (in aggiunta
+        al semaforo del client): il backfill storico lo abbassa perché il time machine
+        risponde lentamente (~6 s) sulle date vecchie e sotto carico va in timeout/503.
+        """
+        local_sem = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+
+        async def _one(d: date) -> Optional[Forecast]:
+            if local_sem is None:
+                return await self.async_fetch_day(d)
+            async with local_sem:
+                return await self.async_fetch_day(d)
+
+        tasks = [asyncio.create_task(_one(d)) for d in days]
 
         # With return_exceptions=True, aio hints this as T | BaseException.
         results: list[Forecast | None | BaseException] = await asyncio.gather(*tasks, return_exceptions=True)
