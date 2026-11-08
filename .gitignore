@@ -1,3 +1,18 @@
+# ==========================================
+# PRIVATE REPOSITORY - DRP Climate Master
+# ==========================================
+
+# Private Git repository
+/private
+
+# Private technical documentation
+/docs
+
+# Claude Code - private configuration
+/.claude
+/.claude_old
+/CLAUDE.md
+
 .jekyll-cache/
 _site/
 __pycache__
@@ -14,3 +29,7 @@ archive
 aigen
 influx
 test/logs
+
+reference
+.claude
+.vscode
