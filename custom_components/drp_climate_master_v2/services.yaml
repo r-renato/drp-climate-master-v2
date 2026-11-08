@@ -1,3 +1,0 @@
-reload:
-  name: Reload
-  description: Reload the drp_climate_master_v2 integration configuration without restarting Home Assistant.

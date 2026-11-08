@@ -1,6 +1,6 @@
 -r requirements.txt
 #homeassistant==2025.10.4
-homeassistant==2026.3.0
+homeassistant==2026.10.4
 #psychroLib==2.5.0
 #pandas==2.2.3
 #simple-pid

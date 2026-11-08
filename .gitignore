@@ -1,5 +1,6 @@
 # ==========================================
-# PRIVATE REPOSITORY - DRP Climate Master
+# Elementi privati: non versionare
+# (repo privato in private/, link simbolici a docs, CLAUDE.md e .claude)
 # ==========================================
 
 # Private Git repository
@@ -10,12 +11,16 @@
 
 # Claude Code - private configuration
 /.claude
-/.claude_old
 /CLAUDE.md
+CLAUDE.local.md
 
 .jekyll-cache/
 _site/
 __pycache__
+.pytest_cache
+.ruff_cache
+.pyright
+htmlcov
 pythonenv*
 venv
 .venv
@@ -29,6 +34,7 @@ archive
 aigen
 influx
 test/logs
+tests/logs
 
 reference
 .claude

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Controlli completi di step: lint, formato, tipi, test. Log in tests/logs/ (ignorato da git).
+# Uso: scripts/test            (tutto)
+#      scripts/test -k dew     (argomenti passati a pytest)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+LOG_DIR="$PWD/tests/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/test_$(date +%Y-%m-%d_%H-%M-%S).log"
+echo "Log: $LOG_FILE"
+
+{
+  echo "== ruff check ==";           ruff check .
+  echo "== ruff format --check =="; ruff format --check .
+  echo "== pyright ==";              pyright
+  echo "== pytest ==";               pytest "$@"
+} 2>&1 | tee "$LOG_FILE"
