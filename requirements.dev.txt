@@ -8,15 +8,17 @@ influxdb-client==1.24.0
 holidays
 #
 pylint
-pytest
-pytest-asyncio
-# pyright
+pytest==9.2.0
+pytest-asyncio==1.4.1
+pyright==1.1.414
 # business-time
 # flake8
 # pylint
 # pytest
 # pytest-cov
+# S1: il plugin fissa la propria versione di homeassistant: al suo ingresso
+# va tolta la riga `homeassistant==` qui sopra (due pin diversi non si risolvono).
 # pytest-homeassistant-custom-component
-ruff
+ruff==0.17.3
 # black
 # mypy

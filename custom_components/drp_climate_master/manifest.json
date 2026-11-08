@@ -1,30 +1,12 @@
 {
   "domain": "drp_climate_master",
-  "name": "Climate Master (DRP)",
-  "manufacturer": "Domotic Residential Platform",
-  "version": "3.0",
-  "build": "0",
-  "documentation": "https://github.com/r-renato/home-climate-control",
-  "issue_tracker": "https://github.com/r-renato/home-climate-control/issues",
-  "iot_class": "cloud_polling",
-  "codeowners": [
-    "@r-renato"
-  ],
-  "requirements": [
-    "psychroLib==2.5.0",
-    "holidays",
-    "simple-pid"
-  ],
-  "r": "pythermalcomfort==2.5.4",
-  "rr": "cmake==3.16.8",
-  "config_flow": true,
-  "dependencies": [
-    "sensor",
-    "switch"
-  ],
-  "after_dependencies": [
-    "history",
-    "recorder",
-    "weather"
-  ]
+  "name": "DRP Climate Master",
+  "codeowners": ["@r-renato"],
+  "config_flow": false,
+  "documentation": "https://github.com/r-renato/drp-climate-master-v2",
+  "integration_type": "hub",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/r-renato/drp-climate-master-v2/issues",
+  "requirements": [],
+  "version": "3.0.0.dev0"
 }

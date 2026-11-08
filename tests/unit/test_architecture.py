@@ -2,6 +2,8 @@
 
 Pipeline (docs/architecture.md):
     monitor -> signals/safety/comfort -> decision -> control -> drivers/HA
+Piano di osservazione (pub/sub): bacheca dei segnali e bus di eventi (`bus`),
+osservatori (`observers`) e adattatore meteo (`weather`) NON comandano l'impianto.
 
 Regole applicate:
 1. LAYER: un componente puo' importare solo da layer INFERIORI (o da se stesso
@@ -11,6 +13,9 @@ Regole applicate:
 3. CLASSIFICAZIONE: ogni modulo/pacchetto di primo livello deve appartenere a
    un layer (o a BASE). Un componente nuovo senza layer fa fallire il test:
    la decisione architetturale va presa esplicitamente.
+4. PIANO DI OSSERVAZIONE: i componenti in FORBIDDEN_IMPORTS (osservatori, meteo)
+   non importano mai `control` o `drivers`: non possono emettere comandi e il
+   veto del dew-guard resta in un percorso unico e lineare.
 
 Il controllo e' fatto con `ast` (nessuna dipendenza esterna) e ignora i
 componenti non ancora creati: funziona dallo step S0 in poi.
@@ -22,9 +27,12 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 
-PACKAGE = "drp_climate_master_v3"
+PACKAGE = "drp_climate_master"
 ABSOLUTE_PREFIX = f"custom_components.{PACKAGE}"
 ROOT = Path(__file__).resolve().parents[2] / "custom_components" / PACKAGE
+
+# Sottocomponenti: una sotto-cartella con layer e purezza propri (`weather/pure`).
+SUBCOMPONENTS: dict[tuple[str, str], str] = {("weather", "pure"): "weather.pure"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,15 +48,29 @@ class Layer:
 LAYERS: tuple[Layer, ...] = (
     Layer(
         "orchestrazione",
-        frozenset({"coordinator", "climate", "sensor", "switch", "diagnostics", "config_flow", "runtime"}),
+        frozenset(
+            {
+                "coordinator",
+                "supervisor",
+                "climate",
+                "select",
+                "sensor",
+                "switch",
+                "diagnostics",
+                "config_flow",
+                "runtime",
+                "weather",
+                "observers",
+            }
+        ),
         allow_intra_layer=True,
     ),
     Layer("attuazione", frozenset({"control"})),
     Layer("decisione-e-hw", frozenset({"decision", "drivers"})),
-    Layer("segnali-e-guardrail", frozenset({"safety", "signals", "comfort"})),
+    Layer("segnali-e-guardrail", frozenset({"safety", "signals", "comfort", "weather.pure"})),
     Layer("osservazione", frozenset({"monitor"})),
     Layer("modelli-e-configurazione", frozenset({"profiles", "config"})),
-    Layer("fondamenta", frozenset({"domain", "physics"})),
+    Layer("fondamenta", frozenset({"domain", "physics", "bus"})),
 )
 
 # Importabili da qualsiasi layer; non devono dipendere da nessun componente.
@@ -56,8 +78,14 @@ BASE: frozenset[str] = frozenset({"const", "log"})
 
 # Logica pura: nessun import di homeassistant, funzioni testabili senza `hass`.
 PURE_COMPONENTS: frozenset[str] = frozenset(
-    {"physics", "signals", "safety", "comfort", "profiles", "decision", "domain"}
+    {"physics", "signals", "safety", "comfort", "profiles", "decision", "domain", "bus", "weather.pure"}
 )
+
+# Piano di osservazione: questi componenti non possono importare l'attuazione.
+FORBIDDEN_IMPORTS: dict[str, frozenset[str]] = {
+    "observers": frozenset({"control", "drivers"}),
+    "weather": frozenset({"control", "drivers"}),
+}
 
 _LAYER_OF: dict[str, int] = {c: i for i, layer in enumerate(LAYERS) for c in layer.components}
 
@@ -75,7 +103,16 @@ def component_of(path: Path, root: Path = ROOT) -> str:
     """Componente di primo livello di un file (nome pacchetto o nome modulo)."""
     rel = path.relative_to(root)
     first = rel.parts[0]
+    if len(rel.parts) > 2 and (first, rel.parts[1]) in SUBCOMPONENTS:
+        return SUBCOMPONENTS[(first, rel.parts[1])]
     return first[:-3] if first.endswith(".py") else first
+
+
+def _component_of_parts(parts: list[str]) -> str:
+    """Componente di un import risolto in parti (gestisce i sottocomponenti)."""
+    if len(parts) > 1 and (parts[0], parts[1]) in SUBCOMPONENTS:
+        return SUBCOMPONENTS[(parts[0], parts[1])]
+    return parts[0]
 
 
 def collect_imports(source: str, pkg_parts: tuple[str, ...]) -> list[ImportRef]:
@@ -99,9 +136,10 @@ def collect_imports(source: str, pkg_parts: tuple[str, ...]) -> list[ImportRef]:
             base = list(pkg_parts[: len(pkg_parts) - up])
             if node.module:
                 target = base + node.module.split(".")
-                refs.append(ImportRef(None, target[0], node.lineno))
+                refs.append(ImportRef(None, _component_of_parts(target), node.lineno))
             elif base:
-                refs.append(ImportRef(None, base[0], node.lineno))
+                for alias in node.names:
+                    refs.append(ImportRef(None, _component_of_parts([*base, alias.name]), node.lineno))
             else:  # `from . import x`, `from .. import x` a livello root
                 for alias in node.names:
                     refs.append(ImportRef(None, alias.name, node.lineno))
@@ -111,7 +149,7 @@ def collect_imports(source: str, pkg_parts: tuple[str, ...]) -> list[ImportRef]:
 def _resolve_absolute(dotted: str, line: int) -> ImportRef:
     if dotted == ABSOLUTE_PREFIX or dotted.startswith(ABSOLUTE_PREFIX + "."):
         rest = dotted[len(ABSOLUTE_PREFIX) :].lstrip(".")
-        return ImportRef(None, rest.split(".")[0] if rest else None, line)
+        return ImportRef(None, _component_of_parts(rest.split(".")) if rest else None, line)
     return ImportRef(dotted.split(".")[0], None, line)
 
 
@@ -133,6 +171,12 @@ def layer_violations(component: str, refs: list[ImportRef]) -> list[str]:
         direction = "layer superiore" if tgt < own else "componente fratello"
         out.append(f"riga {ref.line}: {component} -> {target} ({direction})")
     return out
+
+
+def forbidden_violations(component: str, refs: list[ImportRef]) -> list[str]:
+    """Violazioni della regola 4: osservatori/meteo che importano l'attuazione."""
+    banned = FORBIDDEN_IMPORTS.get(component, frozenset())
+    return [f"riga {r.line}: {component} importa {r.component} (vietato)" for r in refs if r.component in banned]
 
 
 def purity_violations(component: str, refs: list[ImportRef]) -> list[str]:
@@ -175,6 +219,15 @@ def test_pure_components_do_not_import_homeassistant() -> None:
     assert not problems, "Layer puri con import HA:\n" + "\n".join(problems)
 
 
+def test_observation_plane_does_not_import_actuation() -> None:
+    problems: list[str] = []
+    for path in _py_files():
+        refs = collect_imports(path.read_text(encoding="utf-8"), _pkg_parts(path))
+        for v in forbidden_violations(component_of(path), refs):
+            problems.append(f"{path.relative_to(ROOT)}: {v}")
+    assert not problems, "Osservatori/meteo con import vietati:\n" + "\n".join(problems)
+
+
 def test_every_top_level_component_is_classified() -> None:
     known = set(_LAYER_OF) | BASE | {"__init__"}
     found = {component_of(p) for p in _py_files()}
@@ -210,7 +263,9 @@ def test_layer_table_is_consistent() -> None:
 
 def _check(component: str, source: str, pkg: tuple[str, ...]) -> list[str]:
     refs = collect_imports(source, pkg)
-    return layer_violations(component, refs) + purity_violations(component, refs)
+    return (
+        layer_violations(component, refs) + purity_violations(component, refs) + forbidden_violations(component, refs)
+    )
 
 
 def test_checker_flags_upward_import() -> None:
@@ -255,3 +310,35 @@ def test_checker_allows_base_and_own_component() -> None:
 
 def test_orchestration_layer_allows_intra_layer_imports() -> None:
     assert _check("climate", "from .coordinator import Coordinator\n", ()) == []
+
+
+def test_checker_flags_observer_importing_control() -> None:
+    assert _check("observers", "from ..control import fsm\n", ("observers",))
+    assert _check("observers", "from ..drivers import hmi080\n", ("observers",))
+
+
+def test_checker_allows_observer_importing_bus_and_decision_types() -> None:
+    assert (
+        _check(
+            "observers", "from ..bus import EventBus\nfrom ..decision.contracts import PlantDecision\n", ("observers",)
+        )
+        == []
+    )
+
+
+def test_weather_adapter_cannot_import_actuation() -> None:
+    assert _check("weather", "from ..control import fsm\n", ("weather",))
+
+
+def test_weather_pure_is_a_pure_subcomponent() -> None:
+    assert _check("weather.pure", "from homeassistant.core import HomeAssistant\n", ("weather", "pure"))
+    # l'adattatore HA puo' importare la parte pura (verso il basso)
+    assert _check("weather", "from .pure import rmot\n", ("weather",)) == []
+    # la parte pura non puo' importare l'adattatore
+    assert _check("weather.pure", "from .. import adapter\n", ("weather", "pure"))
+
+
+def test_subcomponent_resolution() -> None:
+    assert component_of(ROOT / "weather" / "pure" / "rmot.py") == "weather.pure"
+    assert component_of(ROOT / "weather" / "adapter.py") == "weather"
+    assert component_of(ROOT / "bus" / "board.py") == "bus"

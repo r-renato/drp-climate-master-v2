@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from custom_components.drp_climate_master_v3 import const
+from custom_components.drp_climate_master import const
 
 PACKAGE_DIR = Path(const.__file__).parent
 MANIFEST = json.loads((PACKAGE_DIR / "manifest.json").read_text(encoding="utf-8"))

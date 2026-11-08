@@ -2,11 +2,11 @@
 name = "drp-climate-master"
 version = "3.0.0.dev0"
 description = "DRP Climate Master v3 - integrazione Home Assistant per impianto HVAC residenziale"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 
 [tool.ruff]
 line-length = 120
-target-version = "py313"
+target-version = "py314"
 extend-exclude = ["reference"]
 
 [tool.ruff.lint]
@@ -21,12 +21,13 @@ known-first-party = ["custom_components"]
 [tool.pyright]
 include = ["custom_components", "tests"]
 exclude = ["reference", "**/__pycache__"]
-pythonVersion = "3.13"
+pythonVersion = "3.14"
 typeCheckingMode = "standard"
 reportMissingTypeStubs = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra"
